@@ -1,19 +1,47 @@
 """Воркер премиум-трафика: подсчёт, снятие, возврат, устойчивость к сбоям."""
 
+import contextlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+from app.database.crud.premium_traffic import get_or_create_state, get_state
+from app.database.models import (
+    PromoGroup,
+    ServerSquad,
+    Subscription,
+    SubscriptionPremiumTraffic,
+    Tariff,
+    User,
+    tariff_promo_groups,
+)
 from app.services.premium_traffic_service import PremiumTrafficService, _Target
 from app.utils.premium_traffic import BYTES_IN_GB, PremiumSquadConfig
+from tests.fixtures.sqlite_memory import memory_session
 
 
 SQUAD = 'e4f819ca-2cfd-4425-9354-16a262b180c1'
+OTHER_SQUAD = '82a12389-14d6-40c6-b320-4674f6bbb344'
 NODE_A = '3ca79b63-1b0d-49ec-b2d7-6eb264a560c5'
 NODE_B = '7f2c1a90-0000-4000-8000-000000000002'
 PANEL_USER_ID = 42
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
+
+# Уборке осиротевших состояний нужны настоящие подписка и тариф: она сверяет
+# строку состояния с премиальным списком ТЕКУЩЕГО тарифа подписки.
+ORPHAN_TABLES = (
+    User.__table__,
+    PromoGroup.__table__,
+    Tariff.__table__,
+    # Тариф тянет промогруппы жадно — без связки запрос к подпискам падает.
+    tariff_promo_groups,
+    Subscription.__table__,
+    SubscriptionPremiumTraffic.__table__,
+    # Имена премиум-серверов воркер подтягивает из справочника.
+    ServerSquad.__table__,
+)
 
 
 class FakeRemnawaveApi:
@@ -525,3 +553,235 @@ class TestNotifications:
         service.set_bot(object())  # обращение к нему упало бы
 
         await service._notify_exhausted(_target(telegram_id=None), _state())
+
+
+# ------------------------------------------------- осиротевшие состояния
+
+
+async def _seed_subscription(db, *, premium_limits, connected=(SQUAD,), subscription_id=1, tariff_id=1):
+    """Подписка с тарифом: премиальный список задаётся `premium_limits`."""
+    db.add(
+        Tariff(
+            id=tariff_id,
+            name='Премиум',
+            period_prices={'30': 10000},
+            traffic_limit_gb=100,
+            device_limit=1,
+            server_traffic_limits=premium_limits,
+            traffic_reset_mode='MONTH',
+        )
+    )
+    db.add(
+        Subscription(
+            id=subscription_id,
+            user_id=1,
+            status='active',
+            tariff_id=tariff_id,
+            connected_squads=list(connected),
+            start_date=NOW - timedelta(days=10),
+            end_date=NOW + timedelta(days=20),
+            remnawave_id=PANEL_USER_ID,
+        )
+    )
+    await db.commit()
+
+
+async def _seed_state(db, *, subscription_id=1, squad_uuid=SQUAD, is_limited=False):
+    state = await get_or_create_state(
+        db,
+        subscription_id,
+        squad_uuid,
+        limit_bytes=5 * BYTES_IN_GB,
+        period_start_at=NOW,
+    )
+    state.is_limited = is_limited
+    await db.commit()
+    return state
+
+
+def _run_worker_against(monkeypatch, db, *, push=None):
+    """Подменить сессию и панель так, чтобы `process_once` шёл по нашей БД.
+
+    Возвращает список наборов сквадов, уехавших в панель.
+    """
+    pushed: list[list[str]] = []
+
+    @contextlib.asynccontextmanager
+    async def _session():
+        yield db
+
+    monkeypatch.setattr('app.services.premium_traffic_service.AsyncSessionLocal', _session)
+
+    class _Service:
+        is_configured = True
+
+        @contextlib.asynccontextmanager
+        async def get_api_client(self):
+            yield FakeRemnawaveApi(panel_user=SimpleNamespace(last_traffic_reset_at=None, active_internal_squads=None))
+
+    monkeypatch.setattr('app.services.premium_traffic_service.RemnaWaveService', _Service)
+
+    async def _default_push(_api, _subscription_id, *, user_id, active_internal_squads):
+        pushed.append(list(active_internal_squads or []))
+
+    monkeypatch.setattr(
+        'app.services.grace_access_runtime.update_panel_user_grace_safe',
+        push or _default_push,
+    )
+    return pushed
+
+
+class TestOrphanStates:
+    """Состояние без конфигурации запирает клиента навсегда.
+
+    `_collect_targets` выдаёт пару «подписка + сквад», только пока сквад
+    премиальный в текущем тарифе. Стоит убрать его из премиального списка или
+    сменить тариф — и ветки возврата до подписки уже не доходят: `is_limited`
+    остаётся поднятым, а `effective_panel_squads` продолжает вычитать сквад из
+    набора для панели.
+    """
+
+    async def test_tariff_switch_without_premium_clears_states(self, monkeypatch):
+        """Переход на тариф без премиум-лимитов снимает блокировку, а не запирает клиента."""
+        from app.database.crud import subscription as subscription_crud
+
+        async with memory_session(monkeypatch, (SubscriptionPremiumTraffic.__table__,)) as db:
+            await _seed_state(db, is_limited=True)
+
+            monkeypatch.setattr('app.database.crud.subscription._lock_subscription_row', AsyncMock())
+            monkeypatch.setattr('app.database.crud.subscription._housekeep_expired_purchases', AsyncMock())
+            monkeypatch.setattr('app.database.crud.subscription.clear_notifications', AsyncMock())
+            monkeypatch.setattr(
+                'app.database.crud.tariff.get_tariff_by_id',
+                AsyncMock(return_value=SimpleNamespace(is_daily=False, server_traffic_limits={})),
+            )
+            subscription = SimpleNamespace(
+                id=1,
+                user_id=7,
+                status='active',
+                is_trial=False,
+                start_date=NOW,
+                end_date=NOW + timedelta(days=1),
+                tariff_id=1,
+                traffic_limit_gb=10,
+                traffic_used_gb=0.0,
+                device_limit=1,
+                connected_squads=[SQUAD],
+                purchased_traffic_gb=0,
+                updated_at=NOW,
+            )
+
+            await subscription_crud.extend_subscription(db, subscription, 30, tariff_id=2, commit=False)
+
+            assert await get_state(db, 1, SQUAD) is None
+
+    async def test_tariff_switch_keeps_states_still_premium(self, monkeypatch):
+        """Сквад остался премиальным в новом тарифе — учёт периода не теряем."""
+        from app.database.crud import subscription as subscription_crud
+
+        async with memory_session(monkeypatch, (SubscriptionPremiumTraffic.__table__,)) as db:
+            await _seed_state(db, is_limited=True)
+
+            monkeypatch.setattr('app.database.crud.subscription._lock_subscription_row', AsyncMock())
+            monkeypatch.setattr('app.database.crud.subscription._housekeep_expired_purchases', AsyncMock())
+            monkeypatch.setattr('app.database.crud.subscription.clear_notifications', AsyncMock())
+            monkeypatch.setattr(
+                'app.database.crud.tariff.get_tariff_by_id',
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        is_daily=False, server_traffic_limits={SQUAD: {'traffic_limit_gb': 10}}
+                    )
+                ),
+            )
+            subscription = SimpleNamespace(
+                id=1,
+                user_id=7,
+                status='active',
+                is_trial=False,
+                start_date=NOW,
+                end_date=NOW + timedelta(days=1),
+                tariff_id=1,
+                traffic_limit_gb=10,
+                traffic_used_gb=0.0,
+                device_limit=1,
+                connected_squads=[SQUAD],
+                purchased_traffic_gb=0,
+                updated_at=NOW,
+            )
+
+            await subscription_crud.extend_subscription(db, subscription, 30, tariff_id=2, commit=False)
+
+            assert await get_state(db, 1, SQUAD) is not None
+
+    async def test_squad_dropped_from_premium_list_is_unlocked(self, monkeypatch):
+        """Сквад убрали из премиального списка тарифа — доступ возвращается."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            # В тарифе премиум остался, но на другом скваде: подписка из обхода
+            # выпала, а снятый сквад так и остался снятым.
+            await _seed_subscription(db, premium_limits={OTHER_SQUAD: {'traffic_limit_gb': 5}})
+            await _seed_state(db, is_limited=True)
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            state = await get_state(db, 1, SQUAD)
+            assert state is None or state.is_limited is False
+            assert stats['cleaned'] == 1
+            # Возврат должен доехать до панели: без него база «забыла» о снятии,
+            # а панель — нет, и клиент остался бы заперт уже без следов.
+            assert pushed == [[SQUAD]]
+
+    async def test_worker_pass_clears_states_without_config(self, monkeypatch):
+        """Состояния без конфигурации подчищаются проходом воркера, а не копятся."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={})
+            await _seed_state(db, is_limited=False)
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            assert await get_state(db, 1, SQUAD) is None
+            assert stats['cleaned'] == 1
+            # Сквад не снимали — трогать панель незачем.
+            assert pushed == []
+
+    async def test_panel_failure_keeps_the_state_for_the_next_pass(self, monkeypatch):
+        """Панель не ответила — строку не удаляем, иначе снятие станет невидимым."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={OTHER_SQUAD: {'traffic_limit_gb': 5}})
+            await _seed_state(db, is_limited=True)
+
+            async def _broken_push(*_args, **_kwargs):
+                raise RuntimeError('панель недоступна')
+
+            _run_worker_against(monkeypatch, db, push=_broken_push)
+
+            stats = await PremiumTrafficService().process_once()
+
+            state = await get_state(db, 1, SQUAD)
+            assert state is not None and state.is_limited is True
+            assert stats['cleaned'] == 0
+
+    async def test_state_of_a_squad_the_subscription_lost_needs_no_panel_call(self, monkeypatch):
+        """Права на сквад нет — в панель он и так не уезжает, возвращать нечего."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={}, connected=(OTHER_SQUAD,))
+            await _seed_state(db, is_limited=True)
+            pushed = _run_worker_against(monkeypatch, db)
+
+            await PremiumTrafficService().process_once()
+
+            assert await get_state(db, 1, SQUAD) is None
+            assert pushed == []
+
+    async def test_configured_squad_survives_the_pass(self, monkeypatch):
+        """Уборка не должна съедать состояния, которые всё ещё настроены."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={SQUAD: {'traffic_limit_gb': 5}})
+            await _seed_state(db, is_limited=True)
+            _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            assert await get_state(db, 1, SQUAD) is not None
+            assert stats['cleaned'] == 0

@@ -39,7 +39,7 @@ from app.database.crud.premium_traffic import (
     start_new_period,
 )
 from app.database.database import AsyncSessionLocal
-from app.database.models import Subscription, SubscriptionStatus, Tariff
+from app.database.models import Subscription, SubscriptionPremiumTraffic, SubscriptionStatus, Tariff
 from app.services.remnawave_service import RemnaWaveService
 from app.utils.panel_node_usage import normalize_node_usage
 from app.utils.premium_traffic import (
@@ -81,6 +81,24 @@ class _Target:
     display_name: str = ''
 
 
+@dataclass
+class _Orphan:
+    """Состояние премиум-лимита, которому больше не отвечает конфигурация.
+
+    Появляется, когда сквад убрали из премиального списка тарифа или подписку
+    перевели на тариф, где этого сквада нет. ``_collect_targets`` такие пары уже
+    не выдаёт, поэтому снять с них ``is_limited`` больше некому.
+    """
+
+    subscription_id: int
+    squad_uuid: str
+    is_limited: bool
+    # ``None`` только если строка подписки исчезла: внешний ключ стоит с
+    # ``ON DELETE CASCADE``, так что в норме этого не бывает.
+    subscription: Subscription | None
+    panel_user_id: int | None
+
+
 class PremiumTrafficService:
     """Периодический учёт премиум-трафика."""
 
@@ -117,7 +135,7 @@ class PremiumTrafficService:
         while self._running:
             try:
                 stats = await self.process_once()
-                if stats['limited'] or stats['restored'] or stats['errors']:
+                if stats['limited'] or stats['restored'] or stats['cleaned'] or stats['errors']:
                     logger.info('📊 Проход по премиум-трафику', **stats)
             except Exception as error:
                 logger.error('Ошибка в цикле учёта премиум-трафика', error=error, exc_info=True)
@@ -130,7 +148,7 @@ class PremiumTrafficService:
 
     async def process_once(self) -> dict[str, int]:
         """Один проход: посчитать расход, снять и вернуть сквады."""
-        stats = {'checked': 0, 'limited': 0, 'restored': 0, 'warned': 0, 'errors': 0}
+        stats = {'checked': 0, 'limited': 0, 'restored': 0, 'warned': 0, 'cleaned': 0, 'errors': 0}
 
         service = RemnaWaveService()
         if not service.is_configured:
@@ -139,11 +157,17 @@ class PremiumTrafficService:
 
         async with AsyncSessionLocal() as db:
             targets = await self._collect_targets(db)
-            if not targets:
+            # Осиротевшие состояния ищем всегда, даже когда целей нет: они как
+            # раз и появляются там, где конфигурация исчезла, а строка осталась.
+            orphans = await self._collect_orphans(db)
+            if not targets and not orphans:
                 return stats
 
             now = datetime.now(UTC)
             async with service.get_api_client() as api:
+                if orphans:
+                    stats['cleaned'] += await self._clear_orphans(db, api, orphans)
+
                 # Группируем по скваду и дате начала периода: у эндпоинта один
                 # диапазон на запрос, а у подписок с одинаковым режимом сброса
                 # он совпадает. При календарных режимах это один запрос на сквад.
@@ -263,6 +287,110 @@ class PremiumTrafficService:
                         )
                     )
         return targets
+
+    async def _collect_orphans(self, db: AsyncSession) -> list[_Orphan]:
+        """Состояния, для которых в тарифе больше нет премиум-лимита.
+
+        Обратная сторона ``_collect_targets``: та выдаёт цель, только пока сквад
+        премиальный в текущем тарифе подписки. Стоит убрать его из премиального
+        списка или перевести подписку на другой тариф — и пара «подписка+сквад»
+        выпадает из обхода вместе с ветками возврата. ``is_limited`` остаётся
+        поднятым навсегда, ``effective_panel_squads`` продолжает вычитать сквад
+        из набора для панели, и клиент оказывается заперт, продолжая платить.
+
+        Набор сквадов подписки здесь намеренно не проверяется: сквад, которого
+        нет в ``connected_squads``, в панель и так не уезжает, а состояние по
+        нему — законный учёт периода на случай, если сквад вернут.
+        """
+        result = await db.execute(select(SubscriptionPremiumTraffic))
+        states = list(result.scalars().all())
+        if not states:
+            return []
+
+        subscriptions = await db.execute(
+            select(Subscription)
+            .options(selectinload(Subscription.tariff), selectinload(Subscription.user))
+            .where(Subscription.id.in_({state.subscription_id for state in states}))
+        )
+        by_id = {subscription.id: subscription for subscription in subscriptions.scalars().all()}
+
+        orphans: list[_Orphan] = []
+        for state in states:
+            subscription = by_id.get(state.subscription_id)
+            if subscription is not None and state.squad_uuid in get_premium_squads_for_tariff(subscription.tariff):
+                continue
+            orphans.append(
+                _Orphan(
+                    subscription_id=state.subscription_id,
+                    squad_uuid=state.squad_uuid,
+                    is_limited=bool(state.is_limited),
+                    subscription=subscription,
+                    panel_user_id=self._panel_user_id(subscription) if subscription is not None else None,
+                )
+            )
+        return orphans
+
+    async def _clear_orphans(self, db: AsyncSession, api: Any, orphans: list[_Orphan]) -> int:
+        cleared = 0
+        for orphan in orphans:
+            if await self._clear_orphan(db, api, orphan):
+                cleared += 1
+        return cleared
+
+    async def _clear_orphan(self, db: AsyncSession, api: Any, orphan: _Orphan) -> bool:
+        """Вернуть сквад в панель и убрать осиротевшее состояние.
+
+        Молча удалить строку нельзя: ``is_limited`` означает, что сквад снят в
+        панели. Без строки база забудет об этом, а панель — нет, и запертым
+        клиент останется уже без единого следа.
+
+        Отсюда порядок: удаление внутри точки сохранения, потом отправка, и
+        только потом коммит. Раньше отправить нельзя — ``effective_panel_squads``
+        читает ту же строку и вернул бы сквад снова вычтенным. Сбой панели
+        откатывает точку сохранения: строка остаётся на месте, и следующий
+        проход повторит попытку.
+        """
+        from app.database.crud.premium_traffic import delete_states_for_squads
+
+        # Возвращать нечего, если сквад подписке и так не положен: в панель он
+        # не уезжает, потому что его нет в `connected_squads`.
+        needs_restore = (
+            orphan.is_limited
+            and orphan.subscription is not None
+            and orphan.squad_uuid in (orphan.subscription.connected_squads or [])
+        )
+        if needs_restore and orphan.panel_user_id is None:
+            # Адреса в панели нет — вернуть сквад нечем. Строку оставляем: она
+            # единственное свидетельство, что сквад сняли.
+            logger.warning(
+                'Осиротевшее состояние премиум-лимита не снято: нет аккаунта в панели',
+                subscription_id=orphan.subscription_id,
+                squad_uuid=orphan.squad_uuid,
+            )
+            return False
+
+        try:
+            async with db.begin_nested():
+                await delete_states_for_squads(db, orphan.subscription_id, {orphan.squad_uuid})
+                if needs_restore:
+                    await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
+            await db.commit()
+        except Exception as error:
+            logger.warning(
+                'Не удалось снять осиротевшее состояние премиум-лимита',
+                subscription_id=orphan.subscription_id,
+                squad_uuid=orphan.squad_uuid,
+                error=error,
+            )
+            return False
+
+        logger.info(
+            'Осиротевшее состояние премиум-лимита снято',
+            subscription_id=orphan.subscription_id,
+            squad_uuid=orphan.squad_uuid,
+            restored=needs_restore,
+        )
+        return True
 
     @staticmethod
     async def _squad_display_names(db: AsyncSession, subscriptions: list[Subscription]) -> dict[str, str]:
@@ -535,20 +663,34 @@ class PremiumTrafficService:
         )
 
     async def _push_squads(self, db: AsyncSession, api: Any, target: _Target) -> None:
+        await self._push_subscription_squads(db, api, target.subscription, target.panel_user_id)
+
+    async def _push_subscription_squads(
+        self,
+        db: AsyncSession,
+        api: Any,
+        subscription: Subscription,
+        panel_user_id: int,
+    ) -> None:
+        """Отправить в панель набор сквадов подписки через общий фильтр.
+
+        Отдельный вход от ``_push_squads`` нужен уборке осиротевших состояний: у
+        неё нет ``_Target`` — сквад из конфигурации тарифа как раз и исчез.
+        """
         from app.services.grace_access_runtime import update_panel_user_grace_safe
         from app.utils.premium_traffic import effective_panel_squads
 
         await update_panel_user_grace_safe(
             api,
-            target.subscription.id,
-            user_id=target.panel_user_id,
+            subscription.id,
+            user_id=panel_user_id,
             active_internal_squads=await effective_panel_squads(
-                target.subscription.id, target.subscription.connected_squads or [], db=db
+                subscription.id, subscription.connected_squads or [], db=db
             ),
         )
         # Набор сквадов в панели только что изменился — иначе сверка на
         # следующем проходе увидела бы протухший снимок и отправила бы всё заново.
-        self.invalidate_panel_user(target.panel_user_id)
+        self.invalidate_panel_user(panel_user_id)
 
     # ------------------------------------------------------- уведомления
 

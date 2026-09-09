@@ -1060,6 +1060,47 @@ async def _is_free_source_tariff(db: AsyncSession, tariff_id: int) -> bool:
         return False
 
 
+async def _drop_orphan_premium_states(db: AsyncSession, subscription: Subscription, new_tariff) -> None:
+    """Убрать состояния премиум-лимита, которых нет в новом тарифе.
+
+    Состояние живёт на паре «подписка + премиум-сквад» и хранит флаг `is_limited`
+    — сквад снят за перерасход. Воркер обходит только те пары, что есть в
+    премиальном списке ТЕКУЩЕГО тарифа, поэтому после смены тарифа снимать флаг
+    со старых пар становится некому, а фильтр `effective_panel_squads` продолжает
+    вычитать их сквады из набора для панели. Клиент платит и не получает доступ.
+
+    Панель поправится ближайшей же отправкой: строки больше нет, значит фильтр
+    перестаёт вычитать сквад, а смена тарифа всегда заканчивается записью
+    подписки в панель. Обратный порядок здесь недоступен и не нужен: удаление
+    может только вернуть сквад, отобрать — никогда.
+    """
+    from app.database.crud.premium_traffic import delete_states_for_squads, get_states_for_subscription
+    from app.utils.premium_traffic import get_premium_squads_for_tariff
+
+    try:
+        states = await get_states_for_subscription(db, subscription.id)
+        if not states:
+            return
+        premium = get_premium_squads_for_tariff(new_tariff)
+        orphaned = {state.squad_uuid for state in states if state.squad_uuid not in premium}
+        if not orphaned:
+            return
+        await delete_states_for_squads(db, subscription.id, orphaned)
+        logger.info(
+            '🧹 Смена тарифа: сняты премиум-лимиты сквадов, которых нет в новом тарифе',
+            subscription_id=subscription.id,
+            squads=sorted(orphaned),
+        )
+    except Exception as error:
+        # Уборка вспомогательная: ронять из-за неё смену тарифа нельзя. Строки
+        # доберёт проход воркера — он ищет ровно такие состояния.
+        logger.warning(
+            'Не удалось убрать премиум-лимиты при смене тарифа',
+            subscription_id=getattr(subscription, 'id', None),
+            error=error,
+        )
+
+
 async def extend_subscription(
     db: AsyncSession,
     subscription: Subscription,
@@ -1328,6 +1369,8 @@ async def extend_subscription(
             subscription.is_daily_paused = False
             subscription.last_daily_charge_at = None
             logger.info('🔄 Переход с суточного тарифа: очищены daily флаги')
+
+        await _drop_orphan_premium_states(db, subscription, new_tariff)
 
     # В режиме fixed_with_topup при продлении базовый лимит возвращаем к
     # fixed_limit, но активные TrafficPurchase сохраняем (накопительно).
