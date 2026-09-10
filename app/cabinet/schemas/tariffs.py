@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class PeriodPrice(BaseModel):
@@ -43,6 +43,28 @@ class ServerTrafficLimit(BaseModel):
         default_factory=dict, description='Пакеты докупки {ГБ: цена в копейках}, как traffic_topup_packages тарифа'
     )
     max_topup_gb: int = Field(0, ge=0, description='Потолок докупки сверх лимита в ГБ, 0 = без ограничения')
+
+    @field_validator('topup_packages')
+    @classmethod
+    def _validate_topup_packages(cls, value: dict[str, int]) -> dict[str, int]:
+        """Отклонить мусор в пакетах докупки на записи, а не тихо потерять его на чтении.
+
+        `app/utils/premium_traffic.py` терпимо разбирает исторические формы этого
+        поля и на чтении просто отбрасывает записи с нечисловым объёмом или
+        отрицательной ценой — иначе тарифы, заведённые до этой проверки, падали
+        бы при каждом обращении. На запись через API такой снисходительности не
+        нужно: мусора, который живёт только в БД, взяться неоткуда.
+        """
+        for raw_gb, price in value.items():
+            try:
+                gb = int(raw_gb)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f'topup_packages: объём "{raw_gb}" должен быть числом ГБ') from exc
+            if gb <= 0:
+                raise ValueError(f'topup_packages: объём {gb} ГБ должен быть положительным')
+            if price < 0:
+                raise ValueError(f'topup_packages: цена для {gb} ГБ не может быть отрицательной')
+        return value
 
 
 class ServerInfo(BaseModel):

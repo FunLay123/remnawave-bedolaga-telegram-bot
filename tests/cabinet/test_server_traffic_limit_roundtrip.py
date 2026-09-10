@@ -10,8 +10,19 @@ JSON, но не объявлено в схеме, молча исчезает п
 Тест воспроизводит этот круг целиком.
 """
 
+import contextlib
+from types import SimpleNamespace
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app.cabinet.dependencies import get_cabinet_db
+from app.cabinet.routes import admin_tariffs as route
 from app.cabinet.schemas.tariffs import ServerTrafficLimit
+from app.database.models import PromoGroup, ServerSquad, Subscription, Tariff, tariff_promo_groups
 from app.utils.premium_traffic import parse_premium_squad
+from tests.fixtures.sqlite_memory import memory_session
 
 
 SQUAD = 'e4f819ca-2cfd-4425-9354-16a262b180c1'
@@ -70,3 +81,109 @@ def test_legacy_record_without_topup_fields_gets_safe_defaults():
     assert saved['topup_packages'] == {}
     assert saved['max_topup_gb'] == 0
     assert parse_premium_squad(SQUAD, saved).limit_gb == 5
+
+
+# --- Кабинетный API тарифа: ответ и запись через настоящий роутер --------
+#
+# Прямой вызов обработчика (как в _roundtrip выше) не проходит через
+# response_model и request-валидацию — здесь запрос идёт через тот же роутер
+# и те же зависимости, что и в проде, иначе рассинхрон между сырым значением и
+# разбором, а также молчаливый merge/replace конфигурации не были бы видны.
+
+OTHER_SQUAD = '82a12389-14d6-40c6-b320-4674f6bbb344'
+ADMIN = SimpleNamespace(id=1, telegram_id=777)
+
+_TABLES = (
+    Tariff.__table__,
+    PromoGroup.__table__,
+    tariff_promo_groups,
+    ServerSquad.__table__,
+    Subscription.__table__,
+)
+
+
+def _override_permission_dependencies(app: FastAPI) -> None:
+    """Пропустить RBAC, оставив всё остальное настоящим (см. test_admin_grace_access_http.py)."""
+    for candidate in route.router.routes:
+        for dependant in candidate.dependant.dependencies:
+            call = dependant.call
+            if getattr(call, '__name__', '') == 'dependency' and getattr(call, '__module__', '').endswith(
+                'cabinet.dependencies'
+            ):
+                app.dependency_overrides[call] = lambda: ADMIN
+
+
+@contextlib.asynccontextmanager
+async def _tariff_app(monkeypatch, *, server_traffic_limits=None):
+    async with memory_session(monkeypatch, _TABLES) as db:
+        db.add(
+            Tariff(
+                id=1,
+                name='Pro',
+                is_active=True,
+                allowed_squads=[SQUAD, OTHER_SQUAD],
+                server_traffic_limits=server_traffic_limits or {},
+            )
+        )
+        await db.flush()
+
+        app = FastAPI()
+        app.include_router(route.router, prefix='/cabinet')
+        app.dependency_overrides[get_cabinet_db] = lambda: db
+        _override_permission_dependencies(app)
+
+        with TestClient(app) as http:
+            yield http
+
+
+@pytest.mark.asyncio
+async def test_get_reports_topup_disabled_when_no_packages(monkeypatch):
+    """topup_enabled=true без пакетов — это выключенная докупка, так и отдаём."""
+    limits = {SQUAD: {'traffic_limit_gb': 5, 'topup_enabled': True, 'topup_packages': {}}}
+    async with _tariff_app(monkeypatch, server_traffic_limits=limits) as http:
+        response = http.get('/cabinet/admin/tariffs/1')
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['server_traffic_limits'][SQUAD]['topup_enabled'] is False
+
+
+@pytest.mark.asyncio
+async def test_partial_update_keeps_other_squads(monkeypatch):
+    """PATCH одного сквада не должен стирать настройки остальных."""
+    limits = {
+        SQUAD: {'traffic_limit_gb': 5},
+        OTHER_SQUAD: {'traffic_limit_gb': 10, 'topup_enabled': True, 'topup_packages': {'5': 100}},
+    }
+    async with _tariff_app(monkeypatch, server_traffic_limits=limits) as http:
+        response = http.put(
+            '/cabinet/admin/tariffs/1',
+            json={'server_traffic_limits': {SQUAD: {'traffic_limit_gb': 7}}},
+        )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body['server_traffic_limits'][SQUAD]['traffic_limit_gb'] == 7
+    assert OTHER_SQUAD in body['server_traffic_limits']
+    assert body['server_traffic_limits'][OTHER_SQUAD]['traffic_limit_gb'] == 10
+    assert body['server_traffic_limits'][OTHER_SQUAD]['topup_enabled'] is True
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_malformed_packages(monkeypatch):
+    """Мусор в пакетах докупки отклоняем на записи, а не терпим до следующего чтения."""
+    async with _tariff_app(monkeypatch) as http:
+        response = http.put(
+            '/cabinet/admin/tariffs/1',
+            json={
+                'server_traffic_limits': {
+                    SQUAD: {
+                        'traffic_limit_gb': 5,
+                        'topup_enabled': True,
+                        'topup_packages': {'5': -100},
+                    }
+                }
+            },
+        )
+
+    assert response.status_code == 422

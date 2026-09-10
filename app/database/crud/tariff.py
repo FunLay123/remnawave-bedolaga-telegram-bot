@@ -359,7 +359,13 @@ async def update_tariff(
     if allowed_squads is not None:
         tariff.allowed_squads = allowed_squads
     if server_traffic_limits is not None:
-        tariff.server_traffic_limits = server_traffic_limits
+        # Сливаем по ключу сквада, а не заменяем карту целиком: она адресуется
+        # per-squad, и админка правит по одному ряду за раз (включила докупку
+        # одному скваду — прислала только его). Полная замена стёрла бы
+        # настройки всех сквадов, которых не было в этом запросе.
+        merged_limits = dict(tariff.server_traffic_limits or {})
+        merged_limits.update(server_traffic_limits)
+        tariff.server_traffic_limits = merged_limits
     if allow_traffic_topup is not None:
         tariff.allow_traffic_topup = allow_traffic_topup
     if period_prices is not None:

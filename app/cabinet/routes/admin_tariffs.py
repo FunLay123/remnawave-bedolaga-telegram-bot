@@ -23,6 +23,7 @@ from app.database.crud.tariff import (
 )
 from app.database.models import PromoGroup, Subscription, SubscriptionStatus, Tariff, Transaction, TransactionType, User
 from app.services.panel_sync import patch_panel_squads
+from app.utils.premium_traffic import parse_premium_squads
 
 from ..dependencies import get_cabinet_db, require_permission
 from ..schemas.tariffs import (
@@ -226,13 +227,23 @@ async def get_tariff(
     promo_groups = await _get_tariff_promo_groups(db, tariff)
     subs_count = await get_tariff_subscriptions_count(db, tariff.id)
 
-    # Преобразуем server_traffic_limits в формат для схемы
-    server_limits_response = {}
-    for uuid, limit_data in server_traffic_limits.items():
-        if isinstance(limit_data, dict):
-            server_limits_response[uuid] = ServerTrafficLimit(**limit_data)
-        elif isinstance(limit_data, int):
-            server_limits_response[uuid] = ServerTrafficLimit(traffic_limit_gb=limit_data)
+    # Строим ответ из того же разбора, которым пользуются воркер и покупка
+    # премиум-трафика (`parse_premium_squads`), а не из сырого значения поля.
+    # Разбор терпим к трём историческим формам записи и сводит
+    # `topup_enabled=True` без пакетов к «выключено» — если собирать ответ из
+    # сырых данных напрямую, оператор увидел бы включённую докупку, которой в
+    # проверках воркера и покупки не существует.
+    server_limits_response = {
+        uuid: ServerTrafficLimit(
+            traffic_limit_gb=config.limit_gb,
+            name=config.name,
+            sort_order=config.sort_order,
+            topup_enabled=config.topup_enabled,
+            topup_packages={str(gb): price for gb, price in config.topup_packages.items()},
+            max_topup_gb=config.max_topup_gb,
+        )
+        for uuid, config in parse_premium_squads(server_traffic_limits).items()
+    }
 
     return TariffDetailResponse(
         id=tariff.id,
