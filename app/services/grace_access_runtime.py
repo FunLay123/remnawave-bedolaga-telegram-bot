@@ -325,20 +325,14 @@ class SQLAlchemyGraceBillingGateway:
         subscription = result.scalar_one_or_none()
         if subscription is None or subscription.user is None:
             return None
-        # `connected_squads` — права подписки, а не то, что должно лежать в
-        # панели: сквад, снятый воркером за перерасход премиум-лимита, из прав
-        # не исчезает. Канонический набор строится здесь, у самого чтения, а не
-        # на границе отправки: из него растут и цель `_build_billing_target`, и
-        # сверка её результата с панелью, и снимок `billing_before` в сессии.
-        # Отфильтруй мы только отправку — сверка сравнивала бы панель с
-        # нефильтрованной целью и считала бы совпадение расхождением.
-        # Разбор прав оставляем прежним, чтобы битая строка по-прежнему
-        # приводила к GraceSnapshotError, а не уезжала в снимок как есть.
-        granted_squads = _string_tuple(subscription.connected_squads)
-        return _subscription_to_billing(
-            subscription,
-            squad_uuids=tuple(await effective_panel_squads(subscription.id, granted_squads, db=self._db) or ()),
-        )
+        # Здесь читаются именно ПРАВА подписки, без премиум-фильтра. Снятый за
+        # перерасход сквад вычитается позже и только у записи в панель (см.
+        # `_billing_with_effective_squads`): состояние биллинга сравнивают само
+        # с собой — `billing_before` в сессии против текущего чтения
+        # (`billing_still_matches_session`), — и переменчивый `is_limited`
+        # внутри него превратил бы докупку трафика или снятие сквада воркером
+        # в «инцидент изменился» и закрыл бы оверлей конфликтом.
+        return _subscription_to_billing(subscription)
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,7 +473,9 @@ class RemnawaveGracePanelGateway:
         if not billing.remnawave_id:
             raise GracePanelError('Canonical subscription has no Remnawave user id')
         now = datetime.now(UTC)
-        target = _build_billing_target(billing, now=now)
+        # Своей сессии БД у панельного шлюза нет — фильтр откроет свою: запрос
+        # узкий и по индексу.
+        target = _build_billing_target(await _billing_with_effective_squads(billing), now=now)
 
         async with remnawave_service.get_api_client() as api:
             if target.status is PanelUserStatus.LIMITED:
@@ -1045,7 +1041,8 @@ async def apply_recovered_grace_update_locked(
     if billing is None or not billing.remnawave_id:
         raise GracePanelError('Recovered canonical subscription has no Remnawave user id')
 
-    target = _build_billing_target(billing, now=datetime.now(UTC))
+    # Сессия уже открыта и держит локи — фильтру своя не нужна.
+    target = _build_billing_target(await _billing_with_effective_squads(billing, db=db), now=datetime.now(UTC))
     if target.status not in {PanelUserStatus.ACTIVE, PanelUserStatus.DISABLED}:
         raise GracePanelError(f'Canonical renewal unexpectedly resolved to derived panel status {target.status.value}')
     canonical_kwargs = _serialize_panel_target(
@@ -1644,17 +1641,7 @@ async def _acquire_database_lock(db: AsyncSession, subscription_id: int) -> None
     )
 
 
-def _subscription_to_billing(
-    subscription: Subscription,
-    *,
-    squad_uuids: tuple[str, ...] | None = None,
-) -> GraceBillingState:
-    """Каноническое состояние подписки для grace.
-
-    ``squad_uuids`` подставляет уже посчитанный набор сквадов. Разбор прав из
-    ``connected_squads`` остаётся значением по умолчанию для вызывающих без
-    сессии БД: им набор нужен для отбора кандидатов, а не для записи в панель.
-    """
+def _subscription_to_billing(subscription: Subscription) -> GraceBillingState:
     user = subscription.user
     tariff = subscription.tariff
     remnawave_id = subscription.remnawave_id if settings.is_multi_tariff_enabled() else user.remnawave_id
@@ -1668,7 +1655,7 @@ def _subscription_to_billing(
         traffic_limit_bytes=traffic_limit_gb * 1024**3,
         used_traffic_bytes=int(traffic_used_gb * 1024**3),
         device_limit=subscription.device_limit,
-        squad_uuids=_string_tuple(subscription.connected_squads) if squad_uuids is None else squad_uuids,
+        squad_uuids=_string_tuple(subscription.connected_squads),
         external_squad_uuid=(tariff.external_squad_uuid if tariff else None),
         is_trial=bool(subscription.is_trial or subscription.status == SubscriptionStatus.TRIAL.value),
         is_daily=bool(tariff and tariff.is_daily),
@@ -1718,6 +1705,31 @@ def _build_restore_target(snapshot: GracePanelSnapshot, *, now: datetime) -> _Pa
         traffic_limit_bytes=snapshot.traffic_limit_bytes,
         squad_uuids=snapshot.squad_uuids,
         external_squad_uuid=snapshot.external_squad_uuid,
+    )
+
+
+async def _billing_with_effective_squads(
+    billing: GraceBillingState,
+    *,
+    db: AsyncSession | None = None,
+) -> GraceBillingState:
+    """Вычесть из прав подписки премиум-сквады, снятые за перерасход.
+
+    Шов ровно один и стоит он перед обоими вызовами ``_build_billing_target``:
+    цель нужна отфильтрованной целиком, потому что из неё растёт и payload
+    (`_serialize_panel_target` перезаписывает ``active_internal_squads``
+    безусловно, поверх любого фильтра выше по стеку), и сверка результата с
+    панелью (`_panel_matches_target`). Отфильтруй мы только payload — сверка
+    сравнивала бы панель с нефильтрованной целью и объявляла бы конфликтом
+    ровно тот ответ, которого сама и добивалась.
+
+    Выше по потоку, в ``GraceBillingState``, фильтра нет намеренно: то
+    состояние grace сравнивает само с собой (`billing_still_matches_session`),
+    и переменчивый премиум-флаг там читался бы как «инцидент изменился».
+    """
+    return replace(
+        billing,
+        squad_uuids=tuple(await effective_panel_squads(billing.subscription_id, billing.squad_uuids, db=db) or ()),
     )
 
 

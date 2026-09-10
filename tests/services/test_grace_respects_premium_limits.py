@@ -7,20 +7,30 @@
 Grace строит цель записи из `GraceBillingState.squad_uuids`, а тот собирался из
 `connected_squads` как есть. Значит любое каноническое применение биллинга —
 восстановление после оплаты (`apply_recovered_grace_update_locked`), закрытие
-сессии (`apply_billing_state`) — возвращало клиенту исчерпанный премиум-сквад:
-`_serialize_panel_target` перезаписывает `active_internal_squads` целью
-безусловно, поверх любого фильтра, наложенного выше по стеку.
+сессии и fail-closed-ветки (`apply_billing_state`) — возвращало клиенту
+исчерпанный премиум-сквад: `_serialize_panel_target` перезаписывает
+`active_internal_squads` целью безусловно, поверх любого фильтра выше по стеку.
 
-Фильтр стоит у самого чтения, в `SQLAlchemyGraceBillingGateway`, а не на
-границе отправки: из одного и того же `billing.squad_uuids` растут и цель, и
-сверка её результата с панелью, и снимок `billing_before` в сессии. Фильтруй
-мы только отправку — сверка сравнивала бы панель с нефильтрованной целью и
-считала бы совпадение расхождением.
+**Где стоит шов.** Ровно перед обоими вызовами `_build_billing_target`, то есть
+на границе «состояние биллинга → цель записи в панель». Не дальше и не ближе:
+
+* фильтровать сам payload нельзя — цель используется ещё и для сверки
+  результата (`_panel_matches_target` сравнивает `set(snapshot.squad_uuids)` с
+  `set(target.squad_uuids)`), и отфильтрованный payload при нефильтрованной
+  цели превратил бы успешную запись в конфликт;
+* фильтровать раньше, в самом `GraceBillingState`, тоже нельзя — это состояние
+  grace сравнивает само с собой (`billing_still_matches_session`: снимок
+  `billing_before` против свежего чтения), и переменчивый премиум-флаг там
+  читался бы как «инцидент изменился под нами», закрывая оверлей конфликтом.
 """
 
 from __future__ import annotations
 
+import contextlib
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -33,19 +43,21 @@ from app.database.models import (
     User,
     tariff_promo_groups,
 )
+from app.external.remnawave_api import UserStatus as PanelUserStatus
 from app.services.grace_access_runtime import (
+    RemnawaveGracePanelGateway,
     SQLAlchemyGraceBillingGateway,
+    _billing_with_effective_squads,
     _build_billing_target,
     _serialize_panel_target,
 )
 from app.services.grace_access_service import (
-    GraceAccessPolicy,
-    GraceAccessService,
     GraceAccessSession,
+    GracePanelOverlay,
     GracePanelSnapshot,
     GraceReason,
     GraceSessionState,
-    GraceStartDecision,
+    billing_still_matches_session,
 )
 from tests.fixtures.sqlite_memory import memory_session
 
@@ -73,7 +85,7 @@ TABLES = (
 )
 
 
-async def _seed(db, *, limited_squads=(), status='expired'):
+async def _seed(db, *, limited_squads=(), status='active', end_at=None):
     """Подписка на премиум-тарифе с двумя сквадами и снятыми состояниями."""
     db.add(User(id=1, telegram_id=100, status='active', remnawave_id=PANEL_ID))
     db.add(
@@ -99,200 +111,281 @@ async def _seed(db, *, limited_squads=(), status='expired'):
             traffic_used_gb=0.0,
             device_limit=1,
             start_date=NOW - timedelta(days=40),
-            end_date=NOW - timedelta(days=1),
+            end_date=end_at if end_at is not None else NOW + timedelta(days=20),
             remnawave_id=PANEL_ID,
         )
     )
-    for squad_uuid in limited_squads:
-        db.add(
-            SubscriptionPremiumTraffic(
-                subscription_id=SUBSCRIPTION_ID,
-                squad_uuid=squad_uuid,
-                limit_bytes=5 * GIB,
-                used_bytes=5 * GIB,
-                period_start_at=NOW - timedelta(days=10),
-                is_limited=True,
-            )
+    await db.commit()
+    await _set_limited(db, limited_squads)
+
+
+async def _set_limited(db, squad_uuids):
+    """Проставить/снять `is_limited` — как это делают воркер и докупка."""
+    from app.database.crud.premium_traffic import get_or_create_state
+
+    for squad_uuid in (PREMIUM_SQUAD, REGULAR_SQUAD):
+        state = await get_or_create_state(
+            db,
+            SUBSCRIPTION_ID,
+            squad_uuid,
+            limit_bytes=5 * GIB,
+            period_start_at=NOW - timedelta(days=10),
         )
+        state.is_limited = squad_uuid in squad_uuids
     await db.commit()
 
 
+def _use_session(monkeypatch, db):
+    """Отдать фильтру, открывающему свою сессию, нашу in-memory."""
+
+    @contextlib.asynccontextmanager
+    async def _session():
+        yield db
+
+    monkeypatch.setattr('app.database.database.AsyncSessionLocal', _session)
+
+
+# ------------------------------------------------------- цель записи в панель
+
+
 @pytest.mark.asyncio
-async def test_billing_state_drops_a_squad_whose_premium_quota_is_exhausted(monkeypatch):
-    """Исчерпанный премиум-сквад из канонического набора уходит, остальные — нет."""
+async def test_the_panel_target_drops_a_squad_whose_premium_quota_is_exhausted(monkeypatch):
+    """Исчерпанный премиум-сквад из цели уходит, остальные — нет."""
     async with memory_session(monkeypatch, TABLES) as db:
         await _seed(db, limited_squads=(PREMIUM_SQUAD,))
 
         billing = await SQLAlchemyGraceBillingGateway(db).get_subscription(SUBSCRIPTION_ID)
+        effective = await _billing_with_effective_squads(billing, db=db)
 
-        assert billing is not None
-        assert billing.squad_uuids == (REGULAR_SQUAD,)
+        assert billing.squad_uuids == (PREMIUM_SQUAD, REGULAR_SQUAD), 'права подписки не меняются'
+        assert effective.squad_uuids == (REGULAR_SQUAD,)
 
 
 @pytest.mark.asyncio
-async def test_billing_state_keeps_everything_the_customer_is_still_entitled_to(monkeypatch):
-    """Фильтр вычитающий: пока лимит не исчерпан, набор прав не меняется."""
+async def test_the_panel_target_keeps_everything_the_customer_is_still_entitled_to(monkeypatch):
+    """Фильтр вычитающий: пока лимит не исчерпан, набор не меняется."""
     async with memory_session(monkeypatch, TABLES) as db:
         await _seed(db)
 
         billing = await SQLAlchemyGraceBillingGateway(db).get_subscription(SUBSCRIPTION_ID)
+        effective = await _billing_with_effective_squads(billing, db=db)
 
-        assert billing is not None
-        assert billing.squad_uuids == (PREMIUM_SQUAD, REGULAR_SQUAD)
+        assert effective.squad_uuids == (PREMIUM_SQUAD, REGULAR_SQUAD)
 
 
 @pytest.mark.asyncio
 async def test_canonical_panel_payload_does_not_regrant_the_exhausted_squad(monkeypatch):
-    """Тот же путь, что у восстановления после оплаты, — до самого payload.
+    """Payload собирается из уже отфильтрованной цели, а не из прав.
 
-    `apply_recovered_grace_update_locked` собирает payload ровно так:
-    `_build_billing_target` из состояния биллинга, затем `_serialize_panel_target`,
-    который перезаписывает `active_internal_squads` целью безусловно. Фильтр,
-    наложенный вызывающим выше по стеку, здесь бы и потерялся.
+    `_serialize_panel_target` перезаписывает `active_internal_squads` целью
+    безусловно — нефильтрованный набор в `base_kwargs` до панели дойти не может.
     """
     async with memory_session(monkeypatch, TABLES) as db:
-        await _seed(db, limited_squads=(PREMIUM_SQUAD,), status='active')
+        await _seed(db, limited_squads=(PREMIUM_SQUAD,))
 
         billing = await SQLAlchemyGraceBillingGateway(db).get_subscription(SUBSCRIPTION_ID)
         payload = _serialize_panel_target(
             PANEL_ID,
-            _build_billing_target(billing, now=NOW),
+            _build_billing_target(await _billing_with_effective_squads(billing, db=db), now=NOW),
             base_kwargs={'user_id': PANEL_ID, 'active_internal_squads': [PREMIUM_SQUAD, REGULAR_SQUAD]},
         )
 
         assert payload['active_internal_squads'] == [REGULAR_SQUAD]
 
 
-class _MemoryStore:
-    """Хранилище сессий в памяти: тесту нужна только созданная сессия."""
+# ------------------------------------------- применение канонического биллинга
+
+
+class _EchoPanelApi:
+    """Панель, отвечающая ровно тем, что ей прислали: сверка обязана сойтись."""
 
     def __init__(self) -> None:
-        self.sessions: dict[str, GraceAccessSession] = {}
+        self.updates: list[dict[str, Any]] = []
 
-    async def get_open(self, subscription_id: int) -> GraceAccessSession | None:
-        return next(
-            (
-                session
-                for session in self.sessions.values()
-                if session.subscription_id == subscription_id and session.state is not GraceSessionState.COMPLETED
-            ),
-            None,
+    async def get_user_by_id(self, user_id: int) -> SimpleNamespace:
+        raise AssertionError('ACTIVE-переход читает панель только при LIMITED')
+
+    async def update_user(self, **kwargs: Any) -> SimpleNamespace:
+        self.updates.append(kwargs)
+        return SimpleNamespace(
+            id=kwargs['user_id'],
+            status=kwargs.get('status', PanelUserStatus.ACTIVE),
+            expire_at=kwargs.get('expire_at'),
+            traffic_limit_bytes=kwargs.get('traffic_limit_bytes', 0),
+            used_traffic_bytes=0,
+            user_traffic=0,
+            active_internal_squads=[{'uuid': uuid} for uuid in kwargs.get('active_internal_squads') or []],
+            external_squad_uuid=kwargs.get('external_squad_uuid'),
+            hwid_device_limit=kwargs.get('hwid_device_limit'),
+            last_traffic_reset_at=None,
         )
 
-    async def get_by_incident(self, subscription_id: int, incident_key: str) -> GraceAccessSession | None:
-        return next(
-            (
-                session
-                for session in self.sessions.values()
-                if session.subscription_id == subscription_id and session.incident_key == incident_key
-            ),
-            None,
-        )
 
-    async def create(self, session: GraceAccessSession) -> GraceAccessSession:
-        self.sessions[session.id] = session
-        return session
+def _use_panel(monkeypatch, api):
+    @contextlib.asynccontextmanager
+    async def _client():
+        yield api
 
-    async def save(self, session: GraceAccessSession) -> GraceAccessSession:
-        self.sessions[session.id] = session
-        return session
-
-    async def list_open(self, *, limit: int) -> list[GraceAccessSession]:
-        return [session for session in self.sessions.values()][:limit]
+    monkeypatch.setattr(
+        'app.services.remnawave_service.remnawave_service',
+        SimpleNamespace(get_api_client=_client),
+    )
 
 
-class _FakePanel:
-    """Панель-заглушка: снимок задан, применение оверлея всегда удаётся."""
-
-    def __init__(self, snapshot: GracePanelSnapshot) -> None:
-        self.snapshot = snapshot
-        self.applied_billing: list = []
-
-    async def read_snapshot(self, remnawave_id: int) -> GracePanelSnapshot | None:
-        return self.snapshot if remnawave_id == self.snapshot.remnawave_id else None
-
-    async def apply_overlay(self, remnawave_id: int, overlay) -> None:
-        return None
-
-    async def restore_snapshot(self, remnawave_id: int, snapshot, expected_overlay):
-        raise AssertionError('восстановление в этом сценарии не ожидается')
-
-    async def apply_billing_state(self, billing, *, expected_overlay) -> None:
-        self.applied_billing.append(billing)
+def _overlay() -> GracePanelOverlay:
+    return GracePanelOverlay(
+        status='ACTIVE',
+        expire_at=NOW + timedelta(hours=6),
+        traffic_limit_bytes=2 * GIB,
+        squad_uuids=(GRACE_SQUAD,),
+        external_squad_uuid=None,
+    )
 
 
 @pytest.mark.asyncio
-async def test_overlay_snapshot_excludes_the_exhausted_squad_and_keeps_the_rest(monkeypatch):
-    """Снимок биллинга внутри оверлея — то, к чему grace вернёт клиента.
+async def test_applying_canonical_billing_does_not_regrant_the_exhausted_squad(monkeypatch):
+    """Полный путь `apply_billing_state`: и запись, и сверка её результата.
 
-    Попади туда исчерпанный премиум-сквад — любое закрытие сессии (оплата,
-    таймаут, конфликт) вернуло бы его в панель, и ограничение бы развалилось.
+    Панель отвечает тем, что получила. Если бы фильтр стоял только на payload,
+    сверка сравнила бы этот ответ с нефильтрованной целью и подняла бы
+    `GracePanelError` — то есть тест ловит обе половины шва сразу.
     """
     async with memory_session(monkeypatch, TABLES) as db:
         await _seed(db, limited_squads=(PREMIUM_SQUAD,))
-        store = _MemoryStore()
-        panel = _FakePanel(
-            GracePanelSnapshot(
-                remnawave_id=PANEL_ID,
-                status='EXPIRED',
-                expire_at=NOW - timedelta(days=1),
-                traffic_limit_bytes=100 * GIB,
-                used_traffic_bytes=GIB,
-                squad_uuids=(REGULAR_SQUAD,),
-                external_squad_uuid=None,
-            )
-        )
-        service = GraceAccessService(
-            store=store,
-            panel=panel,
-            billing=SQLAlchemyGraceBillingGateway(db),
-            policy=GraceAccessPolicy(
-                duration=timedelta(hours=6),
-                expired_squad_uuid=GRACE_SQUAD,
-                limited_squad_uuid=GRACE_SQUAD,
-            ),
-            clock=lambda: NOW,
-        )
+        _use_session(monkeypatch, db)
+        api = _EchoPanelApi()
+        _use_panel(monkeypatch, api)
         billing = await SQLAlchemyGraceBillingGateway(db).get_subscription(SUBSCRIPTION_ID)
 
-        result = await service.start_if_eligible(billing, GraceReason.EXPIRED)
+        await RemnawaveGracePanelGateway().apply_billing_state(billing, expected_overlay=_overlay())
 
-        assert result.decision is GraceStartDecision.STARTED
-        assert result.session is not None
-        assert result.session.billing_before.squad_uuids == (REGULAR_SQUAD,)
+        assert len(api.updates) == 1
+        assert api.updates[0]['active_internal_squads'] == [REGULAR_SQUAD]
 
 
 @pytest.mark.asyncio
-async def test_overlay_snapshot_keeps_both_squads_while_the_quota_holds(monkeypatch):
-    """Обратная сторона: не исчерпан — из снимка ничего не пропадает."""
+async def test_applying_canonical_billing_keeps_the_squads_still_paid_for(monkeypatch):
+    """Обратная страховка: без исчерпания в панель уходит полный набор прав."""
     async with memory_session(monkeypatch, TABLES) as db:
         await _seed(db)
-        store = _MemoryStore()
-        panel = _FakePanel(
-            GracePanelSnapshot(
-                remnawave_id=PANEL_ID,
-                status='EXPIRED',
-                expire_at=NOW - timedelta(days=1),
-                traffic_limit_bytes=100 * GIB,
-                used_traffic_bytes=GIB,
-                squad_uuids=(PREMIUM_SQUAD, REGULAR_SQUAD),
-                external_squad_uuid=None,
-            )
-        )
-        service = GraceAccessService(
-            store=store,
-            panel=panel,
-            billing=SQLAlchemyGraceBillingGateway(db),
-            policy=GraceAccessPolicy(
-                duration=timedelta(hours=6),
-                expired_squad_uuid=GRACE_SQUAD,
-                limited_squad_uuid=GRACE_SQUAD,
-            ),
-            clock=lambda: NOW,
-        )
+        _use_session(monkeypatch, db)
+        api = _EchoPanelApi()
+        _use_panel(monkeypatch, api)
         billing = await SQLAlchemyGraceBillingGateway(db).get_subscription(SUBSCRIPTION_ID)
 
-        result = await service.start_if_eligible(billing, GraceReason.EXPIRED)
+        await RemnawaveGracePanelGateway().apply_billing_state(billing, expected_overlay=_overlay())
 
-        assert result.session is not None
-        assert result.session.billing_before.squad_uuids == (PREMIUM_SQUAD, REGULAR_SQUAD)
+        assert api.updates[0]['active_internal_squads'] == [PREMIUM_SQUAD, REGULAR_SQUAD]
+
+
+@pytest.mark.asyncio
+async def test_recovery_after_payment_does_not_regrant_the_exhausted_squad(monkeypatch):
+    """Названное место бага: `apply_recovered_grace_update_locked`.
+
+    Клиент оплатил подписку, пока над ней был открыт grace-оверлей. Сессия
+    закрывается каноническим апдейтом — и именно он возвращал в панель сквад,
+    премиум-лимит которого клиент исчерпал.
+    """
+    from app.services.grace_access_runtime import (
+        SQLAlchemyGraceSessionStore,
+        apply_recovered_grace_update_locked,
+        grace_access_runtime,
+    )
+    from app.services.grace_access_service import GraceAccessMode
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(db, limited_squads=(PREMIUM_SQUAD,))
+        monkeypatch.setattr(grace_access_runtime, '_mode', GraceAccessMode.ACTIVE)
+        # Снимок инцидента истёк раньше — свежий срок и есть признак оплаты.
+        expired_billing = await SQLAlchemyGraceBillingGateway(db).get_subscription(SUBSCRIPTION_ID)
+        await SQLAlchemyGraceSessionStore(db).create(
+            _session_for(replace(expired_billing, end_at=NOW - timedelta(days=1)))
+        )
+        await db.commit()
+        api = _EchoPanelApi()
+
+        completed, updated = await apply_recovered_grace_update_locked(
+            db,
+            api,
+            SUBSCRIPTION_ID,
+            update_kwargs={'user_id': PANEL_ID, 'active_internal_squads': [PREMIUM_SQUAD, REGULAR_SQUAD]},
+            source='test',
+        )
+
+        assert completed is True
+        assert updated is not None
+        assert api.updates[0]['active_internal_squads'] == [REGULAR_SQUAD]
+
+
+# --------------------------------------------- премиум-флаг не рвёт инцидент
+
+
+def _session_for(billing) -> GraceAccessSession:
+    """Открытая сессия, снявшая свой снимок биллинга в момент инцидента."""
+    return GraceAccessSession(
+        id='11111111-2222-3333-4444-555555555555',
+        subscription_id=SUBSCRIPTION_ID,
+        remnawave_id=PANEL_ID,
+        reason=GraceReason.EXPIRED,
+        incident_key='expired:none',
+        state=GraceSessionState.ACTIVE,
+        billing_before=billing,
+        panel_before=GracePanelSnapshot(
+            remnawave_id=PANEL_ID,
+            status='EXPIRED',
+            expire_at=NOW - timedelta(days=1),
+            traffic_limit_bytes=100 * GIB,
+            used_traffic_bytes=GIB,
+            squad_uuids=(REGULAR_SQUAD,),
+            external_squad_uuid=None,
+        ),
+        overlay=_overlay(),
+        started_at=NOW,
+        grace_until=NOW + timedelta(hours=6),
+        updated_at=NOW,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_premium_grant_during_an_overlay_does_not_conflict_the_session(monkeypatch):
+    """Докупка трафика или начисление админом не должны обрывать grace.
+
+    Обе операции снимают `is_limited` (`apply_premium_topup`,
+    `admin_premium_traffic.add_extra_bytes`), и support-начисление посреди
+    инцидента вероятнее самостоятельной покупки. Попади премиум-фильтр в
+    `GraceBillingState`, набор сквадов у свежего чтения стал бы БОЛЬШЕ, чем в
+    снимке сессии, `billing_still_matches_session` вернул бы False, и оверлей
+    закрылся бы конфликтом посреди инцидента — а для EXPIRED дедуп по ключу
+    инцидента больше бы его и не открыл.
+    """
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(db, limited_squads=(PREMIUM_SQUAD,), status='expired', end_at=NOW - timedelta(days=1))
+        gateway = SQLAlchemyGraceBillingGateway(db)
+        session = _session_for(await gateway.get_subscription(SUBSCRIPTION_ID))
+
+        # Клиент докупил трафик / админ начислил — блокировка снята.
+        await _set_limited(db, ())
+        current = await gateway.get_subscription(SUBSCRIPTION_ID)
+
+        assert billing_still_matches_session(session, current) is True
+
+
+@pytest.mark.asyncio
+async def test_the_worker_limiting_mid_pass_does_not_conflict_the_session(monkeypatch):
+    """Обратное направление — гонка «сессия открылась посреди прохода».
+
+    Гард воркера резолвит открытые оверлеи в начале прохода, а `_limit_squad`
+    коммитит минутами позже и не под `lock_grace_sensitive_panel_updates`.
+    Сессия, открывшаяся в этом промежутке, увидела бы набор МЕНЬШЕ снимка — и это
+    тоже не повод объявлять инцидент изменившимся.
+    """
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(db, status='expired', end_at=NOW - timedelta(days=1))
+        gateway = SQLAlchemyGraceBillingGateway(db)
+        session = _session_for(await gateway.get_subscription(SUBSCRIPTION_ID))
+
+        # Воркер добрался до подписки уже после открытия сессии.
+        await _set_limited(db, (PREMIUM_SQUAD,))
+        current = await gateway.get_subscription(SUBSCRIPTION_ID)
+
+        assert billing_still_matches_session(session, current) is True
