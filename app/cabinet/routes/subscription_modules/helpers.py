@@ -146,7 +146,10 @@ async def build_premium_traffic_info(
                 used_percent=round(min(100.0, (used_bytes or 0) / total * 100), 1) if total > 0 else 0.0,
                 is_limited=bool(state.is_limited) if state else False,
                 period_start_at=state.period_start_at if state else None,
-                topup_available=config.topup_enabled,
+                # Рубильник выключен — воркер квоту не считает, докупать нечего:
+                # кнопку в карточке расхода не показываем, даже если тариф её
+                # разрешает.
+                topup_available=config.topup_enabled and bool(getattr(settings, 'PREMIUM_TRAFFIC_ENABLED', True)),
             )
         )
     return result

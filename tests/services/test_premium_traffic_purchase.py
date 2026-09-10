@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.database.crud.premium_traffic import get_or_create_state
+from app.config import settings
+from app.database.crud.premium_traffic import get_or_create_state, get_state
 from app.database.models import SubscriptionPremiumTraffic
 from app.services.premium_traffic_purchase import (
     PremiumTopupError,
@@ -60,6 +61,12 @@ class TestOptions:
     def test_tariff_without_premium_offers_nothing(self):
         assert get_premium_topup_options(_subscription({})) == {}
 
+    def test_nothing_is_offered_when_feature_is_disabled(self, monkeypatch):
+        """Рубильник выключен — кнопку докупки нигде показывать нельзя."""
+        monkeypatch.setattr(settings, 'PREMIUM_TRAFFIC_ENABLED', False)
+
+        assert get_premium_topup_options(_subscription()) == {}
+
 
 class TestQuote:
     async def test_known_package_is_priced(self, monkeypatch):
@@ -104,6 +111,19 @@ class TestQuote:
             quote = await quote_premium_topup(db, _subscription(), SQUAD, 5)
 
             assert quote.gb == 5
+
+    async def test_quote_refuses_when_feature_is_disabled(self, monkeypatch):
+        """Отказ обязан случиться до любого списания или изменения состояния."""
+        monkeypatch.setattr(settings, 'PREMIUM_TRAFFIC_ENABLED', False)
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            with pytest.raises(PremiumTopupError) as error:
+                await quote_premium_topup(db, _subscription(), SQUAD, 5)
+
+            assert error.value.code == 'feature_disabled'
+            # Ни одной строки состояния не появилось: сервис не тронул БД вообще,
+            # значит и до списания баланса в роутере дело дойти не могло бы.
+            assert await get_state(db, 1, SQUAD) is None
 
     async def test_zero_ceiling_means_no_limit(self, monkeypatch):
         limits = {SQUAD: {**WITH_TOPUP, 'max_topup_gb': 0}}

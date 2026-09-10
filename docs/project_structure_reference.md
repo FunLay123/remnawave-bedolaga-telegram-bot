@@ -2422,7 +2422,6 @@
 - `docs/persistent_cart_system.md` — файл
 - `docs/project_structure_reference.md` — файл
 - `docs/referral_program_setting.md` — файл
-- `docs/superpowers/`
 - `docs/web-admin-integration-guide.md` — файл
 - `docs/web-admin-integration.md` — файл
 - `docs/websocket-and-webhooks.md` — файл
@@ -2431,14 +2430,6 @@
 
 - `docs/handoffs/handoff-2026-08-31-1659.md` — файл
 - `docs/handoffs/handoff-2026-08-31-1944.md` — файл
-
-### docs/superpowers
-
-- `docs/superpowers/plans/`
-
-#### docs/superpowers/plans
-
-- `docs/superpowers/plans/2026-09-09-premium-traffic-limits-hardening.md` — файл
 
 ## migrations
 
@@ -3171,6 +3162,9 @@
 - `tests/cabinet/test_premium_traffic_info.py` — Python-модуль
   Классы: нет
   Функции: `test_tariff_without_premium_squads_returns_nothing` — Пустой список — мини-апп не рисует блок вовсе., `test_subscription_without_tariff_is_safe`, `test_limit_is_shown_before_the_worker_ever_ran` — Пользователь должен видеть лимит, не дожидаясь первого прохода воркера., `test_usage_is_taken_from_the_state`, `test_topped_up_traffic_is_shown_separately` — Видно, что пользователь докупал, а не просто «лимит стал больше»., `test_percent_never_exceeds_hundred` — Перерасход между проходами воркера не должен ломать шкалу в интерфейсе., `test_limited_squad_is_flagged`, `test_name_falls_back_to_the_server_name` — Без названия строки премиума в интерфейсе неразличимы., `test_custom_name_wins_over_the_server_name`, `test_unknown_server_leaves_the_name_empty` — Сервер удалили из справочника — интерфейс подставит общий заголовок., `test_squad_outside_the_subscription_is_not_shown` — Лимит в тарифе задан, но подписка на этот сквад права не даёт., `test_topup_availability_comes_from_the_tariff`, `test_states_of_other_subscriptions_do_not_leak`
+- `tests/cabinet/test_premium_traffic_purchase_route.py` — Python-модуль
+  Классы: нет
+  Функции: `test_purchase_route_refuses_when_feature_disabled`
 - `tests/cabinet/test_promo_offer_broadcast_notify.py` — Python-модуль
   Классы: нет
   Функции: `test_delivery_runs_off_plain_ids` — В сервис рассылок уходят голые telegram_id, без ORM-объектов сессии запроса., `test_nothing_queued_without_telegram_recipients` — Некому слать в Telegram — запись рассылки не заводится., `test_promo_preferences_filter_telegram_and_email_notifications`
@@ -4065,7 +4059,7 @@
   Классы: нет
   Функции: `test_every_panel_squad_write_is_guarded`, `test_the_guard_is_actually_used` — Страховка от обратного: правило есть, а применять его перестали., `test_grace_exception_list_does_not_rot` — Список исключений должен указывать на существующие места отправки., `test_the_write_door_is_guarded` — Исключение для payload держится на том, что фильтр стоит в writer.
 - `tests/services/test_premium_traffic_purchase.py` — Python-модуль
-  Классы: `TestOptions` (4 методов), `TestQuote` (6 методов), `TestApply` (5 методов)
+  Классы: `TestOptions` (5 методов), `TestQuote` (7 методов), `TestApply` (5 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
   Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (10 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (7 методов)

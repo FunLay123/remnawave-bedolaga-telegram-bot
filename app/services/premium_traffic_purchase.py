@@ -10,6 +10,12 @@
 
 Правила цены здесь, а не в роутере: покупать премиум умеют и кабинет, и бот, а
 разойтись в цене они не должны.
+
+Рубильник ``PREMIUM_TRAFFIC_ENABLED`` проверяется здесь же, до какого-либо
+списания: без воркера (``PremiumTrafficService``) купленную квоту никто не
+применит и не израсходует, а деньги за неё всё равно спишутся. Проверка в
+сервисном слое, а не в роутере, — чтобы её унаследовал и будущий бот-флоу
+покупки, который появится позже и будет дёргать эти же функции напрямую.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from dataclasses import dataclass
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database.crud.premium_traffic import add_extra_bytes, get_or_create_state, get_state
 from app.utils.premium_traffic import BYTES_IN_GB, PremiumSquadConfig, get_premium_squads_for_tariff
 
@@ -49,8 +56,23 @@ class PremiumTopupQuote:
         return self.gb * BYTES_IN_GB
 
 
+def _premium_traffic_enabled() -> bool:
+    """Тот же рубильник, что у воркера учёта (``premium_traffic_service``).
+
+    Выключен — значит, никто не считает расход и не снимает доступ по квоте:
+    продавать её в таком состоянии нельзя, купленное не будет ни применено, ни
+    израсходовано.
+    """
+    return bool(getattr(settings, 'PREMIUM_TRAFFIC_ENABLED', True))
+
+
 def get_premium_topup_options(subscription) -> dict[str, PremiumSquadConfig]:
     """Сквады подписки, где докупка премиум-трафика включена и есть пакеты."""
+    if not _premium_traffic_enabled():
+        # Рубильник выключен — докупку нигде не показываем, включая кнопку/пункт
+        # в интерфейсе: список вариантов для UI как раз строится отсюда.
+        return {}
+
     configs = get_premium_squads_for_tariff(getattr(subscription, 'tariff', None))
     connected = set(subscription.connected_squads or [])
     return {
@@ -69,6 +91,15 @@ async def quote_premium_topup(
     gb: int,
 ) -> PremiumTopupQuote:
     """Проверить возможность покупки и посчитать цену до скидок."""
+    if not _premium_traffic_enabled():
+        # Отказ обязан случиться раньше любого списания: это единственная точка
+        # входа для покупки — и в кабинете, и в будущем боте — так что деньги за
+        # неприменимую квоту здесь просто не доходят до списания.
+        raise PremiumTopupError(
+            'feature_disabled',
+            'Докупка премиум-трафика временно отключена',
+        )
+
     options = get_premium_topup_options(subscription)
     config = options.get(squad_uuid)
     if config is None:
