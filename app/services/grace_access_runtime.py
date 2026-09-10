@@ -60,6 +60,7 @@ from app.services.grace_access_service import (
     panel_matches_overlay,
 )
 from app.services.panel_sync import is_subscription_live, panel_expire_at
+from app.utils.premium_traffic import effective_panel_squads
 
 
 logger = structlog.get_logger(__name__)
@@ -324,7 +325,20 @@ class SQLAlchemyGraceBillingGateway:
         subscription = result.scalar_one_or_none()
         if subscription is None or subscription.user is None:
             return None
-        return _subscription_to_billing(subscription)
+        # `connected_squads` — права подписки, а не то, что должно лежать в
+        # панели: сквад, снятый воркером за перерасход премиум-лимита, из прав
+        # не исчезает. Канонический набор строится здесь, у самого чтения, а не
+        # на границе отправки: из него растут и цель `_build_billing_target`, и
+        # сверка её результата с панелью, и снимок `billing_before` в сессии.
+        # Отфильтруй мы только отправку — сверка сравнивала бы панель с
+        # нефильтрованной целью и считала бы совпадение расхождением.
+        # Разбор прав оставляем прежним, чтобы битая строка по-прежнему
+        # приводила к GraceSnapshotError, а не уезжала в снимок как есть.
+        granted_squads = _string_tuple(subscription.connected_squads)
+        return _subscription_to_billing(
+            subscription,
+            squad_uuids=tuple(await effective_panel_squads(subscription.id, granted_squads, db=self._db) or ()),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1630,7 +1644,17 @@ async def _acquire_database_lock(db: AsyncSession, subscription_id: int) -> None
     )
 
 
-def _subscription_to_billing(subscription: Subscription) -> GraceBillingState:
+def _subscription_to_billing(
+    subscription: Subscription,
+    *,
+    squad_uuids: tuple[str, ...] | None = None,
+) -> GraceBillingState:
+    """Каноническое состояние подписки для grace.
+
+    ``squad_uuids`` подставляет уже посчитанный набор сквадов. Разбор прав из
+    ``connected_squads`` остаётся значением по умолчанию для вызывающих без
+    сессии БД: им набор нужен для отбора кандидатов, а не для записи в панель.
+    """
     user = subscription.user
     tariff = subscription.tariff
     remnawave_id = subscription.remnawave_id if settings.is_multi_tariff_enabled() else user.remnawave_id
@@ -1644,7 +1668,7 @@ def _subscription_to_billing(subscription: Subscription) -> GraceBillingState:
         traffic_limit_bytes=traffic_limit_gb * 1024**3,
         used_traffic_bytes=int(traffic_used_gb * 1024**3),
         device_limit=subscription.device_limit,
-        squad_uuids=_string_tuple(subscription.connected_squads),
+        squad_uuids=_string_tuple(subscription.connected_squads) if squad_uuids is None else squad_uuids,
         external_squad_uuid=(tariff.external_squad_uuid if tariff else None),
         is_trial=bool(subscription.is_trial or subscription.status == SubscriptionStatus.TRIAL.value),
         is_daily=bool(tariff and tariff.is_daily),

@@ -616,7 +616,14 @@ class TestNotifications:
 
 
 async def _seed_subscription(
-    db, *, premium_limits, connected=(SQUAD,), subscription_id=1, tariff_id=1, reset_mode='MONTH'
+    db,
+    *,
+    premium_limits,
+    connected=(SQUAD,),
+    subscription_id=1,
+    tariff_id=1,
+    reset_mode='MONTH',
+    panel_user_id=PANEL_USER_ID,
 ):
     """Подписка с тарифом: премиальный список задаётся `premium_limits`."""
     db.add(
@@ -639,7 +646,11 @@ async def _seed_subscription(
             connected_squads=list(connected),
             start_date=NOW - timedelta(days=10),
             end_date=NOW + timedelta(days=20),
-            remnawave_id=PANEL_USER_ID,
+            # Колонка уникальна: подписки в одном тесте должны указывать на
+            # разных панельных пользователей.
+            remnawave_id=panel_user_id,
+            # Тоже уникальна, а server_default пустой — двум строкам нужен свой.
+            remnawave_short_id=f'sid{subscription_id}',
         )
     )
     await db.commit()
@@ -1002,3 +1013,121 @@ class TestLimitPushRetry:
                 await service.process_once()
 
             assert push_calls == [[OTHER_SQUAD]]
+
+
+# ------------------------------------------------- открытый grace-оверлей
+
+
+class TestOpenGraceOverlay:
+    """Пока над подпиской открыт grace-оверлей, составом сквадов владеет он.
+
+    Grace во время инцидента держит в панели свой снимок, сверяет панель с ним
+    (`panel_matches_overlay`) и возвращает своё циклом сверки. Снятие сквада
+    воркером он откатит и запишет ошибку — сломается не премиум-ограничение, а
+    grace: он переделает работу и отрапортует конфликт, которого не было.
+
+    Поэтому такие подписки проход пропускает целиком: ни обращения к панели, ни
+    записи состояния. Оверлей временный, следующий проход досчитает период.
+    """
+
+    @staticmethod
+    def _grace_open(monkeypatch, subscription_ids):
+        """Подменить резолв открытых оверлеев и считать обращения к нему."""
+        calls: list[int] = []
+
+        async def _open_ids(_db):
+            calls.append(1)
+            return set(subscription_ids)
+
+        monkeypatch.setattr(
+            'app.services.grace_access_runtime.get_open_grace_subscription_ids',
+            _open_ids,
+        )
+        return calls
+
+    @staticmethod
+    async def _seed_exhausted(db, *, subscription_id=1, tariff_id=1, panel_user_id=PANEL_USER_ID):
+        """Подписка, у которой премиум-сквад исчерпан на первом же проходе."""
+        await _seed_subscription(
+            db,
+            premium_limits={SQUAD: {'traffic_limit_gb': 5}},
+            connected=(SQUAD, OTHER_SQUAD),
+            subscription_id=subscription_id,
+            tariff_id=tariff_id,
+            reset_mode='NO_RESET',
+            panel_user_id=panel_user_id,
+        )
+        return await _seed_state(db, subscription_id=subscription_id, baseline_bytes=0)
+
+    async def test_worker_skips_subscriptions_with_open_grace_overlay(self, monkeypatch):
+        """Ни отправки в панель, ни записи состояния — вмешиваться нельзя."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            state = await self._seed_exhausted(db)
+            push_squads = AsyncMock()
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=push_squads,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}],
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+            self._grace_open(monkeypatch, {1})
+
+            stats = await PremiumTrafficService().process_once()
+
+            push_squads.assert_not_awaited()
+            assert state.is_limited is False  # состояние тоже не трогаем
+            assert stats['checked'] == 0
+
+    async def test_the_open_overlay_set_is_resolved_once_per_pass(self, monkeypatch):
+        """Один запрос на проход, а не на подписку: их десятки тысяч."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await self._seed_exhausted(db, subscription_id=1, tariff_id=1)
+            await self._seed_exhausted(db, subscription_id=2, tariff_id=2, panel_user_id=PANEL_USER_ID + 1)
+            _run_worker_against(
+                monkeypatch,
+                db,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}],
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+            calls = self._grace_open(monkeypatch, {1, 2})
+
+            await PremiumTrafficService().process_once()
+
+            assert len(calls) == 1
+
+    async def test_a_subscription_without_an_overlay_is_still_enforced(self, monkeypatch):
+        """Страховка от обратного: гард не имеет права глушить весь проход."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            state = await self._seed_exhausted(db)
+            push_squads = AsyncMock()
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=push_squads,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}],
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+            # Оверлей открыт над чужой подпиской.
+            self._grace_open(monkeypatch, {999})
+
+            stats = await PremiumTrafficService().process_once()
+
+            push_squads.assert_awaited_once()
+            assert state.is_limited is True
+            assert stats['limited'] == 1
+
+    async def test_orphan_cleanup_also_stands_down_under_an_open_overlay(self, monkeypatch):
+        """Уборка осиротевших состояний тоже пишет сквады — и тоже ждёт."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={OTHER_SQUAD: {'traffic_limit_gb': 5}})
+            await _seed_state(db, is_limited=True)
+            pushed = _run_worker_against(monkeypatch, db)
+            self._grace_open(monkeypatch, {1})
+
+            stats = await PremiumTrafficService().process_once()
+
+            assert pushed == []
+            assert stats['cleaned'] == 0
+            state = await get_state(db, 1, SQUAD)
+            assert state is not None and state.is_limited is True

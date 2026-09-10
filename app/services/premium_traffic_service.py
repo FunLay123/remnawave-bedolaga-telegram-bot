@@ -163,6 +163,10 @@ class PremiumTrafficService:
             if not targets and not orphans:
                 return stats
 
+            targets, orphans = await self._drop_grace_owned(db, targets, orphans)
+            if not targets and not orphans:
+                return stats
+
             now = datetime.now(UTC)
             async with service.get_api_client() as api:
                 if orphans:
@@ -329,6 +333,43 @@ class PremiumTrafficService:
                 )
             )
         return orphans
+
+    @staticmethod
+    async def _drop_grace_owned(
+        db: AsyncSession,
+        targets: list[_Target],
+        orphans: list[_Orphan],
+    ) -> tuple[list[_Target], list[_Orphan]]:
+        """Убрать из прохода подписки с открытым grace-оверлеем.
+
+        Во время инцидента составом сквадов владеет grace: он держит в панели
+        свой снимок, сверяет панель с ним (`panel_matches_overlay`) и возвращает
+        своё циклом сверки. Наше снятие он откатит и запишет ошибку — сломается
+        не премиум-ограничение, а grace. Поэтому такие подписки проход
+        пропускает целиком: ни обращения к панели, ни записи состояния. Ничего
+        не теряется — оверлей временный, а следующий проход после его закрытия
+        досчитает период и снимет сквад.
+
+        Множество резолвится один раз за проход: запрос на подписку означал бы
+        десятки тысяч обращений к БД каждые пять минут, а при выключенном grace
+        запроса не будет вовсе — `get_open_grace_subscription_ids` в
+        немутирующих режимах отвечает пустым множеством сразу.
+        """
+        from app.services.grace_access_runtime import get_open_grace_subscription_ids
+
+        open_grace_ids = await get_open_grace_subscription_ids(db)
+        if not open_grace_ids:
+            return targets, orphans
+
+        kept_targets = [target for target in targets if target.subscription.id not in open_grace_ids]
+        kept_orphans = [orphan for orphan in orphans if orphan.subscription_id not in open_grace_ids]
+        skipped = len(targets) - len(kept_targets) + len(orphans) - len(kept_orphans)
+        if skipped:
+            logger.info(
+                'Премиум-проход пропустил подписки с открытым grace-оверлеем',
+                skipped=skipped,
+            )
+        return kept_targets, kept_orphans
 
     async def _clear_orphans(self, db: AsyncSession, api: Any, orphans: list[_Orphan]) -> int:
         cleared = 0

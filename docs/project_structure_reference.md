@@ -1581,7 +1581,7 @@
   Классы: `PremiumTopupError` (1 методов), `PremiumTopupQuote` (1 методов)
   Функции: `get_premium_topup_options` — Сквады подписки, где докупка премиум-трафика включена и есть пакеты., `quote_premium_topup` — Проверить возможность покупки и посчитать цену до скидок., `apply_premium_topup` — Начислить купленный объём.
 - `app/services/premium_traffic_service.py` — Python-модуль
-  Классы: `PremiumTrafficService` (32 методов)
+  Классы: `PremiumTrafficService` (33 методов)
   Функции: нет
 - `app/services/pricing_engine.py` — Python-модуль
   Классы: `TariffBreakdown`, `ClassicBreakdown`, `RenewalPricing` (1 методов), `TariffSwitchResult` (2 методов), `PricingEngine` (20 методов)
@@ -3881,6 +3881,9 @@
 - `tests/services/test_grace_access_sqlite_safety.py` — Python-модуль
   Классы: нет
   Функции: `test_sqlite_delete_guard_preserves_open_snapshot_and_cascades_completed_history`, `test_sqlite_predelete_noop_write_blocks_a_concurrent_pending_insert`, `test_sqlite_user_lock_blocks_a_new_subscription_during_full_delete`, `test_sqlite_delete_guard_also_blocks_user_cascade`
+- `tests/services/test_grace_respects_premium_limits.py` — Python-модуль
+  Классы: нет
+  Функции: `test_billing_state_drops_a_squad_whose_premium_quota_is_exhausted` — Исчерпанный премиум-сквад из канонического набора уходит, остальные — нет., `test_billing_state_keeps_everything_the_customer_is_still_entitled_to` — Фильтр вычитающий: пока лимит не исчерпан, набор прав не меняется., `test_canonical_panel_payload_does_not_regrant_the_exhausted_squad` — Тот же путь, что у восстановления после оплаты, — до самого payload., `test_overlay_snapshot_excludes_the_exhausted_squad_and_keeps_the_rest` — Снимок биллинга внутри оверлея — то, к чему grace вернёт клиента., `test_overlay_snapshot_keeps_both_squads_while_the_quota_holds` — Обратная сторона: не исчерпан — из снимка ничего не пропадает.
 - `tests/services/test_guest_notification_switch.py` — Python-модуль
   Классы: нет
   Функции: `test_disabled_main_email_does_not_silence_credentials`, `test_enabled_main_email_sends_both`
@@ -4065,7 +4068,7 @@
   Классы: `TestOptions` (5 методов), `TestQuote` (7 методов), `TestApply` (5 методов), `TestCeilingUnderConcurrency` (3 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
-  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (13 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (7 методов), `TestLimitPushRetry` (6 методов)
+  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (13 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (7 методов), `TestLimitPushRetry` (6 методов), `TestOpenGraceOverlay` (6 методов)
   Функции: нет
 - `tests/services/test_promocode_rollback_keeps_user_usable.py` — Python-модуль
   Классы: нет
