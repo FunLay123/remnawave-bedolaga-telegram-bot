@@ -180,7 +180,7 @@ class TestUsageCollection:
 
 
 class TestDecisions:
-    async def _apply(self, service, target, state, used_bytes, monkeypatch, api=None):
+    async def _apply(self, service, target, state, used_bytes, monkeypatch, api=None, panel_user=None):
         async def _get_state(_db, _sub_id, _squad):
             return state
 
@@ -198,6 +198,7 @@ class TestDecisions:
             used_bytes=used_bytes,
             period_start=NOW,
             now=NOW,
+            panel_user=panel_user,
         )
         return outcome, pushed
 
@@ -319,6 +320,62 @@ class TestDecisions:
 
         assert outcome is None
         assert pushed == []
+
+    async def test_limited_squad_still_served_by_the_panel_is_resent(self, monkeypatch):
+        """Отправка снятия упала после коммита — база и панель разошлись.
+
+        Ветки «снять»/«вернуть» сюда уже не попадут: флаг стоит, лимит исчерпан.
+        Досылает только сверка — иначе клиент пользуется премиумом бессрочно.
+        """
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+
+        outcome, pushed = await self._apply(
+            service,
+            _target(),
+            state,
+            5 * BYTES_IN_GB,
+            monkeypatch,
+            panel_user=SimpleNamespace(active_internal_squads=[{'uuid': SQUAD, 'name': 'LTE'}]),
+        )
+
+        assert outcome == 'limited'
+        assert state.is_limited is True
+        assert pushed == [1]
+
+    async def test_limited_squad_absent_from_the_panel_is_left_alone(self, monkeypatch):
+        """Снятие доехало — досылать нечего, иначе панель дёргалась бы каждый проход."""
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+
+        outcome, pushed = await self._apply(
+            service,
+            _target(),
+            state,
+            5 * BYTES_IN_GB,
+            monkeypatch,
+            panel_user=SimpleNamespace(active_internal_squads=[{'uuid': OTHER_SQUAD, 'name': 'Базовый'}]),
+        )
+
+        assert outcome is None
+        assert pushed == []
+
+    async def test_unknown_panel_state_does_not_resend_a_limited_squad(self, monkeypatch):
+        """Неполный ответ панели — не повод считать сквад неснятым."""
+        service = PremiumTrafficService()
+
+        for panel_user in (None, SimpleNamespace(active_internal_squads=None)):
+            state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+            outcome, pushed = await self._apply(
+                service,
+                _target(),
+                state,
+                5 * BYTES_IN_GB,
+                monkeypatch,
+                panel_user=panel_user,
+            )
+            assert outcome is None
+            assert pushed == []
 
     async def test_unknown_panel_state_does_not_trigger_a_push(self, monkeypatch):
         """Панель не ответила — сверять не с чем, трогать ничего нельзя."""
@@ -558,7 +615,9 @@ class TestNotifications:
 # ------------------------------------------------- осиротевшие состояния
 
 
-async def _seed_subscription(db, *, premium_limits, connected=(SQUAD,), subscription_id=1, tariff_id=1):
+async def _seed_subscription(
+    db, *, premium_limits, connected=(SQUAD,), subscription_id=1, tariff_id=1, reset_mode='MONTH'
+):
     """Подписка с тарифом: премиальный список задаётся `premium_limits`."""
     db.add(
         Tariff(
@@ -568,7 +627,7 @@ async def _seed_subscription(db, *, premium_limits, connected=(SQUAD,), subscrip
             traffic_limit_gb=100,
             device_limit=1,
             server_traffic_limits=premium_limits,
-            traffic_reset_mode='MONTH',
+            traffic_reset_mode=reset_mode,
         )
     )
     db.add(
@@ -586,7 +645,7 @@ async def _seed_subscription(db, *, premium_limits, connected=(SQUAD,), subscrip
     await db.commit()
 
 
-async def _seed_state(db, *, subscription_id=1, squad_uuid=SQUAD, is_limited=False):
+async def _seed_state(db, *, subscription_id=1, squad_uuid=SQUAD, is_limited=False, baseline_bytes=None):
     state = await get_or_create_state(
         db,
         subscription_id,
@@ -595,12 +654,18 @@ async def _seed_state(db, *, subscription_id=1, squad_uuid=SQUAD, is_limited=Fal
         period_start_at=NOW,
     )
     state.is_limited = is_limited
+    # `None` означает «поправку на первые сутки ещё не замеряли»; тестам про
+    # снятие она мешает — замер пришёлся бы целиком в baseline.
+    state.baseline_bytes = baseline_bytes
     await db.commit()
     return state
 
 
-def _run_worker_against(monkeypatch, db, *, push=None):
+def _run_worker_against(monkeypatch, db, *, push=None, panel_squads=None, usage_by_node=None):
     """Подменить сессию и панель так, чтобы `process_once` шёл по нашей БД.
+
+    `panel_squads` — что панель отдаёт в `activeInternalSquads`; `None` значит
+    «панель не сказала», и сверка обязана промолчать.
 
     Возвращает список наборов сквадов, уехавших в панель.
     """
@@ -617,7 +682,10 @@ def _run_worker_against(monkeypatch, db, *, push=None):
 
         @contextlib.asynccontextmanager
         async def get_api_client(self):
-            yield FakeRemnawaveApi(panel_user=SimpleNamespace(last_traffic_reset_at=None, active_internal_squads=None))
+            yield FakeRemnawaveApi(
+                usage_by_node=usage_by_node,
+                panel_user=SimpleNamespace(last_traffic_reset_at=None, active_internal_squads=panel_squads),
+            )
 
     monkeypatch.setattr('app.services.premium_traffic_service.RemnaWaveService', _Service)
 
@@ -785,3 +853,152 @@ class TestOrphanStates:
 
             assert await get_state(db, 1, SQUAD) is not None
             assert stats['cleaned'] == 0
+
+
+# ---------------------------------------------- досылка снятия после сбоя
+
+
+class TestLimitPushRetry:
+    """Снятие коммитится до отправки — упавшая отправка не должна теряться.
+
+    Порядок в `_limit_squad` осознанный: `effective_panel_squads` читает базу, и
+    отправка до коммита вернула бы сквад обратно. Плата — окно, в котором база
+    считает сквад снятым, а панель его ещё отдаёт. Периодической пересылки
+    сквадов в проекте нет (`sync_users_to_panel` запускается вручную, рутинный
+    мониторинг `activeInternalSquads` не трогает), поэтому без сверки клиент
+    пользовался бы исчерпанным премиумом бессрочно.
+    """
+
+    @staticmethod
+    def _recording_push(fail_first=False):
+        """Двойник панели: пишет отправленный набор, при желании роняет первую."""
+        calls: list[list[str] | None] = []
+
+        async def _push(_api, _subscription_id, *, user_id, active_internal_squads):
+            calls.append(active_internal_squads)
+            if fail_first and len(calls) == 1:
+                raise RuntimeError('панель недоступна')
+
+        return calls, _push
+
+    @staticmethod
+    async def _seed_exhausted(db, *, connected=(SQUAD, OTHER_SQUAD)):
+        """Подписка, у которой премиум-сквад исчерпан на первом же проходе.
+
+        Режим сброса `NO_RESET` — чтобы граница периода не зависела от даты
+        прогона: иначе календарный месяц однажды перевалит за `NOW` и проход
+        начнёт новый период вместо снятия.
+        """
+        await _seed_subscription(
+            db,
+            premium_limits={SQUAD: {'traffic_limit_gb': 5}},
+            connected=connected,
+            reset_mode='NO_RESET',
+        )
+        await _seed_state(db, baseline_bytes=0)
+
+    async def test_failed_limit_push_is_retried_next_pass(self, monkeypatch):
+        """Отправка снятия упала — следующий проход досылает, а не забывает."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await self._seed_exhausted(db)
+            push_calls, push = self._recording_push(fail_first=True)
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=push,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}],
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+            service = PremiumTrafficService()
+
+            first = await service.process_once()
+
+            # Флаг закоммичен до отправки, отправка упала: база и панель врозь.
+            assert first['errors'] == 1
+            state = await get_state(db, 1, SQUAD)
+            assert state is not None and state.is_limited is True
+
+            second = await service.process_once()
+
+            assert len(push_calls) == 2
+            assert push_calls[1] == [OTHER_SQUAD]
+            assert second['limited'] == 1
+
+    async def test_retry_sends_an_empty_set_when_every_squad_is_exhausted(self, monkeypatch):
+        """Все сквады подписки премиальные и исчерпаны — досылать надо literal [].
+
+        Пустой набор — законный результат фильтра, а не «нечего отправлять»:
+        `update_user` понимает `[]` как «снять все». Ветка досылки не имеет
+        права гейтить отправку непустотой набора, иначе ровно у тех подписок,
+        где премиум и есть весь доступ, снятие не доедет никогда.
+        """
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await self._seed_exhausted(db, connected=(SQUAD,))
+            push_calls, push = self._recording_push(fail_first=True)
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=push,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}],
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+            service = PremiumTrafficService()
+
+            await service.process_once()
+            second = await service.process_once()
+
+            assert push_calls == [[], []]
+            assert second['limited'] == 1
+
+    async def test_deferred_push_is_repeated_while_the_panel_still_serves_the_squad(self, monkeypatch):
+        """Отправка без исключения — ещё не применённая отправка.
+
+        `update_panel_user_grace_safe` молча выбрасывает `activeInternalSquads`
+        из апдейта, пока открыт grace-оверлей, и возвращается без ошибки.
+        Отличить отложенное от применённого по её ответу нечем, поэтому ветка
+        не имеет права ничего запоминать: единственная защита клиента —
+        повторить, пока панель отдаёт сквад.
+        """
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await self._seed_exhausted(db)
+            # Отправка «успешна», но панель набор не меняет — как при откладывании.
+            push_calls, push = self._recording_push()
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=push,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}],
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+            service = PremiumTrafficService()
+
+            for _ in range(3):
+                await service.process_once()
+
+            assert len(push_calls) == 3
+
+    async def test_applied_push_is_not_repeated(self, monkeypatch):
+        """Панель сняла сквад — досылать нечего, дёргать её каждый проход незачем."""
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await self._seed_exhausted(db)
+            panel_squads = [{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}]
+            push_calls: list[list[str] | None] = []
+
+            async def _push(_api, _subscription_id, *, user_id, active_internal_squads):
+                push_calls.append(active_internal_squads)
+                # Панель применила снятие: карточка теперь без премиум-сквада.
+                panel_squads[:] = [{'uuid': uuid} for uuid in active_internal_squads or []]
+
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=_push,
+                panel_squads=panel_squads,
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+            service = PremiumTrafficService()
+
+            for _ in range(3):
+                await service.process_once()
+
+            assert push_calls == [[OTHER_SQUAD]]

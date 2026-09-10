@@ -584,26 +584,64 @@ class PremiumTrafficService:
             )
             return 'restored'
 
+        # Зеркальная сверка на снятие. `_limit_squad` коммитит `is_limited` до
+        # отправки (иначе фильтр, читающий базу, вернул бы сквад обратно), и
+        # упавшая отправка разводит базу с панелью: у нас сквад снят, у панели
+        # работает. Ветки выше сюда уже не попадут — флаг-то стоит, — а
+        # периодической пересылки сквадов в проекте нет: `sync_users_to_panel`
+        # запускается вручную, рутинный мониторинг `activeInternalSquads` не
+        # трогает. Без этой ветки клиент пользовался бы исчерпанным премиумом
+        # бессрочно.
+        #
+        # Отправку здесь нельзя считать применённой: `update_panel_user_grace_safe`
+        # молча откладывает `activeInternalSquads`, пока открыт grace-оверлей, и
+        # отличить отложенное от применённого по её ответу нечем. Поэтому ветка
+        # ничего не запоминает: следующий проход перечитает панель и, если сквад
+        # всё ещё там, отправит снова.
+        if state.is_limited and self._squad_present_in_panel(target, panel_user):
+            await self._push_squads(db, api, target)
+            logger.info(
+                'Премиум-сквад доснят в панели повторно',
+                subscription_id=target.subscription.id,
+                squad_uuid=target.config.squad_uuid,
+            )
+            return 'limited'
+
         return None
 
+    @classmethod
+    def _squad_missing_in_panel(cls, target: _Target, panel_user: Any) -> bool:
+        """Сквад положен подписке, но в панели его нет — надо вернуть."""
+        squads = cls._panel_squads(panel_user)
+        return squads is not None and target.config.squad_uuid not in squads
+
+    @classmethod
+    def _squad_present_in_panel(cls, target: _Target, panel_user: Any) -> bool:
+        """Сквад снят в базе, но панель его всё ещё отдаёт — надо доснять."""
+        squads = cls._panel_squads(panel_user)
+        return squads is not None and target.config.squad_uuid in squads
+
     @staticmethod
-    def _squad_missing_in_panel(target: _Target, panel_user: Any) -> bool:
-        """Сквад положен подписке, но в панели его нет.
+    def _panel_squads(panel_user: Any) -> set[str] | None:
+        """Фактический набор сквадов из карточки панели либо ``None``.
 
         Панель отдаёт сквады объектами `{uuid, name}`, а не строками. Разбор
         берём общий с grace-механизмом, чтобы обе части читали одно и то же.
+
+        ``None`` — панель не ответила или ответила без поля: сверять не с чем, и
+        обе ветки сверки обязаны промолчать. Пустой набор — ответ по существу:
+        сквадов нет. Это законный случай (все сквады подписки премиальные и все
+        исчерпаны), и путать его с «нет данных» нельзя.
         """
         if panel_user is None:
-            return False
+            return None
         raw = getattr(panel_user, 'active_internal_squads', None)
-        # `None` — панель не сказала, сверять не с чем. Пустой список — сказала,
-        # что сквадов нет, и это ровно тот случай, ради которого сверка нужна.
         if raw is None:
-            return False
+            return None
 
         from app.services.grace_access_runtime import _extract_panel_squads
 
-        return target.config.squad_uuid not in set(_extract_panel_squads(raw))
+        return set(_extract_panel_squads(raw))
 
     @staticmethod
     def _net_usage(state: Any, raw_bytes: int, period_start: datetime, now: datetime) -> int:
@@ -637,6 +675,11 @@ class PremiumTrafficService:
         Порядок важен. ``effective_panel_squads`` вычитает снятые сквады из
         набора, читая базу, — если отправить раньше коммита, фильтр ещё не
         увидит отметку и вернёт сквад обратно.
+
+        Плата за такой порядок — окно, в котором база считает сквад снятым, а
+        панель его ещё отдаёт: отправка после коммита может упасть. Окно
+        закрывает сверка в ``_apply_usage`` (``_squad_present_in_panel``): она
+        досылает снятие на следующем проходе.
         """
         state.is_limited = True
         await db.commit()
