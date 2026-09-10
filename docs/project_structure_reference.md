@@ -712,7 +712,7 @@
   Функции: `create_poll`, `list_polls`, `get_poll_by_id`, `delete_poll`, `create_poll_response`, `get_poll_response_by_id`, `record_poll_answer`, `reset_poll_answers`, `get_poll_statistics`, `get_poll_responses_with_answers`
 - `app/database/crud/premium_traffic.py` — Python-модуль
   Классы: нет
-  Функции: `get_state`, `get_states_for_subscription`, `get_states_for_squad` — Все состояния по скваду — воркер обходит их пачкой, одним запросом к панели., `get_limited_squad_uuids` — Сквады, снятые из-за исчерпания лимита., `get_or_create_state` — Вернуть состояние, создав его при первой встрече., `start_new_period` — Начать новый период: обнулить расход, докупку и уведомления., `record_usage` — Записать замер расхода., `add_extra_bytes` — Начислить докупленный трафик и вернуть сквад, если он был снят., `delete_states_for_subscription` — Убрать все состояния подписки — например, при переходе на тариф без премиума., `delete_states_for_squads` — Убрать состояния конкретных сквадов — при смене тарифа их набор меняется.
+  Функции: `get_state` — Состояние по паре подписка+сквад., `get_states_for_subscription`, `get_states_for_squad` — Все состояния по скваду — воркер обходит их пачкой, одним запросом к панели., `get_limited_squad_uuids` — Сквады, снятые из-за исчерпания лимита., `get_or_create_state` — Вернуть состояние, создав его при первой встрече., `start_new_period` — Начать новый период: обнулить расход, докупку и уведомления., `record_usage` — Записать замер расхода., `add_extra_bytes` — Начислить докупленный трафик и вернуть сквад, если он был снят., `delete_states_for_subscription` — Убрать все состояния подписки — например, при переходе на тариф без премиума., `delete_states_for_squads` — Убрать состояния конкретных сквадов — при смене тарифа их набор меняется.
 - `app/database/crud/privacy_policy.py` — Python-модуль
   Классы: нет
   Функции: `get_privacy_policy`, `upsert_privacy_policy`, `set_privacy_policy_enabled`
@@ -3164,7 +3164,7 @@
   Функции: `test_tariff_without_premium_squads_returns_nothing` — Пустой список — мини-апп не рисует блок вовсе., `test_subscription_without_tariff_is_safe`, `test_limit_is_shown_before_the_worker_ever_ran` — Пользователь должен видеть лимит, не дожидаясь первого прохода воркера., `test_usage_is_taken_from_the_state`, `test_topped_up_traffic_is_shown_separately` — Видно, что пользователь докупал, а не просто «лимит стал больше»., `test_percent_never_exceeds_hundred` — Перерасход между проходами воркера не должен ломать шкалу в интерфейсе., `test_limited_squad_is_flagged`, `test_name_falls_back_to_the_server_name` — Без названия строки премиума в интерфейсе неразличимы., `test_custom_name_wins_over_the_server_name`, `test_unknown_server_leaves_the_name_empty` — Сервер удалили из справочника — интерфейс подставит общий заголовок., `test_squad_outside_the_subscription_is_not_shown` — Лимит в тарифе задан, но подписка на этот сквад права не даёт., `test_topup_availability_comes_from_the_tariff`, `test_states_of_other_subscriptions_do_not_leak`
 - `tests/cabinet/test_premium_traffic_purchase_route.py` — Python-модуль
   Классы: нет
-  Функции: `test_purchase_route_refuses_when_feature_disabled`
+  Функции: `test_purchase_route_refuses_when_feature_disabled`, `test_purchase_route_rolls_back_the_charge_when_the_cap_is_hit` — Отказ по потолку после списания обязан откатить и списание.
 - `tests/cabinet/test_promo_offer_broadcast_notify.py` — Python-модуль
   Классы: нет
   Функции: `test_delivery_runs_off_plain_ids` — В сервис рассылок уходят голые telegram_id, без ORM-объектов сессии запроса., `test_nothing_queued_without_telegram_recipients` — Некому слать в Telegram — запись рассылки не заводится., `test_promo_preferences_filter_telegram_and_email_notifications`
@@ -3349,6 +3349,9 @@
 - `tests/database/test_postgres_fixture_guard.py` — Python-модуль
   Классы: нет
   Функции: `test_missing_url_skips_by_default` — Окружение без PostgreSQL не должно ронять прогон., `test_missing_url_fails_when_postgres_is_required` — С поднятым флагом отсутствие базы — падение, а не пропуск., `test_requirement_flag_accepts_usual_spellings`, `test_requirement_flag_ignores_everything_else`, `test_blank_url_counts_as_absent` — Пустая переменная — это отсутствие базы, а не адрес из пробелов., `test_ci_workflow_runs_postgres_tests_for_real` — CI обязан поднимать базу и требовать, чтобы тесты на ней прошли.
+- `tests/database/test_premium_topup_ceiling_lock_postgres.py` — Python-модуль
+  Классы: нет
+  Функции: `test_state_row_is_locked_until_the_topup_is_committed` — Пока одна докупка держит строку состояния, вторая ждёт., `test_concurrent_topups_do_not_exceed_cap` — Два одновременных запроса не должны пробить потолок докупки.
 - `tests/database/test_reachability_batches_schema_parity.py` — Python-модуль
   Классы: нет
   Функции: `both`, `test_columns_match`, `test_indexes_match`, `test_column_types_match`, `test_jobs_reference_batches`, `test_downgrade_removes_batches`
@@ -4059,7 +4062,7 @@
   Классы: нет
   Функции: `test_every_panel_squad_write_is_guarded`, `test_the_guard_is_actually_used` — Страховка от обратного: правило есть, а применять его перестали., `test_grace_exception_list_does_not_rot` — Список исключений должен указывать на существующие места отправки., `test_the_write_door_is_guarded` — Исключение для payload держится на том, что фильтр стоит в writer.
 - `tests/services/test_premium_traffic_purchase.py` — Python-модуль
-  Классы: `TestOptions` (5 методов), `TestQuote` (7 методов), `TestApply` (5 методов)
+  Классы: `TestOptions` (5 методов), `TestQuote` (7 методов), `TestApply` (5 методов), `TestCeilingUnderConcurrency` (3 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
   Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (13 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (7 методов), `TestLimitPushRetry` (6 методов)

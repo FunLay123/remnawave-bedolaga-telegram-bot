@@ -31,6 +31,15 @@ WITH_TOPUP = {
     'max_topup_gb': 10,
 }
 
+# Отдельный тариф для гонки: потолок 100 ГБ и пакет 20 ГБ, чтобы одна покупка
+# в потолок укладывалась, а две — нет.
+BIG_TOPUP = {
+    'traffic_limit_gb': 50,
+    'topup_enabled': True,
+    'topup_packages': {'20': 4000},
+    'max_topup_gb': 100,
+}
+
 
 def _subscription(limits=None, connected=(SQUAD,), subscription_id=1):
     return SimpleNamespace(
@@ -197,3 +206,78 @@ class TestApply:
             state, _ = await apply_premium_topup(db, subscription, second, period_start_at=NOW)
 
             assert state.extra_bytes == 6 * BYTES_IN_GB
+
+
+class TestCeilingUnderConcurrency:
+    """Потолок докупки при одновременных запросах.
+
+    Проверка в ``quote_premium_topup`` читает состояние без блокировки, поэтому
+    два запроса (двойной тап, повтор из-за таймаута) успевают увидеть один и тот
+    же остаток и оба её пройти. Настоящую защиту даёт перепроверка под
+    блокировкой строки в ``apply_premium_topup``.
+
+    Здесь запросы разложены в детерминированный порядок: обе котировки — до
+    первого начисления. Это в точности то чередование, которое пробивало
+    потолок, и SQLite его воспроизводит честно. Чего SQLite показать не может —
+    настоящей взаимной блокировки: ``FOR UPDATE`` он молча игнорирует. За это
+    отвечает ``tests/database/test_premium_topup_ceiling_lock_postgres.py``.
+    """
+
+    async def test_concurrent_topups_do_not_exceed_cap(self, monkeypatch):
+        """Два одновременных запроса не должны пробить потолок докупки."""
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription({SQUAD: BIG_TOPUP})
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=50 * BYTES_IN_GB, period_start_at=NOW)
+            state.extra_bytes = 80 * BYTES_IN_GB
+            await db.commit()
+
+            # Обе котировки видят «докуплено 80 из 100» и обе проходят: по
+            # отдельности каждая покупка в потолок укладывается.
+            first = await quote_premium_topup(db, subscription, SQUAD, 20)
+            second = await quote_premium_topup(db, subscription, SQUAD, 20)
+
+            successful_purchases = 0
+            refused: list[str] = []
+            for quote in (first, second):
+                try:
+                    await apply_premium_topup(db, subscription, quote, period_start_at=NOW)
+                except PremiumTopupError as error:
+                    refused.append(error.code)
+                else:
+                    successful_purchases += 1
+            await db.commit()
+
+            state = await get_state(db, 1, SQUAD)
+            assert state.extra_bytes <= 100 * BYTES_IN_GB
+            assert successful_purchases == 1
+            assert refused == ['topup_limit_reached']
+
+    async def test_second_topup_is_allowed_when_it_still_fits(self, monkeypatch):
+        """Перепроверка не должна отказывать там, где место ещё есть.
+
+        Сторож против «починки» отказом на любую вторую покупку: потолок
+        считается за период, а не за запрос.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription({SQUAD: BIG_TOPUP})
+
+            first = await quote_premium_topup(db, subscription, SQUAD, 20)
+            second = await quote_premium_topup(db, subscription, SQUAD, 20)
+            await apply_premium_topup(db, subscription, first, period_start_at=NOW)
+            state, _ = await apply_premium_topup(db, subscription, second, period_start_at=NOW)
+
+            assert state.extra_bytes == 40 * BYTES_IN_GB
+
+    async def test_zero_ceiling_is_not_rechecked(self, monkeypatch):
+        """Потолок 0 — «без ограничения», и перепроверка его не изобретает."""
+        limits = {SQUAD: {**BIG_TOPUP, 'max_topup_gb': 0}}
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription(limits)
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=50 * BYTES_IN_GB, period_start_at=NOW)
+            state.extra_bytes = 500 * BYTES_IN_GB
+            await db.commit()
+
+            quote = await quote_premium_topup(db, subscription, SQUAD, 20)
+            state, _ = await apply_premium_topup(db, subscription, quote, period_start_at=NOW)
+
+            assert state.extra_bytes == 520 * BYTES_IN_GB

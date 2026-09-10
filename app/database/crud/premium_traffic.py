@@ -16,15 +16,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.models import SubscriptionPremiumTraffic
 
 
-async def get_state(db: AsyncSession, subscription_id: int, squad_uuid: str) -> SubscriptionPremiumTraffic | None:
-    result = await db.execute(
-        select(SubscriptionPremiumTraffic).where(
-            and_(
-                SubscriptionPremiumTraffic.subscription_id == subscription_id,
-                SubscriptionPremiumTraffic.squad_uuid == squad_uuid,
-            )
+async def get_state(
+    db: AsyncSession,
+    subscription_id: int,
+    squad_uuid: str,
+    *,
+    for_update: bool = False,
+) -> SubscriptionPremiumTraffic | None:
+    """Состояние по паре подписка+сквад.
+
+    ``for_update`` блокирует строку до конца транзакции — нужно там, где по
+    прочитанному значению принимается решение о записи (потолок докупки).
+    ``populate_existing`` при этом обязателен: без него сессия вернула бы свой
+    прежний снимок строки, и блокировка защищала бы устаревшее число.
+    """
+    query = select(SubscriptionPremiumTraffic).where(
+        and_(
+            SubscriptionPremiumTraffic.subscription_id == subscription_id,
+            SubscriptionPremiumTraffic.squad_uuid == squad_uuid,
         )
     )
+    if for_update:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    result = await db.execute(query)
     return result.scalar_one_or_none()
 
 
@@ -68,14 +82,19 @@ async def get_or_create_state(
     limit_bytes: int,
     period_start_at: datetime,
     panel_reset_ack_at: datetime | None = None,
+    for_update: bool = False,
 ) -> SubscriptionPremiumTraffic:
     """Вернуть состояние, создав его при первой встрече.
 
     Идемпотентно: воркер и покупка трафика могут дойти сюда одновременно, и
     уникальный ключ (subscription_id, squad_uuid) отобьёт вторую вставку. В
     этом случае перечитываем строку победителя вместо того, чтобы падать.
+
+    ``for_update`` передаётся в оба чтения: и в первое, и в перечитывание после
+    проигранной гонки на вставке. Иначе покупка, пришедшая второй, получила бы
+    строку соперника без блокировки — ровно ту, по которой ей считать потолок.
     """
-    existing = await get_state(db, subscription_id, squad_uuid)
+    existing = await get_state(db, subscription_id, squad_uuid, for_update=for_update)
     if existing is not None:
         return existing
 
@@ -94,7 +113,7 @@ async def get_or_create_state(
             db.add(state)
             await db.flush()
     except IntegrityError:
-        conflicting = await get_state(db, subscription_id, squad_uuid)
+        conflicting = await get_state(db, subscription_id, squad_uuid, for_update=for_update)
         if conflicting is None:
             # Нарушен не наш уникальный ключ — прятать такое нельзя.
             raise

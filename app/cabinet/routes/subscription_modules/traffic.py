@@ -973,13 +973,26 @@ async def purchase_premium_traffic(
     if discount['percent'] > 0:
         description += f' (скидка {discount["percent"]}%)'
 
-    if not await subtract_user_balance(db, user, final_price, description):
+    # commit=False: списание и начисление обязаны быть одной транзакцией.
+    # Потолок докупки перепроверяется под блокировкой строки уже ПОСЛЕ списания,
+    # и если параллельная покупка успела выбрать остаток, откатывать надо оба
+    # действия разом. Общий commit — ниже, после начисления.
+    if not await subtract_user_balance(db, user, final_price, description, commit=False):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail='Failed to charge balance',
         )
 
-    _state, restored = await apply_premium_topup(db, subscription, quote, period_start_at=_datetime.now(_UTC))
+    try:
+        _state, restored = await apply_premium_topup(db, subscription, quote, period_start_at=_datetime.now(_UTC))
+    except PremiumTopupError as error:
+        # Начисления не будет — значит, не должно остаться и списания.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': error.code, 'message': error.message},
+        ) from error
+
     await create_transaction(
         db=db,
         user_id=user.id,

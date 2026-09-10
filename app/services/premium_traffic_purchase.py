@@ -84,6 +84,23 @@ def get_premium_topup_options(subscription) -> dict[str, PremiumSquadConfig]:
     }
 
 
+def _ensure_topup_fits(config: PremiumSquadConfig, already_bytes: int | None, gb: int) -> None:
+    """Проверить потолок докупки за период. Одно правило на оба места проверки.
+
+    ``max_topup_gb == 0`` — «без ограничения»: это настройка тарифа, а не
+    нулевой потолок.
+    """
+    if config.max_topup_gb <= 0:
+        return
+
+    already_gb = (already_bytes or 0) / BYTES_IN_GB
+    if already_gb + gb > config.max_topup_gb:
+        raise PremiumTopupError(
+            'topup_limit_reached',
+            f'Больше {config.max_topup_gb} ГБ за период докупить нельзя (уже докуплено {already_gb:.0f} ГБ)',
+        )
+
+
 async def quote_premium_topup(
     db: AsyncSession,
     subscription,
@@ -110,13 +127,12 @@ async def quote_premium_topup(
         raise PremiumTopupError('package_not_found', f'Пакет {gb} ГБ не настроен для этого сервера')
 
     if config.max_topup_gb > 0:
+        # Быстрый отказ до списания: читаем без блокировки, потому что решение
+        # по этому чтению не записывается. Окончательная проверка — в
+        # apply_premium_topup, под блокировкой строки. Без потолка не читаем
+        # вовсе: лишний запрос на каждую котировку не нужен.
         state = await get_state(db, subscription.id, squad_uuid)
-        already_gb = (state.extra_bytes or 0) / BYTES_IN_GB if state else 0
-        if already_gb + gb > config.max_topup_gb:
-            raise PremiumTopupError(
-                'topup_limit_reached',
-                f'Больше {config.max_topup_gb} ГБ за период докупить нельзя (уже докуплено {already_gb:.0f} ГБ)',
-            )
+        _ensure_topup_fits(config, state.extra_bytes if state else 0, gb)
 
     return PremiumTopupQuote(squad_uuid=squad_uuid, gb=gb, base_price_kopeks=price, config=config)
 
@@ -136,14 +152,32 @@ async def apply_premium_topup(
 
     Состояние создаётся, если воркер до подписки ещё не дошёл: покупка не должна
     ждать первого прохода.
+
+    Бросает ``PremiumTopupError('topup_limit_reached')``, если к моменту
+    начисления потолок периода уже выбран соседней покупкой. Вызывающий обязан
+    откатить транзакцию: списание и начисление должны жить и умирать вместе.
     """
+    # Сессия живёт с autoflush=False (как в проде), а читать состояние мы будем
+    # с populate_existing — то есть поверх объекта в памяти лягут значения из
+    # БД. Собственные несохранённые изменения надо отправить в БД до этого,
+    # иначе перечитывание их потеряет. Это flush в открытой транзакции, не
+    # commit: списание вызывающего по-прежнему можно откатить.
+    await db.flush()
     state = await get_or_create_state(
         db,
         subscription.id,
         quote.squad_uuid,
         limit_bytes=quote.config.limit_bytes,
         period_start_at=period_start_at,
+        for_update=True,
     )
+    # Проверка в quote читала строку без блокировки, и параллельная покупка
+    # могла начислить своё уже после неё: обе увидели бы один остаток и обе
+    # прошли. Решающая проверка — здесь, по заблокированной строке, в той же
+    # транзакции, что и начисление. Тем же приёмом lock_user_for_pricing
+    # защищает баланс.
+    _ensure_topup_fits(quote.config, state.extra_bytes, quote.gb)
+
     was_limited = bool(state.is_limited)
     add_extra_bytes(state, quote.bytes)
     restored = was_limited and not state.is_limited
