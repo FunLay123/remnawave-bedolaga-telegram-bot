@@ -1073,6 +1073,15 @@ async def _drop_orphan_premium_states(db: AsyncSession, subscription: Subscripti
     перестаёт вычитать сквад, а смена тарифа всегда заканчивается записью
     подписки в панель. Обратный порядок здесь недоступен и не нужен: удаление
     может только вернуть сквад, отобрать — никогда.
+
+    Исключение — состояния, закрытые вручную (``closed_at`` не ``NULL``,
+    см. ``/close`` в ``admin_premium_traffic.py``). Их эта уборка не трогает:
+    удаление стёрло бы ``closed_at`` навсегда и тем же ходом, которым здесь
+    решается «сквада больше нет в тарифе», молча сняло бы решение оператора
+    отобрать доступ — ровно смешение причины и следствия, которое разводит
+    вся эта задача. `effective_panel_squads` при сохранённой строке продолжит
+    вычитать сквад из ближайшей же отправки, так что закрытие переживает и
+    смену тарифа подписки, а не только смену периода и доначисление трафика.
     """
     from app.database.crud.premium_traffic import delete_states_for_squads, get_states_for_subscription
     from app.utils.premium_traffic import get_premium_squads_for_tariff
@@ -1082,7 +1091,17 @@ async def _drop_orphan_premium_states(db: AsyncSession, subscription: Subscripti
         if not states:
             return
         premium = get_premium_squads_for_tariff(new_tariff)
-        orphaned = {state.squad_uuid for state in states if state.squad_uuid not in premium}
+        not_in_new_tariff = {state.squad_uuid: state for state in states if state.squad_uuid not in premium}
+        if not not_in_new_tariff:
+            return
+        closed = {uuid for uuid, state in not_in_new_tariff.items() if state.closed_at is not None}
+        orphaned = set(not_in_new_tariff) - closed
+        if closed:
+            logger.info(
+                '🔒 Смена тарифа: премиум-лимиты, закрытые администратором, сохранены',
+                subscription_id=subscription.id,
+                squads=sorted(closed),
+            )
         if not orphaned:
             return
         await delete_states_for_squads(db, subscription.id, orphaned)

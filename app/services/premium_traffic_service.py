@@ -98,6 +98,13 @@ class _Orphan:
     # ``ON DELETE CASCADE``, так что в норме этого не бывает.
     subscription: Subscription | None
     panel_user_id: int | None
+    # Причина снятия отдельно от следствия (``is_limited``, см. модель
+    # ``SubscriptionPremiumTraffic``). Сквад может осиротеть и обычным путём —
+    # админ обнулил ``traffic_limit_gb`` в тарифе («отдельного лимита нет», см.
+    # ``app/utils/premium_traffic.py``), — но если он ещё и закрыт вручную
+    # (``/close``), это не «сквад больше не премиальный», а прежнее решение
+    # оператора отобрать доступ. Осиротение не должно его снимать.
+    closed_at: datetime | None
 
 
 class _PanelWriteNotApplied(Exception):
@@ -345,6 +352,7 @@ class PremiumTrafficService:
                     is_limited=bool(state.is_limited),
                     subscription=subscription,
                     panel_user_id=self._panel_user_id(subscription) if subscription is not None else None,
+                    closed_at=state.closed_at,
                 )
             )
         return orphans
@@ -409,8 +417,30 @@ class PremiumTrafficService:
         запись — общий случай ``_log_panel_failure``: обе откатывают точку
         сохранения целиком, строка остаётся на месте, и следующий проход
         повторит попытку.
+
+        Закрытые администратором строки (``orphan.closed_at is not None``)
+        обрабатываются отдельной веткой в начале функции — ни удаления, ни
+        возврата в панель для них нет, см. её комментарий.
         """
         from app.database.crud.premium_traffic import delete_states_for_squads
+
+        if orphan.closed_at is not None:
+            # Сквад мог осиротеть самым обычным путём — админ обнулил
+            # `traffic_limit_gb` в тарифе («отдельного лимита нет», это
+            # сквозной кейс `parse_premium_squad`), — но если он вдобавок
+            # закрыт вручную (`/close`), это решение оператора, а не следствие
+            # того, что лимита в тарифе больше нет. Ни удалять строку (вместе
+            # с ней исчез бы `closed_at` — единственный признак причины), ни
+            # возвращать сквад в панель нельзя: закрытие переживает
+            # осиротение точно так же, как переживает смену периода
+            # (`start_new_period`) и доначисление трафика (`add_extra_bytes`).
+            # Снять его может только явный `/reopen`.
+            logger.info(
+                'Осиротевшее состояние премиум-лимита пропущено: закрыто администратором',
+                subscription_id=orphan.subscription_id,
+                squad_uuid=orphan.squad_uuid,
+            )
+            return False
 
         # Возвращать нечего, если сквад подписке и так не положен: в панель он
         # не уезжает, потому что его нет в `connected_squads`.

@@ -3276,6 +3276,9 @@
 - `tests/crud/test_create_user_race.py` — Python-модуль
   Классы: `TestViolatedConstraint` (5 методов), `TestCreateUserHappyPath` (1 методов), `TestCreateUserRaceCondition` (4 методов), `TestCreateUserSequenceDesync` (2 методов), `TestCreateUserUnknownIntegrityError` (1 методов)
   Функции: нет
+- `tests/crud/test_drop_orphan_premium_states.py` — Python-модуль
+  Классы: нет
+  Функции: `test_closed_state_survives_tariff_switch_that_drops_the_squad` — Закрытый вручную сквад не должен возвращаться в панель тихой сменой тарифа., `test_ordinary_orphan_cleanup_on_tariff_switch_still_works` — Некрытый (обычный) сквад продолжает убираться при смене тарифа как раньше., `test_squad_still_in_new_tariff_is_left_alone` — Сквад, оставшийся премиальным и в новом тарифе, уборку не затрагивает.
 - `tests/crud/test_email_alias_lookup.py` — Python-модуль
   Классы: нет
   Функции: `test_alias_of_an_existing_mailbox_is_found`, `test_different_mailboxes_are_not_matched`, `test_like_wildcards_in_the_local_part_are_escaped` — «_» — обычный символ в адресе, но джокер в LIKE., `test_own_alias_is_not_taken_even_next_to_a_stranger` — LIMIT 1 без исключения себя мог вернуть своего же юзера и скрыть чужого., `test_degenerate_and_unknown_addresses_do_not_query`
@@ -4068,7 +4071,7 @@
   Классы: `TestOptions` (5 методов), `TestQuote` (7 методов), `TestApply` (5 методов), `TestCeilingUnderConcurrency` (3 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
-  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (17 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (8 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
+  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (17 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
   Функции: нет
 - `tests/services/test_promocode_rollback_keeps_user_usable.py` — Python-модуль
   Классы: нет

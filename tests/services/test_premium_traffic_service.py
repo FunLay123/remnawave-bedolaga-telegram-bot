@@ -951,6 +951,34 @@ class TestOrphanStates:
 
             assert await get_state(db, 1, SQUAD) is not None
 
+    async def test_closed_squad_stays_closed_after_leaving_the_premium_config(self, monkeypatch):
+        """Закрытие переживает и осиротение, а не только смену периода/докупку.
+
+        Сквад мог осиротеть самым обычным путём — админ обнулил
+        `traffic_limit_gb` в тарифе, и `_collect_orphans` подобрал строку. Но
+        если он вдобавок закрыт вручную (`/close`), `_clear_orphan` не должен
+        ни удалять строку (вместе с ней исчез бы `closed_at`), ни возвращать
+        сквад в панель — это решение оператора, а не следствие того, что
+        лимита в тарифе больше нет.
+        """
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={})
+            state = await _seed_state(db, is_limited=True)
+            state.used_bytes = state.total_limit_bytes
+            state.closed_at = NOW
+            await db.commit()
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            reread = await get_state(db, 1, SQUAD)
+            assert reread is not None
+            assert reread.is_limited is True
+            assert reread.closed_at is not None
+            assert stats['cleaned'] == 0
+            # Возврата в панель быть не должно — закрытие ещё в силе.
+            assert pushed == []
+
     async def test_squad_dropped_from_premium_list_is_unlocked(self, monkeypatch):
         """Сквад убрали из премиального списка тарифа — доступ возвращается."""
         async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
