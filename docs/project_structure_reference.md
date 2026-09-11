@@ -250,8 +250,8 @@
   Классы: `PolicyResponse`, `PolicyCreateRequest`, `PolicyUpdateRequest`
   Функции: `list_policies` — List all access policies. Optionally filter by role_id., `create_policy` — Create a new access policy (ABAC rule)., `update_policy` — Update an existing access policy., `delete_policy` — Delete an access policy.
 - `app/cabinet/routes/admin_premium_traffic.py` — Python-модуль
-  Классы: `PremiumTrafficStateResponse`, `PremiumTrafficResetRequest`, `PremiumTrafficGrantRequest`
-  Функции: `get_premium_traffic_states` — Остаток по премиум-сквадам подписки., `reset_premium_traffic` — Сбросить трафик подписки: премиум, обычный или оба., `grant_premium_traffic` — Начислить премиум-гигабайты вручную, без оплаты.
+  Классы: `PremiumTrafficStateResponse`, `PremiumTrafficResetRequest`, `PremiumTrafficGrantRequest`, `PremiumTrafficSquadRequest`
+  Функции: `get_premium_traffic_states` — Остаток по премиум-сквадам подписки., `reset_premium_traffic` — Сбросить трафик подписки: премиум, обычный или оба., `grant_premium_traffic` — Начислить премиум-гигабайты вручную, без оплаты., `close_premium_access` — Закрыть доступ к премиум-скваду, не трогая лимит тарифа., `reopen_premium_access` — Открыть ранее закрытый доступ к премиум-скваду.
 - `app/cabinet/routes/admin_promo_offers.py` — Python-модуль
   Классы: `PromoOfferUserInfo`, `PromoOfferResponse`, `PromoOfferListResponse`, `PromoOfferTemplateResponse`, `PromoOfferTemplateListResponse`, `PromoOfferTemplateUpdateRequest`, `PromoOfferBroadcastRequest` (1 методов), `PromoOfferBroadcastResponse`, `PromoOfferSegment`, `PromoOfferSegmentListResponse`, `PromoOfferLogOfferInfo`, `PromoOfferLogResponse`, `PromoOfferLogListResponse`
   Функции: `list_segments` — Число пользователей в каждом сегменте — чтобы админ видел охват до отправки., `list_templates` — Get list of promo offer templates., `get_template` — Get a promo offer template., `update_template` — Update a promo offer template., `list_offers` — Get list of promo offers., `broadcast_offer` — Broadcast promo offer to users with optional Telegram notification., `get_logs` — Get promo offer logs.
@@ -2971,7 +2971,7 @@
   Классы: нет
   Функции: `p12_bytes`, `stubbed_service`, `test_admin_overpay_certificate_routes_registered`, `test_upload_certificate_commits`, `test_upload_certificate_env_locked_warning`, `test_upload_certificate_invalid_returns_422`, `test_upload_certificate_oversize_returns_413`, `test_delete_certificate_commits`
 - `tests/cabinet/test_admin_premium_traffic.py` — Python-модуль
-  Классы: `TestPremiumReset` (5 методов), `TestRegularReset` (4 методов)
+  Классы: `TestPremiumReset` (5 методов), `TestPremiumClose` (5 методов), `TestPremiumReopen` (3 методов), `TestRegularReset` (4 методов)
   Функции: нет
 - `tests/cabinet/test_admin_reachability.py` — Python-модуль
   Классы: нет

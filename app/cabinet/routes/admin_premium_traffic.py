@@ -14,6 +14,21 @@ bandwidth-stats за период. ``reset-traffic`` обнуляет счётч
   досрочный и не сдвинул премиум-период следом;
 * ``premium`` — панель не трогаем, начинаем премиум-период заново;
 * ``both`` — и то, и другое.
+
+**Про закрытие доступа отдельно от лимита.** ``traffic_limit_gb == 0`` в
+конфигурации тарифа означает «отдельного лимита нет», то есть безлимит внутри
+сквада — ``parse_premium_squad`` такие сквады из премиальных не считает. Если
+бы «закрыть доступ» означало занулить этот же лимит, оператор, отбирающий
+доступ, получил бы обратное: учёт выключился бы, а сквад остался в панели.
+Поэтому закрытие — отдельное действие (``/close``), которое не трогает лимит
+тарифа, а доводит состояние подписки до исчерпанного: ``used_bytes``
+подтягивается минимум до ``total_limit_bytes``, а ``is_limited`` ставится сразу.
+Как и при выдаче трафика (``grant``), панель здесь не дёргаем — снятие сквада в
+панели остаётся заботой воркера (``PremiumTrafficService``), который делает
+это через единый путь отказа и уважает открытый grace-оверлей. Отменяется
+закрытие через ``/reopen`` — она возвращает ``used_bytes`` к нулю и снимает
+``is_limited``, а не подделывает расход: следующий проход воркера пересчитает
+его от статистики панели заново.
 """
 
 from __future__ import annotations
@@ -29,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database.crud.premium_traffic import (
     add_extra_bytes,
     get_or_create_state,
+    get_state,
     get_states_for_subscription,
     start_new_period,
 )
@@ -76,6 +92,12 @@ class PremiumTrafficGrantRequest(BaseModel):
 
     squad_uuid: str = Field(..., min_length=1, max_length=64)
     gb: int = Field(..., ge=1, le=100_000)
+
+
+class PremiumTrafficSquadRequest(BaseModel):
+    """Один премиум-сквад подписки — для закрытия и открытия доступа."""
+
+    squad_uuid: str = Field(..., min_length=1, max_length=64)
 
 
 async def _load_subscription(db: AsyncSession, subscription_id: int):
@@ -258,3 +280,128 @@ async def grant_premium_traffic(
         # не делаем, чтобы админский запрос не зависел от её доступности.
         'squad_restored': was_limited and not state.is_limited,
     }
+
+
+@router.post('/{subscription_id}/close')
+async def close_premium_access(
+    subscription_id: int,
+    request: PremiumTrafficSquadRequest,
+    admin: User = Depends(require_permission('traffic:manage')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Закрыть доступ к премиум-скваду, не трогая лимит тарифа.
+
+    См. описание модуля: зануление ``traffic_limit_gb`` не годится для этого —
+    оно означает «лимита нет», а не «доступ закрыт».
+    """
+    subscription = await _load_subscription(db, subscription_id)
+    state = await _close_access(db, subscription, request.squad_uuid, datetime.now(UTC))
+    if state is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': 'not_a_premium_squad', 'message': 'В тарифе нет премиум-лимита для этого сервера'},
+        )
+    await db.commit()
+
+    logger.info(
+        'Админ закрыл доступ к премиум-скваду',
+        admin_id=admin.id,
+        subscription_id=subscription_id,
+        squad_uuid=request.squad_uuid,
+    )
+    return {'success': True, 'squad_uuid': request.squad_uuid, 'is_limited': state.is_limited}
+
+
+async def _close_access(
+    db: AsyncSession,
+    subscription,
+    squad_uuid: str,
+    now: datetime,
+) -> SubscriptionPremiumTraffic | None:
+    """Довести состояние подписки по скваду до исчерпанного.
+
+    Возвращает ``None``, если у сквада в тарифе нет положительного лимита —
+    закрывать нечего: `is_exhausted` при нулевом лимите всегда `False`, и
+    подделать это подъёмом ``used_bytes`` было бы обманом счётчика, а не
+    закрытием доступа.
+
+    ``used_bytes`` поднимаем минимум до ``total_limit_bytes`` — просто
+    поставить ``is_limited = True`` недостаточно: воркер на следующем проходе
+    пересчитает ``is_exhausted`` от реального (более низкого) расхода и сам же
+    откроет сквад обратно (``is_limited and not is_exhausted`` -> restore).
+    Расход не может упасть ниже уже записанного (`record_usage` берёт максимум),
+    поэтому закрытие держится, пока не начнётся новый период или админ не
+    откроет доступ явно через ``/reopen``.
+    """
+    configs = get_premium_squads_for_tariff(getattr(subscription, 'tariff', None))
+    config = configs.get(squad_uuid)
+    if config is None:
+        return None
+
+    state = await get_or_create_state(
+        db,
+        subscription.id,
+        squad_uuid,
+        limit_bytes=config.limit_bytes,
+        period_start_at=now,
+    )
+    state.used_bytes = max(state.used_bytes or 0, state.total_limit_bytes)
+    state.is_limited = True
+    return state
+
+
+@router.post('/{subscription_id}/reopen')
+async def reopen_premium_access(
+    subscription_id: int,
+    request: PremiumTrafficSquadRequest,
+    admin: User = Depends(require_permission('traffic:manage')),
+    db: AsyncSession = Depends(get_cabinet_db),
+):
+    """Открыть ранее закрытый доступ к премиум-скваду.
+
+    Единственный путь наружу из закрытия, помимо естественного начала нового
+    периода: без него закрытие было бы ловушкой, которую оператор сам не
+    может отменить.
+    """
+    subscription = await _load_subscription(db, subscription_id)
+    state = await _reopen_access(db, subscription, request.squad_uuid)
+    if state is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={'code': 'no_state', 'message': 'Состояние премиум-лимита для этого сквада не найдено'},
+        )
+    await db.commit()
+
+    logger.info(
+        'Админ открыл доступ к премиум-скваду',
+        admin_id=admin.id,
+        subscription_id=subscription_id,
+        squad_uuid=request.squad_uuid,
+    )
+    return {'success': True, 'squad_uuid': request.squad_uuid, 'is_limited': state.is_limited}
+
+
+async def _reopen_access(
+    db: AsyncSession,
+    subscription,
+    squad_uuid: str,
+) -> SubscriptionPremiumTraffic | None:
+    """Снять закрытие: обнулить расход и вернуть сквад панели.
+
+    Расход не восстанавливаем в «реальное» значение — оно потеряно тем же
+    подъёмом, которым закрытие форсировало исчерпание (см. `_close_access`).
+    Обнуление здесь не подделка: `bandwidth-stats` отдаёт накопленное с начала
+    периода, а не приращение, поэтому следующий проход воркера всё равно
+    перечитает истинный расход за период целиком и, если он и правда выше
+    лимита, снимет сквад заново — уже не по нашему решению, а по факту.
+
+    Период не перезапускаем (в отличие от ``/reset``): это открытие доступа,
+    а не начало нового периода, — докупленный трафик и отметка 80% остаются
+    как были.
+    """
+    state = await get_state(db, subscription.id, squad_uuid)
+    if state is None:
+        return None
+    state.used_bytes = 0
+    state.is_limited = False
+    return state

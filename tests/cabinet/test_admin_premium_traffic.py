@@ -3,8 +3,8 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-from app.cabinet.routes.admin_premium_traffic import _reset_premium, _reset_regular
-from app.database.crud.premium_traffic import get_or_create_state, get_states_for_subscription
+from app.cabinet.routes.admin_premium_traffic import _close_access, _reopen_access, _reset_premium, _reset_regular
+from app.database.crud.premium_traffic import get_or_create_state, get_state, get_states_for_subscription, record_usage
 from app.database.models import SubscriptionPremiumTraffic
 from app.utils.premium_traffic import BYTES_IN_GB
 from tests.fixtures.sqlite_memory import memory_session
@@ -116,6 +116,93 @@ class TestPremiumReset:
             states = await get_states_for_subscription(db, 1)
             assert len(states) == 1
             assert states[0].limit_bytes == 5 * BYTES_IN_GB
+
+
+class TestPremiumClose:
+    """Закрытие доступа — отдельное действие от изменения лимита (см. модуль)."""
+
+    async def test_close_access_exhausts_state(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            assert state is not None
+            assert state.is_limited is True
+            # Именно "исчерпано", а не только флаг: иначе следующий проход
+            # воркера, увидев реальный расход ниже лимита, сам же и откроет
+            # сквад обратно — see test_close_survives_lower_real_usage_below.
+            assert state.used_bytes >= state.total_limit_bytes
+
+    async def test_zero_limit_means_unlimited_not_closed(self, monkeypatch):
+        """Ноль — это отсутствие лимита, а не закрытие доступа."""
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription({SQUAD: {'traffic_limit_gb': 0}, OTHER: {'traffic_limit_gb': 10}})
+
+            state = await _close_access(db, subscription, SQUAD, NOW)
+
+            assert state is None or state.is_limited is False
+
+    async def test_squad_outside_the_tariff_cannot_be_closed(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            assert await _close_access(db, _subscription(), 'unknown-squad', NOW) is None
+
+    async def test_close_survives_lower_real_usage_below_limit(self, monkeypatch):
+        """Реальный расход ниже лимита не должен отменять закрытие на следующем проходе.
+
+        Ровно то смешение, которое разводит эта задача: до фикса закрытие было
+        бы просто ``is_limited = True`` поверх заниженного ``used_bytes``, и
+        воркер (``is_limited and not is_exhausted`` -> restore) сам вернул бы
+        сквад на следующем проходе.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            record_usage(state, BYTES_IN_GB, checked_at=NOW)
+
+            assert state.is_exhausted is True
+            assert state.is_limited is True
+
+    async def test_close_creates_state_if_the_worker_never_ran(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            reread = await get_state(db, 1, SQUAD)
+            assert reread is not None
+            assert reread.is_limited is True
+
+
+class TestPremiumReopen:
+    """Обратный ход: закрытое администратором состояние можно открыть заново."""
+
+    async def test_reopen_restores_access(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            closed = await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+            assert closed.is_limited is True
+
+            state = await _reopen_access(db, _subscription(), SQUAD)
+            await db.commit()
+
+            assert state is not None
+            assert state.is_limited is False
+
+    async def test_reopen_lets_the_next_pass_recompute_real_usage(self, monkeypatch):
+        """Реопен не подделывает расход — он снова считается воркером с нуля."""
+        async with memory_session(monkeypatch, TABLES) as db:
+            await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            state = await _reopen_access(db, _subscription(), SQUAD)
+            await db.commit()
+            record_usage(state, BYTES_IN_GB, checked_at=NOW)
+
+            assert state.is_exhausted is False
+
+    async def test_reopen_missing_state_is_a_noop(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            assert await _reopen_access(db, _subscription(), SQUAD) is None
 
 
 class TestRegularReset:
