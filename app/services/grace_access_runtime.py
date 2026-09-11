@@ -1112,6 +1112,53 @@ _GRACE_OWNED_UPDATE_FIELDS = frozenset(
 )
 
 
+class DeferredPanelUpdate:
+    """Отложенная запись в панель: та же карточка плюс признак откладывания.
+
+    При открытом grace-оверлее ``update_panel_user_grace_safe`` не пишет
+    защищённые поля, но возвращает актуальную карточку панельного пользователя —
+    truthy-объект того же рода, что вернул бы успешный ``update_user``. Отличить
+    отложенную запись от применённой по возврату было нечем.
+
+    Обёртка ставится ТОЛЬКО на отложенных ветках: применённая запись возвращает
+    объект панели ровно как раньше, и вызывающий, которому откладывание
+    безразлично, в подавляющем большинстве проходов вообще ничего не видит.
+    Когда обёртка всё-таки приезжает, она прозрачна: любое имя, кроме
+    ``grace_write_deferred``, уходит через ``__getattr__`` к карточке, а
+    ``__bool__`` повторяет её истинность — и чтение полей, и проверка ``if``
+    работают как раньше.
+
+    Тому, кому различие важно, достаточно ``panel_update_was_deferred(result)``.
+    """
+
+    #: Опознаётся по атрибуту, а не по типу: двойнику в тестах хватит своего
+    #: объекта с этим полем, импортировать класс не обязательно.
+    grace_write_deferred = True
+
+    def __init__(self, panel_user: Any) -> None:
+        self.panel_user = panel_user
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.panel_user, name)
+
+    def __bool__(self) -> bool:
+        return bool(self.panel_user)
+
+    def __repr__(self) -> str:  # pragma: no cover - только для логов и отладки
+        return f'DeferredPanelUpdate({self.panel_user!r})'
+
+
+def panel_update_was_deferred(result: Any) -> bool:
+    """True, если ``update_panel_user_grace_safe`` отложила защищённые поля.
+
+    Всё непомеченное считается применённым. Это не послабление, а ровно тот
+    дефолт, с которым живут все существующие вызывающие: обратное значение
+    превратило бы и честный ответ ``api.update_user``, и любой тестовый двойник
+    в «отложено» и остановило бы работу там, где ничего не откладывалось.
+    """
+    return bool(getattr(result, 'grace_write_deferred', False))
+
+
 async def update_panel_user_grace_safe(
     api: Any,
     subscription_id: int,
@@ -1123,6 +1170,10 @@ async def update_panel_user_grace_safe(
     A real billing recovery completes grace immediately. Otherwise status,
     expiry, traffic and squad fields are deferred so the reconciler can keep
     the overlay or restore the newest canonical billing state safely.
+
+    Применённая запись возвращает объект панели как прежде. Отложенная —
+    ``DeferredPanelUpdate`` поверх той же карточки; кому это важно, проверяет
+    ``panel_update_was_deferred(result)``, остальные читают её как раньше.
     """
     if grace_access_runtime.mode in (GraceAccessMode.DISABLED, GraceAccessMode.OBSERVE):
         # Non-mutating grace: обычный панельный апдейт без guard-сессии и локов —
@@ -1171,12 +1222,14 @@ async def update_panel_user_grace_safe(
             fields=sorted(protected_present),
         )
         if len(safe_kwargs) > 1:
-            return await api.update_user(**safe_kwargs)
+            # Незащищённая часть уехала в панель, защищённые поля — нет. Для
+            # вызывающего, которому важны именно они, запись не применена.
+            return DeferredPanelUpdate(await api.update_user(**safe_kwargs))
 
         current = await api.get_user_by_id(supplied_id)
         if current is None:
             raise GracePanelError(f'Remnawave user {supplied_id} disappeared while grace was open')
-        return current
+        return DeferredPanelUpdate(current)
 
 
 def _create_payload_as_patch(create_kwargs: dict[str, Any]) -> dict[str, Any]:

@@ -841,6 +841,38 @@ class TestOrphanStates:
             assert state is not None and state.is_limited is True
             assert stats['cleaned'] == 0
 
+    async def test_deferred_restore_keeps_the_state_for_the_next_pass(self, monkeypatch):
+        """Возврат отложен grace-оверлеем — строку удалять нельзя.
+
+        Отправка не упала (для этого есть тест выше): она вернулась без
+        исключения, но `update_panel_user_grace_safe` отложила
+        `activeInternalSquads`, потому что над подпиской открыт grace-оверлей.
+        Не различая этого, `_clear_orphan` счёл бы сквад возвращённым, а панель
+        его так и не вернула бы: клиент остался бы заперт уже без единственного
+        следа о том, что его ограничили.
+        """
+        from app.services.grace_access_runtime import DeferredPanelUpdate
+
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={OTHER_SQUAD: {'traffic_limit_gb': 5}})
+            await _seed_state(db, is_limited=True)
+
+            pushed: list[list[str]] = []
+
+            async def _deferred_push(_api, _subscription_id, *, user_id, active_internal_squads):
+                pushed.append(list(active_internal_squads or []))
+                return DeferredPanelUpdate(SimpleNamespace(id=user_id))
+
+            _run_worker_against(monkeypatch, db, push=_deferred_push)
+
+            stats = await PremiumTrafficService().process_once()
+
+            state = await get_state(db, 1, SQUAD)
+            assert state is not None and state.is_limited is True, 'строку нельзя терять до подтверждённого возврата'
+            assert stats['cleaned'] == 0
+            # Попытка была — просто оверлей её отложил.
+            assert pushed == [[SQUAD]]
+
     async def test_state_of_a_squad_the_subscription_lost_needs_no_panel_call(self, monkeypatch):
         """Права на сквад нет — в панель он и так не уезжает, возвращать нечего."""
         async with memory_session(monkeypatch, ORPHAN_TABLES) as db:

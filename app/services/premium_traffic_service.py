@@ -99,6 +99,15 @@ class _Orphan:
     panel_user_id: int | None
 
 
+class _DeferredOrphanRestore(Exception):
+    """Внутренний сигнал ``_clear_orphan``: возврат сквада отложен grace-оверлеем.
+
+    Границу метода не пересекает — нужен только затем, чтобы выйти из
+    ``begin_nested()`` и откатить уже выполненное удаление строки состояния,
+    когда сама отправка прошла без исключения, но применена не была.
+    """
+
+
 class PremiumTrafficService:
     """Периодический учёт премиум-трафика."""
 
@@ -383,15 +392,19 @@ class PremiumTrafficService:
 
         Молча удалить строку нельзя: ``is_limited`` означает, что сквад снят в
         панели. Без строки база забудет об этом, а панель — нет, и запертым
-        клиент останется уже без единого следа.
+        клиент останется уже без единого следа. То же самое случится, если
+        возврат не упал с исключением, а был молча отложен
+        ``update_panel_user_grace_safe`` из-за открытого grace-оверлея: панель
+        ничего не восстановила, а строка исчезла бы как после успеха.
 
         Отсюда порядок: удаление внутри точки сохранения, потом отправка, и
         только потом коммит. Раньше отправить нельзя — ``effective_panel_squads``
-        читает ту же строку и вернул бы сквад снова вычтенным. Сбой панели
-        откатывает точку сохранения: строка остаётся на месте, и следующий
-        проход повторит попытку.
+        читает ту же строку и вернул бы сквад снова вычтенным. Сбой панели и
+        отложенная запись одинаково откатывают точку сохранения: строка остаётся
+        на месте, и следующий проход повторит попытку.
         """
         from app.database.crud.premium_traffic import delete_states_for_squads
+        from app.services.grace_access_runtime import panel_update_was_deferred
 
         # Возвращать нечего, если сквад подписке и так не положен: в панель он
         # не уезжает, потому что его нет в `connected_squads`.
@@ -414,8 +427,20 @@ class PremiumTrafficService:
             async with db.begin_nested():
                 await delete_states_for_squads(db, orphan.subscription_id, {orphan.squad_uuid})
                 if needs_restore:
-                    await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
+                    result = await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
+                    if panel_update_was_deferred(result):
+                        # Над подпиской открыт grace-оверлей: сквады в панель не
+                        # ушли. Откатываем точку сохранения целиком — удаление
+                        # строки не должно закоммититься без возврата.
+                        raise _DeferredOrphanRestore
             await db.commit()
+        except _DeferredOrphanRestore:
+            logger.info(
+                'Возврат осиротевшего сквада отложен: открыт grace-оверлей',
+                subscription_id=orphan.subscription_id,
+                squad_uuid=orphan.squad_uuid,
+            )
+            return False
         except Exception as error:
             logger.warning(
                 'Не удалось снять осиротевшее состояние премиум-лимита',
@@ -755,16 +780,21 @@ class PremiumTrafficService:
         api: Any,
         subscription: Subscription,
         panel_user_id: int,
-    ) -> None:
+    ) -> Any:
         """Отправить в панель набор сквадов подписки через общий фильтр.
 
         Отдельный вход от ``_push_squads`` нужен уборке осиротевших состояний: у
         неё нет ``_Target`` — сквад из конфигурации тарифа как раз и исчез.
+
+        Возвращает ответ ``update_panel_user_grace_safe`` как есть.
+        ``_limit_squad`` и ``_restore_squad`` его по-прежнему не читают — у них
+        своя сверка с панелью на следующем проходе; читает только
+        ``_clear_orphan``, которому терять строку состояния нельзя.
         """
         from app.services.grace_access_runtime import update_panel_user_grace_safe
         from app.utils.premium_traffic import effective_panel_squads
 
-        await update_panel_user_grace_safe(
+        result = await update_panel_user_grace_safe(
             api,
             subscription.id,
             user_id=panel_user_id,
@@ -775,6 +805,7 @@ class PremiumTrafficService:
         # Набор сквадов в панели только что изменился — иначе сверка на
         # следующем проходе увидела бы протухший снимок и отправила бы всё заново.
         self.invalidate_panel_user(panel_user_id)
+        return result
 
     # ------------------------------------------------------- уведомления
 
