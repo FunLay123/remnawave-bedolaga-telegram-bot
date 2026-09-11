@@ -712,7 +712,7 @@
   Функции: `create_poll`, `list_polls`, `get_poll_by_id`, `delete_poll`, `create_poll_response`, `get_poll_response_by_id`, `record_poll_answer`, `reset_poll_answers`, `get_poll_statistics`, `get_poll_responses_with_answers`
 - `app/database/crud/premium_traffic.py` — Python-модуль
   Классы: нет
-  Функции: `get_state` — Состояние по паре подписка+сквад., `get_states_for_subscription`, `get_states_for_squad` — Все состояния по скваду — воркер обходит их пачкой, одним запросом к панели., `get_limited_squad_uuids` — Сквады, снятые из-за исчерпания лимита., `get_or_create_state` — Вернуть состояние, создав его при первой встрече., `start_new_period` — Начать новый период: обнулить расход, докупку и уведомления., `record_usage` — Записать замер расхода., `add_extra_bytes` — Начислить докупленный трафик и вернуть сквад, если он был снят., `delete_states_for_subscription` — Убрать все состояния подписки — например, при переходе на тариф без премиума., `delete_states_for_squads` — Убрать состояния конкретных сквадов — при смене тарифа их набор меняется.
+  Функции: `get_state` — Состояние по паре подписка+сквад., `get_states_for_subscription`, `get_states_for_squad` — Все состояния по скваду — воркер обходит их пачкой, одним запросом к панели., `get_limited_squad_uuids` — Сквады, снятые из-за исчерпания лимита., `get_or_create_state` — Вернуть состояние, создав его при первой встрече., `start_new_period` — Начать новый период: обнулить расход, докупку и уведомления., `record_usage` — Записать замер расхода., `add_extra_bytes` — Начислить докупленный трафик и вернуть сквад, если он был снят за расход., `delete_states_for_subscription` — Убрать все состояния подписки — например, при переходе на тариф без премиума., `delete_states_for_squads` — Убрать состояния конкретных сквадов — при смене тарифа их набор меняется.
 - `app/database/crud/privacy_policy.py` — Python-модуль
   Классы: нет
   Функции: `get_privacy_policy`, `upsert_privacy_policy`, `set_privacy_policy_enabled`
@@ -2971,7 +2971,7 @@
   Классы: нет
   Функции: `p12_bytes`, `stubbed_service`, `test_admin_overpay_certificate_routes_registered`, `test_upload_certificate_commits`, `test_upload_certificate_env_locked_warning`, `test_upload_certificate_invalid_returns_422`, `test_upload_certificate_oversize_returns_413`, `test_delete_certificate_commits`
 - `tests/cabinet/test_admin_premium_traffic.py` — Python-модуль
-  Классы: `TestPremiumReset` (5 методов), `TestPremiumClose` (5 методов), `TestPremiumReopen` (3 методов), `TestRegularReset` (4 методов)
+  Классы: `TestPremiumReset` (5 методов), `TestPremiumClose` (8 методов), `TestPremiumReopen` (3 методов), `TestRegularReset` (4 методов)
   Функции: нет
 - `tests/cabinet/test_admin_reachability.py` — Python-модуль
   Классы: нет

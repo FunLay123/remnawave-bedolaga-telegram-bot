@@ -4,7 +4,14 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from app.cabinet.routes.admin_premium_traffic import _close_access, _reopen_access, _reset_premium, _reset_regular
-from app.database.crud.premium_traffic import get_or_create_state, get_state, get_states_for_subscription, record_usage
+from app.database.crud.premium_traffic import (
+    add_extra_bytes,
+    get_or_create_state,
+    get_state,
+    get_states_for_subscription,
+    record_usage,
+    start_new_period,
+)
 from app.database.models import SubscriptionPremiumTraffic
 from app.utils.premium_traffic import BYTES_IN_GB
 from tests.fixtures.sqlite_memory import memory_session
@@ -172,6 +179,48 @@ class TestPremiumClose:
             assert reread is not None
             assert reread.is_limited is True
 
+    async def test_close_survives_period_rollover(self, monkeypatch):
+        """Смена периода — не путь наружу из закрытия, только /reopen.
+
+        До ``closed_at`` `start_new_period` не отличала «снят за расход» от
+        «закрыт админом» и сбрасывала `is_limited` при каждой смене периода —
+        через недели закрытие тихо снималось бы само, без уведомления.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            next_period = NOW + timedelta(days=30)
+            start_new_period(state, period_start_at=next_period, limit_bytes=5 * BYTES_IN_GB)
+
+            assert state.period_start_at == next_period
+            assert state.is_limited is True
+            assert state.is_exhausted is True
+            assert state.closed_at is not None
+
+    async def test_grant_does_not_reopen_a_closed_squad(self, monkeypatch):
+        """Доброе доначисление трафика не должно тихо отменять решение оператора."""
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            add_extra_bytes(state, 100 * BYTES_IN_GB)
+
+            assert state.is_limited is True
+            assert state.closed_at is not None
+
+    async def test_reset_premium_does_not_lift_an_admin_closure(self, monkeypatch):
+        """`/reset` начинает период заново, но закрытие снимается только `/reopen`."""
+        async with memory_session(monkeypatch, TABLES) as db:
+            await _close_access(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            await _reset_premium(db, _subscription(), SQUAD, NOW + timedelta(days=1))
+
+            state = await get_state(db, 1, SQUAD)
+            assert state.is_limited is True
+            assert state.closed_at is not None
+
 
 class TestPremiumReopen:
     """Обратный ход: закрытое администратором состояние можно открыть заново."""
@@ -187,6 +236,7 @@ class TestPremiumReopen:
 
             assert state is not None
             assert state.is_limited is False
+            assert state.closed_at is None
 
     async def test_reopen_lets_the_next_pass_recompute_real_usage(self, monkeypatch):
         """Реопен не подделывает расход — он снова считается воркером с нуля."""

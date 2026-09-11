@@ -130,17 +130,30 @@ def start_new_period(
 ) -> SubscriptionPremiumTraffic:
     """Начать новый период: обнулить расход, докупку и уведомления.
 
-    Снятый сквад при этом возвращается — `is_limited` сбрасывается. Лимит берём
-    заново из тарифа: за прошедший период его могли поменять.
+    Снятый за расход сквад при этом возвращается — `is_limited` сбрасывается.
+    Лимит берём заново из тарифа: за прошедший период его могли поменять.
+
+    Админское закрытие (`closed_at`) смена периода не снимает: это решение
+    оператора, а не следствие конкретной цифры расхода, и период истёк бы
+    молча его отменив — брифу задачи ровно это запрещено. Учёт при этом всё
+    равно идёт по-новой (лимит и докупка обновляются как для всех), а
+    `used_bytes` сразу подтягиваем к новому лимиту — тем же приёмом, что и
+    само закрытие (`_close_access`): иначе на этом же проходе воркер увидит
+    `used_bytes = 0 < новый лимит`, посчитает лимит не исчерпанным и сам же
+    откроет сквад (`is_limited and not is_exhausted` -> restore).
     """
     state.period_start_at = period_start_at
     state.limit_bytes = limit_bytes
     state.extra_bytes = 0
-    state.used_bytes = 0
     # Поправку на первые сутки снимем заново: период новый.
     state.baseline_bytes = None
     state.notified_80 = False
-    state.is_limited = False
+    if state.closed_at is not None:
+        state.used_bytes = limit_bytes
+        state.is_limited = True
+    else:
+        state.used_bytes = 0
+        state.is_limited = False
     if panel_reset_ack_at is not None:
         state.panel_reset_ack_at = panel_reset_ack_at
     return state
@@ -164,10 +177,21 @@ def record_usage(
 
 
 def add_extra_bytes(state: SubscriptionPremiumTraffic, extra_bytes: int) -> SubscriptionPremiumTraffic:
-    """Начислить докупленный трафик и вернуть сквад, если он был снят."""
+    """Начислить докупленный трафик и вернуть сквад, если он был снят за расход.
+
+    Админское закрытие (`closed_at`) доначисление не снимает: это две разные
+    вещи, а не одна — иначе добрая воля (доначислить трафик в подарок) тихо
+    отменяла бы решение оператора отобрать доступ. `used_bytes` при этом
+    дотягиваем до нового (увеличенного докупкой) лимита тем же приёмом, что и
+    само закрытие: иначе `is_exhausted` пересчитался бы в `False` от возросшего
+    лимита, и воркер сам открыл бы сквад на следующем проходе.
+    """
     if extra_bytes <= 0:
         return state
     state.extra_bytes = (state.extra_bytes or 0) + extra_bytes
+    if state.closed_at is not None:
+        state.used_bytes = max(state.used_bytes or 0, state.total_limit_bytes)
+        return state
     if not state.is_exhausted:
         state.is_limited = False
         # Порог 80 % считается от нового лимита — предупредить нужно заново.

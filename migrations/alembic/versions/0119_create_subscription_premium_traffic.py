@@ -37,6 +37,11 @@ def upgrade() -> None:
         # до сброса. Разницу снимаем один раз, первым замером.
         sa.Column('baseline_bytes', sa.BigInteger(), nullable=True),
         sa.Column('is_limited', sa.Boolean(), nullable=False, server_default=sa.text('false')),
+        # NULL — сквад не закрыт админом вручную. Отдельно от is_limited:
+        # is_limited — следствие (сквад снят), closed_at — причина (админ
+        # закрыл доступ намеренно, а не расход исчерпал лимит). Разница нужна,
+        # чтобы смена периода и доначисление трафика не снимали закрытие сами.
+        sa.Column('closed_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('period_start_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('panel_reset_ack_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('notified_80', sa.Boolean(), nullable=False, server_default=sa.text('false')),

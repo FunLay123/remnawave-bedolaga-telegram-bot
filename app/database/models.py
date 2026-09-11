@@ -2901,6 +2901,13 @@ class SubscriptionPremiumTraffic(Base):
     baseline_bytes = Column(BigInteger, nullable=True)
 
     is_limited = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    # Отдельно от is_limited: is_limited — следствие («сквад сейчас снят»),
+    # closed_at — причина («админ закрыл доступ намеренно», а не «расход
+    # исчерпал лимит»). NULL — не закрыт. Нужна собственная колонка, а не
+    # переиспользование used_bytes/is_limited: и смена периода
+    # (`start_new_period`), и доначисление трафика (`add_extra_bytes`) обязаны
+    # знать, что снимать флаг нельзя, пока админ не откроет доступ явно.
+    closed_at = Column(AwareDateTime(), nullable=True)
 
     period_start_at = Column(AwareDateTime(), nullable=False)
     # Последнее учтённое `lastTrafficResetAt` панели. Нужен, чтобы отличить
