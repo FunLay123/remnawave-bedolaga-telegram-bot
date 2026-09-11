@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import random
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -99,12 +100,17 @@ class _Orphan:
     panel_user_id: int | None
 
 
-class _DeferredOrphanRestore(Exception):
-    """Внутренний сигнал ``_clear_orphan``: возврат сквада отложен grace-оверлеем.
+class _PanelWriteNotApplied(Exception):
+    """Внутренний сигнал: панель отложила запись, хотя отправка не упала.
 
-    Границу метода не пересекает — нужен только затем, чтобы выйти из
-    ``begin_nested()`` и откатить уже выполненное удаление строки состояния,
-    когда сама отправка прошла без исключения, но применена не была.
+    Раньше у каждой точки был свой способ решить, что отправка не применена:
+    где-то это было исключение, где-то — расхождение, замеченное только на
+    следующем проходе. Этот сигнал сводит именно случай «отправка прошла без
+    исключения, но ``update_panel_user_grace_safe`` отложила
+    ``activeInternalSquads`` из-за открытого grace-оверлея» к тому же виду,
+    что и настоящий отказ панели: оба ловит ``_log_panel_failure`` одной
+    парой ``except`` и откатывает точку сохранения, открытую вокруг них.
+    Границу метода-обёртки не пересекает.
     """
 
 
@@ -397,14 +403,14 @@ class PremiumTrafficService:
         ``update_panel_user_grace_safe`` из-за открытого grace-оверлея: панель
         ничего не восстановила, а строка исчезла бы как после успеха.
 
-        Отсюда порядок: удаление внутри точки сохранения, потом отправка, и
-        только потом коммит. Раньше отправить нельзя — ``effective_panel_squads``
-        читает ту же строку и вернул бы сквад снова вычтенным. Сбой панели и
-        отложенная запись одинаково откатывают точку сохранения: строка остаётся
-        на месте, и следующий проход повторит попытку.
+        Отсюда порядок: удаление внутри точки сохранения, потом отправка.
+        Раньше отправить нельзя — ``effective_panel_squads`` читает ту же
+        строку и вернул бы сквад снова вычтенным. Сбой панели и отложенная
+        запись — общий случай ``_log_panel_failure``: обе откатывают точку
+        сохранения целиком, строка остаётся на месте, и следующий проход
+        повторит попытку.
         """
         from app.database.crud.premium_traffic import delete_states_for_squads
-        from app.services.grace_access_runtime import panel_update_was_deferred
 
         # Возвращать нечего, если сквад подписке и так не положен: в панель он
         # не уезжает, потому что его нет в `connected_squads`.
@@ -423,33 +429,25 @@ class PremiumTrafficService:
             )
             return False
 
-        try:
+        async def _do() -> None:
             async with db.begin_nested():
                 await delete_states_for_squads(db, orphan.subscription_id, {orphan.squad_uuid})
                 if needs_restore:
-                    result = await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
-                    if panel_update_was_deferred(result):
-                        # Над подпиской открыт grace-оверлей: сквады в панель не
-                        # ушли. Откатываем точку сохранения целиком — удаление
-                        # строки не должно закоммититься без возврата.
-                        raise _DeferredOrphanRestore
-            await db.commit()
-        except _DeferredOrphanRestore:
-            logger.info(
-                'Возврат осиротевшего сквада отложен: открыт grace-оверлей',
-                subscription_id=orphan.subscription_id,
-                squad_uuid=orphan.squad_uuid,
-            )
-            return False
-        except Exception as error:
-            logger.warning(
-                'Не удалось снять осиротевшее состояние премиум-лимита',
-                subscription_id=orphan.subscription_id,
-                squad_uuid=orphan.squad_uuid,
-                error=error,
-            )
+                    self._raise_if_deferred(
+                        await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
+                    )
+
+        applied = await self._log_panel_failure(
+            _do,
+            fail_event='Не удалось снять осиротевшее состояние премиум-лимита',
+            defer_event='Возврат осиротевшего сквада отложен: открыт grace-оверлей',
+            subscription_id=orphan.subscription_id,
+            squad_uuid=orphan.squad_uuid,
+        )
+        if not applied:
             return False
 
+        await db.commit()
         logger.info(
             'Осиротевшее состояние премиум-лимита снято',
             subscription_id=orphan.subscription_id,
@@ -624,12 +622,10 @@ class PremiumTrafficService:
         record_usage(state, self._net_usage(state, used_bytes, period_start, now), checked_at=now)
 
         if state.is_exhausted and not state.is_limited:
-            await self._limit_squad(db, api, target, state)
-            return 'limited'
+            return 'limited' if await self._limit_squad(db, api, target, state) else None
 
         if state.is_limited and not state.is_exhausted:
-            await self._restore_squad(db, api, target, state)
-            return 'restored'
+            return 'restored' if await self._restore_squad(db, api, target, state) else None
 
         if not state.is_limited and not state.notified_80 and self._crossed_warning(state):
             state.notified_80 = True
@@ -641,8 +637,23 @@ class PremiumTrafficService:
         # не дошла — панель недоступна, оборвалась сессия, — сквад остался бы
         # снятым навсегда: ветки выше сюда уже не попадут, флаг-то снят.
         # Поэтому сверяем фактический набор с ожидаемым и досылаем расхождение.
+        # Состояние здесь уже верное (флаг не меняем), поэтому откатывать
+        # нечего — `_log_panel_failure` просто не даёт отказу или отсрочке
+        # выдать себя за успех: следующий проход перечитает панель и, если
+        # сквад всё ещё расходится, повторит попытку.
         if not state.is_limited and self._squad_missing_in_panel(target, panel_user):
-            await self._push_squads(db, api, target)
+
+            async def _push_missing() -> None:
+                self._raise_if_deferred(await self._push_squads(db, api, target))
+
+            if not await self._log_panel_failure(
+                _push_missing,
+                fail_event='Не удалось досинхронизировать премиум-сквад с панелью',
+                defer_event='Досинхронизация премиум-сквада отложена: открыт grace-оверлей',
+                subscription_id=target.subscription.id,
+                squad_uuid=target.config.squad_uuid,
+            ):
+                return None
             logger.info(
                 'Премиум-сквад досинхронизирован с панелью',
                 subscription_id=target.subscription.id,
@@ -650,22 +661,24 @@ class PremiumTrafficService:
             )
             return 'restored'
 
-        # Зеркальная сверка на снятие. `_limit_squad` коммитит `is_limited` до
-        # отправки (иначе фильтр, читающий базу, вернул бы сквад обратно), и
-        # упавшая отправка разводит базу с панелью: у нас сквад снят, у панели
-        # работает. Ветки выше сюда уже не попадут — флаг-то стоит, — а
-        # периодической пересылки сквадов в проекте нет: `sync_users_to_panel`
-        # запускается вручную, рутинный мониторинг `activeInternalSquads` не
-        # трогает. Без этой ветки клиент пользовался бы исчерпанным премиумом
-        # бессрочно.
-        #
-        # Отправку здесь нельзя считать применённой: `update_panel_user_grace_safe`
-        # молча откладывает `activeInternalSquads`, пока открыт grace-оверлей, и
-        # отличить отложенное от применённого по её ответу нечем. Поэтому ветка
-        # ничего не запоминает: следующий проход перечитает панель и, если сквад
-        # всё ещё там, отправит снова.
+        # Зеркальная сверка на снятие. Ветки выше сюда уже не попадут — флаг-то
+        # стоит, — а периодической пересылки сквадов в проекте нет:
+        # `sync_users_to_panel` запускается вручную, рутинный мониторинг
+        # `activeInternalSquads` не трогает. Без этой ветки клиент пользовался
+        # бы исчерпанным премиумом бессрочно.
         if state.is_limited and self._squad_present_in_panel(target, panel_user):
-            await self._push_squads(db, api, target)
+
+            async def _push_present() -> None:
+                self._raise_if_deferred(await self._push_squads(db, api, target))
+
+            if not await self._log_panel_failure(
+                _push_present,
+                fail_event='Не удалось доснять премиум-сквад в панели',
+                defer_event='Повторное снятие премиум-сквада отложено: открыт grace-оверлей',
+                subscription_id=target.subscription.id,
+                squad_uuid=target.config.squad_uuid,
+            ):
+                return None
             logger.info(
                 'Премиум-сквад доснят в панели повторно',
                 subscription_id=target.subscription.id,
@@ -735,22 +748,39 @@ class PremiumTrafficService:
             return False
         return (state.used_bytes or 0) >= total * WARNING_THRESHOLD
 
-    async def _limit_squad(self, db: AsyncSession, api: Any, target: _Target, state: Any) -> None:
-        """Снять сквад: сперва отметить в базе, потом отправить в панель.
+    async def _limit_squad(self, db: AsyncSession, api: Any, target: _Target, state: Any) -> bool:
+        """Снять сквад: изменить базу и отправить в панель одной точкой сохранения.
 
-        Порядок важен. ``effective_panel_squads`` вычитает снятые сквады из
-        набора, читая базу, — если отправить раньше коммита, фильтр ещё не
-        увидит отметку и вернёт сквад обратно.
-
-        Плата за такой порядок — окно, в котором база считает сквад снятым, а
-        панель его ещё отдаёт: отправка после коммита может упасть. Окно
-        закрывает сверка в ``_apply_usage`` (``_squad_present_in_panel``): она
-        досылает снятие на следующем проходе.
+        Раньше флаг коммитился до отправки — так ``effective_panel_squads``
+        видел снятие раньше, чем оно доезжало до панели, ценой окна, в котором
+        упавшая или отложенная отправка разводила базу с панелью: у нас сквад
+        снят, у панели — работает. Теперь то же самое достигается внутри
+        ``begin_nested()`` — смена флага видна фильтру за счёт автосброса в той
+        же транзакции, — а отказ или отсрочка откатывают точку сохранения
+        целиком через ``_log_panel_failure``: базе нечего утверждать сверх
+        того, что панель подтвердила, и следующий проход честно повторит
+        попытку с нуля.
         """
-        state.is_limited = True
-        await db.commit()
 
-        await self._push_squads(db, api, target)
+        async def _do() -> None:
+            async with db.begin_nested():
+                state.is_limited = True
+                # `autoflush=False` в проде: без явного flush фильтр ниже
+                # прочитал бы из базы старое значение и не исключил бы сквад.
+                await db.flush()
+                self._raise_if_deferred(await self._push_squads(db, api, target))
+
+        applied = await self._log_panel_failure(
+            _do,
+            fail_event='Не удалось снять премиум-сквад в панели',
+            defer_event='Снятие премиум-сквада отложено: открыт grace-оверлей',
+            subscription_id=target.subscription.id,
+            squad_uuid=target.config.squad_uuid,
+        )
+        if not applied:
+            return False
+
+        await db.commit()
         logger.info(
             'Премиум-сквад снят за перерасход',
             subscription_id=target.subscription.id,
@@ -759,20 +789,83 @@ class PremiumTrafficService:
             limit_gb=round(state.total_limit_bytes / BYTES_IN_GB, 2),
         )
         await self._notify_exhausted(target, state)
+        return True
 
-    async def _restore_squad(self, db: AsyncSession, api: Any, target: _Target, state: Any) -> None:
-        state.is_limited = False
+    async def _restore_squad(self, db: AsyncSession, api: Any, target: _Target, state: Any) -> bool:
+        """Вернуть сквад: тот же контракт, что и у ``_limit_squad``, только флаг снимается."""
+
+        async def _do() -> None:
+            async with db.begin_nested():
+                state.is_limited = False
+                # См. `_limit_squad`: без явного flush фильтр ниже не увидел бы
+                # возврат и продолжил бы исключать сквад из набора.
+                await db.flush()
+                self._raise_if_deferred(await self._push_squads(db, api, target))
+
+        applied = await self._log_panel_failure(
+            _do,
+            fail_event='Не удалось вернуть премиум-сквад в панели',
+            defer_event='Возврат премиум-сквада отложен: открыт grace-оверлей',
+            subscription_id=target.subscription.id,
+            squad_uuid=target.config.squad_uuid,
+        )
+        if not applied:
+            return False
+
         await db.commit()
-
-        await self._push_squads(db, api, target)
         logger.info(
             'Премиум-сквад возвращён',
             subscription_id=target.subscription.id,
             squad_uuid=target.config.squad_uuid,
         )
+        return True
 
-    async def _push_squads(self, db: AsyncSession, api: Any, target: _Target) -> None:
-        await self._push_subscription_squads(db, api, target.subscription, target.panel_user_id)
+    @staticmethod
+    def _raise_if_deferred(result: Any) -> None:
+        """Поднять ``_PanelWriteNotApplied``, если панель отложила запись.
+
+        Настоящий отказ панели поднимается сам — эта проверка нужна только для
+        второго исхода ``update_panel_user_grace_safe``: ответ без исключения,
+        но с открытым grace-оверлеем, отложившим ``activeInternalSquads``. Не
+        различая их, вызывающий счёл бы отправку применённой и закоммитил бы
+        то, чего панель не сделала.
+        """
+        from app.services.grace_access_runtime import panel_update_was_deferred
+
+        if panel_update_was_deferred(result):
+            raise _PanelWriteNotApplied
+
+    @staticmethod
+    async def _log_panel_failure(
+        action: Callable[[], Awaitable[None]],
+        *,
+        fail_event: str,
+        defer_event: str,
+        **log_kwargs: Any,
+    ) -> bool:
+        """Выполнить ``action``, свести отказ панели и отсрочку к одному ответу.
+
+        Единый контракт для каждой точки этого сервиса, которая пишет
+        ``activeInternalSquads``: раньше они расходились — где-то отказ поднимал
+        исключение и валил проход по этой цели, где-то отложенная запись из-за
+        открытого grace-оверлея проходила молча как успех. Здесь оба случая
+        логируются одинаково и останавливают попытку без исключения наружу:
+        вызывающий получает ``False`` и не имеет права писать состояние
+        дальше — следующий проход перечитает панель и, если нужно, повторит.
+        """
+        try:
+            await action()
+        except _PanelWriteNotApplied:
+            logger.info(defer_event, **log_kwargs)
+            return False
+        except Exception as error:
+            logger.warning(fail_event, error=error, **log_kwargs)
+            return False
+        return True
+
+    async def _push_squads(self, db: AsyncSession, api: Any, target: _Target) -> Any:
+        """Отправить в панель набор сквадов цели; см. ``_push_subscription_squads``."""
+        return await self._push_subscription_squads(db, api, target.subscription, target.panel_user_id)
 
     async def _push_subscription_squads(
         self,
@@ -786,10 +879,9 @@ class PremiumTrafficService:
         Отдельный вход от ``_push_squads`` нужен уборке осиротевших состояний: у
         неё нет ``_Target`` — сквад из конфигурации тарифа как раз и исчез.
 
-        Возвращает ответ ``update_panel_user_grace_safe`` как есть.
-        ``_limit_squad`` и ``_restore_squad`` его по-прежнему не читают — у них
-        своя сверка с панелью на следующем проходе; читает только
-        ``_clear_orphan``, которому терять строку состояния нельзя.
+        Возвращает ответ ``update_panel_user_grace_safe`` как есть: каждая
+        точка, что пишет сквады, читает его через ``_raise_if_deferred`` —
+        отличить отложенную запись от применённой иначе нечем.
         """
         from app.services.grace_access_runtime import update_panel_user_grace_safe
         from app.utils.premium_traffic import effective_panel_squads

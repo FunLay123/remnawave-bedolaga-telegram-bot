@@ -109,13 +109,29 @@ def _target(subscription_id=1, limit_gb=5, connected=(SQUAD,), language='ru', te
 
 
 class _Db:
-    """Сессия-заглушка: воркеру от неё нужен только commit."""
+    """Сессия-заглушка: воркеру от неё нужен commit и вложенная транзакция."""
 
     def __init__(self):
         self.commits = 0
 
     async def commit(self):
         self.commits += 1
+
+    async def flush(self):
+        pass
+
+    def begin_nested(self):
+        return _NestedTransaction()
+
+
+class _NestedTransaction:
+    """Заглушка SAVEPOINT: реальный откат в этих тестах не проверяется."""
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
 
 
 class TestUsageCollection:
@@ -288,6 +304,78 @@ class TestDecisions:
         assert outcome == 'restored'
         assert pushed == [SQUAD]
 
+    async def test_squad_missing_in_panel_push_failure_does_not_raise(self, monkeypatch):
+        """Досылка упала — сверка должна проглотить отказ, а не уронить проход."""
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, extra_bytes=5 * BYTES_IN_GB, used_bytes=5 * BYTES_IN_GB)
+
+        async def _get_state(_db, _sub_id, _squad):
+            return state
+
+        monkeypatch.setattr('app.database.crud.premium_traffic.get_state', _get_state)
+
+        async def _push(_db, _api, _tgt):
+            raise RuntimeError('панель недоступна')
+
+        monkeypatch.setattr(service, '_push_squads', _push)
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            outcome = await service._apply_usage(
+                _Db(),
+                FakeRemnawaveApi(),
+                _target(),
+                used_bytes=5 * BYTES_IN_GB,
+                period_start=NOW,
+                now=NOW,
+                panel_user=SimpleNamespace(active_internal_squads=[]),
+            )
+
+        assert outcome is None
+        assert any(
+            entry['event'] == 'Не удалось досинхронизировать премиум-сквад с панелью'
+            and entry['log_level'] == 'warning'
+            for entry in logs
+        )
+
+    async def test_squad_missing_in_panel_deferred_push_is_not_applied(self, monkeypatch):
+        """Досылка отложена оверлеем — не считать себя применённой, повторить."""
+        from app.services.grace_access_runtime import DeferredPanelUpdate
+
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, extra_bytes=5 * BYTES_IN_GB, used_bytes=5 * BYTES_IN_GB)
+
+        async def _get_state(_db, _sub_id, _squad):
+            return state
+
+        monkeypatch.setattr('app.database.crud.premium_traffic.get_state', _get_state)
+
+        async def _push(_db, _api, tgt):
+            return DeferredPanelUpdate(SimpleNamespace(id=tgt.panel_user_id))
+
+        monkeypatch.setattr(service, '_push_squads', _push)
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            outcome = await service._apply_usage(
+                _Db(),
+                FakeRemnawaveApi(),
+                _target(),
+                used_bytes=5 * BYTES_IN_GB,
+                period_start=NOW,
+                now=NOW,
+                panel_user=SimpleNamespace(active_internal_squads=[]),
+            )
+
+        assert outcome is None
+        assert any(
+            entry['event'] == 'Досинхронизация премиум-сквада отложена: открыт grace-оверлей'
+            and entry['log_level'] == 'info'
+            for entry in logs
+        )
+
     async def test_squad_present_in_panel_is_left_alone(self, monkeypatch):
         """Панель отдаёт сквады объектами {uuid, name}, а не строками.
 
@@ -342,6 +430,77 @@ class TestDecisions:
         assert outcome == 'limited'
         assert state.is_limited is True
         assert pushed == [1]
+
+    async def test_limited_squad_still_served_push_failure_does_not_raise(self, monkeypatch):
+        """Повторное снятие упало — сверка не должна ронять весь проход."""
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+
+        async def _get_state(_db, _sub_id, _squad):
+            return state
+
+        monkeypatch.setattr('app.database.crud.premium_traffic.get_state', _get_state)
+
+        async def _push(_db, _api, _tgt):
+            raise RuntimeError('панель недоступна')
+
+        monkeypatch.setattr(service, '_push_squads', _push)
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            outcome = await service._apply_usage(
+                _Db(),
+                FakeRemnawaveApi(),
+                _target(),
+                used_bytes=5 * BYTES_IN_GB,
+                period_start=NOW,
+                now=NOW,
+                panel_user=SimpleNamespace(active_internal_squads=[{'uuid': SQUAD, 'name': 'LTE'}]),
+            )
+
+        assert outcome is None
+        assert any(
+            entry['event'] == 'Не удалось доснять премиум-сквад в панели' and entry['log_level'] == 'warning'
+            for entry in logs
+        )
+
+    async def test_limited_squad_still_served_deferred_push_is_not_applied(self, monkeypatch):
+        """Повторное снятие отложено оверлеем — не считать себя применённым."""
+        from app.services.grace_access_runtime import DeferredPanelUpdate
+
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+
+        async def _get_state(_db, _sub_id, _squad):
+            return state
+
+        monkeypatch.setattr('app.database.crud.premium_traffic.get_state', _get_state)
+
+        async def _push(_db, _api, tgt):
+            return DeferredPanelUpdate(SimpleNamespace(id=tgt.panel_user_id))
+
+        monkeypatch.setattr(service, '_push_squads', _push)
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            outcome = await service._apply_usage(
+                _Db(),
+                FakeRemnawaveApi(),
+                _target(),
+                used_bytes=5 * BYTES_IN_GB,
+                period_start=NOW,
+                now=NOW,
+                panel_user=SimpleNamespace(active_internal_squads=[{'uuid': SQUAD, 'name': 'LTE'}]),
+            )
+
+        assert outcome is None
+        assert any(
+            entry['event'] == 'Повторное снятие премиум-сквада отложено: открыт grace-оверлей'
+            and entry['log_level'] == 'info'
+            for entry in logs
+        )
 
     async def test_limited_squad_absent_from_the_panel_is_left_alone(self, monkeypatch):
         """Снятие доехало — досылать нечего, иначе панель дёргалась бы каждый проход."""
@@ -902,14 +1061,16 @@ class TestOrphanStates:
 
 
 class TestLimitPushRetry:
-    """Снятие коммитится до отправки — упавшая отправка не должна теряться.
+    """Флаг и отправка — одна атомарная единица: упавшая отправка не коммитится.
 
-    Порядок в `_limit_squad` осознанный: `effective_panel_squads` читает базу, и
-    отправка до коммита вернула бы сквад обратно. Плата — окно, в котором база
-    считает сквад снятым, а панель его ещё отдаёт. Периодической пересылки
-    сквадов в проекте нет (`sync_users_to_panel` запускается вручную, рутинный
-    мониторинг `activeInternalSquads` не трогает), поэтому без сверки клиент
-    пользовался бы исчерпанным премиумом бессрочно.
+    `_limit_squad` флипает флаг, делает `flush` (чтобы `effective_panel_squads`
+    увидел его в той же транзакции) и отправляет в панель внутри одного
+    `begin_nested()`. Если отправка падает, savepoint откатывается целиком —
+    база остаётся в состоянии «не снято», как и было до прохода, и никакого
+    расхождения с панелью не возникает. Периодической пересылки сквадов в
+    проекте нет (`sync_users_to_panel` запускается вручную, рутинный
+    мониторинг `activeInternalSquads` не трогает), поэтому без повтора на
+    следующем проходе клиент пользовался бы исчерпанным премиумом бессрочно.
     """
 
     @staticmethod
@@ -956,10 +1117,11 @@ class TestLimitPushRetry:
 
             first = await service.process_once()
 
-            # Флаг закоммичен до отправки, отправка упала: база и панель врозь.
-            assert first['errors'] == 1
+            # Отправка упала — savepoint откатил и флаг: база не расходится с
+            # панелью, а отказ панели не считается ошибкой воркера.
+            assert first['errors'] == 0
             state = await get_state(db, 1, SQUAD)
-            assert state is not None and state.is_limited is True
+            assert state is not None and state.is_limited is False
 
             second = await service.process_once()
 
@@ -1020,6 +1182,37 @@ class TestLimitPushRetry:
 
             assert len(push_calls) == 3
 
+    async def test_deferred_limit_push_leaves_the_squad_unlimited(self, monkeypatch):
+        """Настоящий `DeferredPanelUpdate` — не «панель промолчала», а явный отказ.
+
+        В отличие от теста выше (панель отвечает без ошибки, но набор не
+        меняет), здесь `update_panel_user_grace_safe` возвращает маркер отложенной
+        записи явно. `_limit_squad` обязан откатить флаг вместе с отправкой —
+        иначе база станет утверждать снятие, которое панель не подтвердила.
+        """
+        from app.services.grace_access_runtime import DeferredPanelUpdate
+
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await self._seed_exhausted(db)
+
+            async def _deferred_push(_api, _subscription_id, *, user_id, active_internal_squads):
+                return DeferredPanelUpdate(SimpleNamespace(id=user_id))
+
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=_deferred_push,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}],
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': 5 * BYTES_IN_GB}]},
+            )
+
+            stats = await PremiumTrafficService().process_once()
+
+            state = await get_state(db, 1, SQUAD)
+            assert state is not None and state.is_limited is False, 'откат не применён — база разошлась с панелью'
+            assert stats['errors'] == 0
+            assert stats['limited'] == 0
+
     async def test_applied_push_is_not_repeated(self, monkeypatch):
         """Панель сняла сквад — досылать нечего, дёргать её каждый проход незачем."""
         async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
@@ -1045,6 +1238,38 @@ class TestLimitPushRetry:
                 await service.process_once()
 
             assert push_calls == [[OTHER_SQUAD]]
+
+    async def test_deferred_restore_push_leaves_the_squad_limited(self, monkeypatch):
+        """Зеркало теста выше для возврата: откат обязателен и для `_restore_squad`.
+
+        Топап снял исчерпание, но панель отложила запись (открыт grace-оверлей)
+        — `is_limited` обязан остаться `True`, иначе клиент решит, что доступ
+        уже вернули, а панель так и не отдаст сквад.
+        """
+        from app.services.grace_access_runtime import DeferredPanelUpdate
+
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await self._seed_exhausted(db)
+            await _seed_state(db, is_limited=True, baseline_bytes=0)
+
+            async def _deferred_push(_api, _subscription_id, *, user_id, active_internal_squads):
+                return DeferredPanelUpdate(SimpleNamespace(id=user_id))
+
+            _run_worker_against(
+                monkeypatch,
+                db,
+                push=_deferred_push,
+                panel_squads=[{'uuid': SQUAD, 'name': 'LTE'}, {'uuid': OTHER_SQUAD, 'name': 'Базовый'}],
+                # Меньше лимита — топап, должна сработать ветка восстановления.
+                usage_by_node={NODE_A: [{'id': PANEL_USER_ID, 'totalBytes': BYTES_IN_GB}]},
+            )
+
+            stats = await PremiumTrafficService().process_once()
+
+            state = await get_state(db, 1, SQUAD)
+            assert state is not None and state.is_limited is True, 'откат не применён — база разошлась с панелью'
+            assert stats['errors'] == 0
+            assert stats['restored'] == 0
 
 
 # ------------------------------------------------- открытый grace-оверлей
@@ -1132,7 +1357,10 @@ class TestOpenGraceOverlay:
         """Страховка от обратного: гард не имеет права глушить весь проход."""
         async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
             state = await self._seed_exhausted(db)
-            push_squads = AsyncMock()
+            # return_value=None обязателен: пустой AsyncMock() при обращении к
+            # .grace_write_deferred сам создаёт правдоподобный (truthy) Mock,
+            # и panel_update_was_deferred() ошибочно сочтёт запись отложенной.
+            push_squads = AsyncMock(return_value=None)
             _run_worker_against(
                 monkeypatch,
                 db,
