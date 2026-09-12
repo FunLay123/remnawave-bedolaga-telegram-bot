@@ -1165,6 +1165,30 @@ class TestReopenReachesThePanel:
             assert await get_state(db, 1, SQUAD) is None
             assert stats['cleaned'] == 1
 
+    async def test_closed_premium_squad_is_not_pushed_back_without_a_reopen(self, monkeypatch):
+        """Обратный контроль: возврат вызывает именно реопен, а не сам проход.
+
+        Поднятый ``is_limited`` после реопена — нормальное промежуточное
+        состояние, поэтому важно, что ветку возврата открывает не флаг сам по
+        себе, а обнулённый расход. У закрытого сквада расход доведён до лимита
+        (`_close_access`), `record_usage` его не понижает, `is_exhausted`
+        остаётся истинным — и `_restore_squad` не срабатывает, хотя сквад в
+        тарифе премиальный и флаг поднят.
+        """
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={SQUAD: {'traffic_limit_gb': 5}})
+            await _closed_state(db, period_start_at=datetime.now(UTC))
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            assert pushed == []
+            reread = await get_state(db, 1, SQUAD)
+            assert reread is not None
+            assert reread.is_limited is True
+            assert reread.closed_at is not None
+            assert stats['restored'] == 0
+
 
 # ---------------------------------------------- досылка снятия после сбоя
 
