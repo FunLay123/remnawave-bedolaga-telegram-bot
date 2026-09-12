@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.cabinet.routes.admin_premium_traffic import _reopen_access
 from app.database.crud.premium_traffic import get_or_create_state, get_state
 from app.database.models import (
     PromoGroup,
@@ -1083,6 +1084,86 @@ class TestOrphanStates:
 
             assert await get_state(db, 1, SQUAD) is not None
             assert stats['cleaned'] == 0
+
+
+# --------------------------------------------- возврат доступа после /reopen
+
+
+async def _closed_state(db, *, period_start_at=None):
+    """Состояние, закрытое администратором (`/close`): расход доведён до лимита."""
+    state = await _seed_state(db, is_limited=True, baseline_bytes=0)
+    state.used_bytes = state.total_limit_bytes
+    state.closed_at = NOW
+    if period_start_at is not None:
+        state.period_start_at = period_start_at
+    await db.commit()
+    return state
+
+
+class TestReopenReachesThePanel:
+    """`/reopen` обязан довести сквад до панели, а не только до базы.
+
+    Панель из кабинета не дёргается специально — единственный писатель
+    ``activeInternalSquads`` тут воркер, с его grace-оверлеем и единым путём
+    отказа. Значит вся работа реопена ложится на ближайший проход, и проверять
+    надо именно отправку в панель: ассерт по полям строки прошёл бы и тогда,
+    когда в панель не уезжает ничего.
+
+    Панель в обоих тестах не отдаёт ``activeInternalSquads`` (``None``), поэтому
+    обе ветки сверки обязаны молчать: любая отправка здесь — это ровно ветка
+    возврата, а не досинхронизация по расхождению.
+    """
+
+    async def test_reopened_premium_squad_is_pushed_back(self, monkeypatch):
+        """Сквад остался премиальным: возвращает `_restore_squad`.
+
+        Расход реопен обнулил, лимит в тарифе на месте — значит
+        ``is_limited and not is_exhausted``, и ветка возврата срабатывает на
+        ближайшем же проходе.
+        """
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={SQUAD: {'traffic_limit_gb': 5}})
+            # Период начат «сейчас»: иначе проход посчитал бы его сменившимся и
+            # снял бы флаг через `start_new_period`, а не веткой возврата —
+            # тест перестал бы проверять то, ради чего написан.
+            await _closed_state(db, period_start_at=datetime.now(UTC))
+
+            await _reopen_access(db, SimpleNamespace(id=1, connected_squads=[SQUAD]), SQUAD)
+            await db.commit()
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            assert pushed == [[SQUAD]], 'реопен обязан доехать до панели, а не только до базы'
+            reread = await get_state(db, 1, SQUAD)
+            assert reread is not None and reread.is_limited is False
+            assert stats['restored'] == 1
+
+    async def test_reopened_orphan_squad_is_pushed_back(self, monkeypatch):
+        """Сквад успел осиротеть: возвращает `_clear_orphan`.
+
+        Ровно тот случай, который раньше не возвращался никогда: реопен снимал
+        ``is_limited`` сам, проход видел уже открытое состояние, считал
+        ``needs_restore`` ложным и молча удалял строку, ничего не отправив в
+        панель. Целью воркера осиротевший сквад не является, периодической
+        пересылки сквадов в проекте нет — доступ к клиенту не возвращался
+        вообще, без всякой границы по времени.
+        """
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            # Лимит в тарифе обнулили — сквад перестал быть премиальным
+            # («отдельного лимита нет»), строка осиротела.
+            await _seed_subscription(db, premium_limits={})
+            await _closed_state(db)
+
+            await _reopen_access(db, SimpleNamespace(id=1, connected_squads=[SQUAD]), SQUAD)
+            await db.commit()
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            assert pushed == [[SQUAD]], 'осиротевший сквад после реопена тоже обязан вернуться в панель'
+            assert await get_state(db, 1, SQUAD) is None
+            assert stats['cleaned'] == 1
 
 
 # ---------------------------------------------- досылка снятия после сбоя

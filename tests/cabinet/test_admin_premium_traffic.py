@@ -225,7 +225,16 @@ class TestPremiumClose:
 class TestPremiumReopen:
     """Обратный ход: закрытое администратором состояние можно открыть заново."""
 
-    async def test_reopen_restores_access(self, monkeypatch):
+    async def test_reopen_lifts_the_closure_and_leaves_the_squad_to_the_worker(self, monkeypatch):
+        """Закрытие снято, а флаг снятия оставлен воркеру вместе с возвратом в панель.
+
+        ``is_limited`` здесь не снимается нарочно: панель из кабинета не
+        дёргается, а обе ветки возврата воркера (`_restore_squad` и
+        `_clear_orphan`) узнают о том, что сквад надо вернуть, ровно по этому
+        флагу. Снимая его тут, реопен стирал бы единственный признак, по
+        которому сквад возвращается, — для осиротевшего сквада возврат не
+        происходил бы вообще (см. тесты в `test_premium_traffic_service.py`).
+        """
         async with memory_session(monkeypatch, TABLES) as db:
             closed = await _close_access(db, _subscription(), SQUAD, NOW)
             await db.commit()
@@ -235,8 +244,29 @@ class TestPremiumReopen:
             await db.commit()
 
             assert state is not None
-            assert state.is_limited is False
             assert state.closed_at is None
+            assert state.used_bytes == 0
+            assert state.is_limited is True, 'флаг снимает воркер — вместе с отправкой сквада в панель'
+
+    async def test_reopen_clears_the_flag_for_a_squad_the_subscription_lost(self, monkeypatch):
+        """Сквада нет в подписке — возвращать нечего, и держать флаг незачем.
+
+        Такая строка не станет ни целью воркера (`_collect_targets` требует
+        ``connected_squads``), ни осиротевшей (лимит в тарифе на месте), поэтому
+        оставленный флаг не снял бы никто и никогда.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription()
+            await _close_access(db, subscription, SQUAD, NOW)
+            await db.commit()
+
+            subscription.connected_squads = [OTHER]
+            state = await _reopen_access(db, subscription, SQUAD)
+            await db.commit()
+
+            assert state is not None
+            assert state.closed_at is None
+            assert state.is_limited is False
 
     async def test_reopen_lets_the_next_pass_recompute_real_usage(self, monkeypatch):
         """Реопен не подделывает расход — он снова считается воркером с нуля."""

@@ -2971,7 +2971,7 @@
   Классы: нет
   Функции: `p12_bytes`, `stubbed_service`, `test_admin_overpay_certificate_routes_registered`, `test_upload_certificate_commits`, `test_upload_certificate_env_locked_warning`, `test_upload_certificate_invalid_returns_422`, `test_upload_certificate_oversize_returns_413`, `test_delete_certificate_commits`
 - `tests/cabinet/test_admin_premium_traffic.py` — Python-модуль
-  Классы: `TestPremiumReset` (5 методов), `TestPremiumClose` (8 методов), `TestPremiumReopen` (3 методов), `TestRegularReset` (4 методов)
+  Классы: `TestPremiumReset` (5 методов), `TestPremiumClose` (8 методов), `TestPremiumReopen` (4 методов), `TestRegularReset` (4 методов)
   Функции: нет
 - `tests/cabinet/test_admin_reachability.py` — Python-модуль
   Классы: нет
@@ -4071,7 +4071,7 @@
   Классы: `TestOptions` (5 методов), `TestQuote` (7 методов), `TestApply` (5 методов), `TestCeilingUnderConcurrency` (3 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
-  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (17 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
+  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (17 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (2 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
   Функции: нет
 - `tests/services/test_promocode_rollback_keeps_user_usable.py` — Python-модуль
   Классы: нет
