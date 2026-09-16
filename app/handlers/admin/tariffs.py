@@ -1,6 +1,7 @@
 """Управление тарифами в админ-панели."""
 
 import html
+from dataclasses import replace
 
 import structlog
 from aiogram import Dispatcher, F, types
@@ -11,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud.promo_group import get_promo_groups_with_counts
-from app.database.crud.server_squad import get_all_server_squads
+from app.database.crud.server_squad import get_all_server_squads, get_server_squad_by_uuid
 from app.database.crud.tariff import (
     create_tariff,
     delete_tariff,
@@ -30,6 +31,7 @@ from app.localization.texts import Texts, get_texts
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
 from app.utils.formatting import format_period, format_price_kopeks, format_traffic
+from app.utils.premium_traffic import PremiumSquadConfig, get_premium_squads_for_tariff
 
 
 logger = structlog.get_logger(__name__)
@@ -211,6 +213,11 @@ def get_tariff_view_keyboard(
             InlineKeyboardButton(text='👥 Промогруппы', callback_data=f'admin_tariff_edit_promo:{tariff.id}'),
         ]
     )
+    buttons.append(
+        [
+            InlineKeyboardButton(text='💎 Премиум-сквады', callback_data=f'admin_tariff_premium_squads:{tariff.id}'),
+        ]
+    )
 
     # Суточный режим - только для уже суточных тарифов показываем настройки
     # Новые тарифы делаются суточными только при создании
@@ -337,6 +344,12 @@ def format_tariff_info(tariff: Tariff, language: str, subs_count: int = 0) -> st
     custom_traffic_display = format_custom_traffic_settings(tariff)
     traffic_topup_display = _format_traffic_topup_packages(tariff)
 
+    # Премиум-лимиты по скваду считаем через общий разбор, а не по сырому полю:
+    # у него три исторические формы записи, разбор терпим к ним и отбрасывает
+    # сквады без положительного лимита (см. app/utils/premium_traffic.py).
+    premium_squads_count = len(get_premium_squads_for_tariff(tariff))
+    premium_squads_display = f'{premium_squads_count} настроено' if premium_squads_count else 'Не настроены'
+
     # Форматируем режим сброса трафика
     traffic_reset_mode = getattr(tariff, 'traffic_reset_mode', None)
     traffic_reset_display = _format_traffic_reset_mode(traffic_reset_mode)
@@ -372,6 +385,8 @@ def format_tariff_info(tariff: Tariff, language: str, subs_count: int = 0) -> st
 
 <b>Докупка трафика:</b>
 {traffic_topup_display}
+
+<b>Премиум-сквады:</b> {premium_squads_display}
 
 <b>Сброс трафика:</b> {traffic_reset_display}
 
@@ -2985,6 +3000,736 @@ async def set_traffic_reset_mode(
     )
 
 
+# ============ ПРЕМИУМ-ЛИМИТЫ ТРАФИКА ПО СКВАДУ ============
+
+
+def _get_premium_squad_config(tariff: Tariff, squad_uuid: str) -> PremiumSquadConfig:
+    """Текущие настройки премиум-лимита сквада или пустые, если ещё не заданы.
+
+    Читаем через общий разбор (`get_premium_squads_for_tariff`), а не напрямую
+    из `tariff.server_traffic_limits`: у поля три исторические формы записи, и
+    ручной разбор здесь разошёлся бы с воркером и кабинетом (та ошибка уже
+    была найдена и исправлена в веб-API этой же ветки).
+    """
+    existing = get_premium_squads_for_tariff(tariff).get(squad_uuid)
+    if existing is not None:
+        return existing
+    return PremiumSquadConfig(squad_uuid=squad_uuid, limit_gb=0)
+
+
+def _premium_squad_record(config: PremiumSquadConfig) -> dict:
+    """Сериализует настройки сквада в форму, которую хранит `server_traffic_limits`.
+
+    Отдаём запись целиком, а не только изменённое поле: `update_tariff`
+    сливает карту по ключу сквада (весь словарь одного UUID заменяется), а не
+    по отдельным полям внутри записи. Прислать сюда только новый лимит —
+    значит стереть пакеты докупки и остальные настройки этого же сквада.
+    """
+    return {
+        'traffic_limit_gb': config.limit_gb,
+        'name': config.name,
+        'sort_order': config.sort_order,
+        'topup_enabled': config.topup_enabled,
+        'topup_packages': {str(gb): price for gb, price in config.topup_packages.items()},
+        'max_topup_gb': config.max_topup_gb,
+    }
+
+
+def _format_premium_squad_limit(limit_gb: int) -> str:
+    """Форматирует лимит сквада.
+
+    Ноль — не «безлимит» и тем более не «доступ закрыт»: по соглашению поля
+    это «отдельного лимита нет, действует общий лимит тарифа». Закрытие
+    доступа — отдельный механизм (`closed_at` на подписке в веб-кабинете),
+    этот экран его не показывает и не трогает.
+    """
+    if limit_gb <= 0:
+        return 'Без отдельного лимита (действует общий лимит тарифа)'
+    return f'{limit_gb} ГБ'
+
+
+def _premium_squad_display_name(config: PremiumSquadConfig, server_name: str | None, squad_uuid: str) -> str:
+    """Название строки: своё имя лимита > имя сервера > UUID."""
+    return config.name or server_name or squad_uuid
+
+
+def _parse_premium_squad_topup_packages(text: str) -> dict[int, int]:
+    """
+    Парсит пакеты докупки премиум-трафика.
+    Формат: "5:5000, 10:9000" (ГБ:цена_в_копейках).
+
+    В отличие от `_parse_traffic_topup_packages` (обычная докупка), бесплатный
+    пакет (цена 0) допустим — так же терпим и разбор на чтение
+    (`_parse_packages` в app/utils/premium_traffic.py), и запись не должна быть
+    строже собственного чтения.
+    """
+    packages: dict[int, int] = {}
+    text = text.replace(';', ',').replace('=', ':')
+
+    for part in text.split(','):
+        part = part.strip()
+        if not part or ':' not in part:
+            continue
+
+        gb_str, price_str = part.split(':', 1)
+        try:
+            gb = int(gb_str.strip())
+            price = int(price_str.strip())
+            if gb > 0 and price >= 0:
+                packages[gb] = price
+        except ValueError:
+            continue
+
+    return packages
+
+
+def format_premium_squad_settings(tariff: Tariff, squad_uuid: str, server_name: str | None) -> str:
+    """Форматирует экран настроек премиум-лимита сквада."""
+    config = _get_premium_squad_config(tariff, squad_uuid)
+
+    name_display = html.escape(config.name) if config.name else 'не задано (используется имя сервера)'
+    order_display = config.sort_order or 'не задан (по умолчанию — по UUID)'
+
+    premium_traffic_enabled_globally = bool(getattr(settings, 'PREMIUM_TRAFFIC_ENABLED', True))
+    if not premium_traffic_enabled_globally:
+        # Тот же рубильник, что проверяет покупка (`premium_traffic_purchase._premium_traffic_enabled`):
+        # выключен — значит, ничего из настроенного здесь купить нельзя, и
+        # экран не должен намекать на обратное.
+        topup_status = '⛔ Отключена глобально (PREMIUM_TRAFFIC_ENABLED=False)'
+    elif config.topup_enabled:
+        topup_status = '✅ Включена'
+    else:
+        topup_status = '❌ Отключена'
+
+    if config.topup_packages:
+        packages_display = '\n'.join(
+            f'  • {gb} ГБ: {format_price_kopeks(price)}' for gb, price in sorted(config.topup_packages.items())
+        )
+    else:
+        packages_display = '  Пакеты не настроены'
+
+    max_topup_display = f'{config.max_topup_gb} ГБ' if config.max_topup_gb > 0 else 'Без ограничений'
+
+    lines = [
+        f'💎 <b>Премиум-лимит: {html.escape(_premium_squad_display_name(config, server_name, squad_uuid))}</b>',
+        '',
+        f'<b>Лимит трафика:</b> {_format_premium_squad_limit(config.limit_gb)}',
+        f'<b>Название:</b> {name_display}',
+        f'<b>Порядок показа:</b> {order_display}',
+        '',
+        f'<b>Докупка сверх лимита:</b> {topup_status}',
+        f'<b>Пакеты:</b>\n{packages_display}',
+        f'<b>Потолок докупки:</b> {max_topup_display}',
+    ]
+
+    if config.limit_gb <= 0:
+        lines.append('')
+        lines.append(
+            'ℹ️ Пока лимит равен 0, сквад не считается премиум-сквадом: докупка и остальные '
+            'настройки ниже не действуют, даже если заполнены.'
+        )
+
+    return '\n'.join(lines)
+
+
+def get_premium_squads_list_keyboard(
+    tariff_id: int,
+    squads: list,
+    premium_configs: dict[str, PremiumSquadConfig],
+    language: str,
+) -> InlineKeyboardMarkup:
+    """Клавиатура списка серверов для настройки премиум-лимитов."""
+    texts = get_texts(language)
+    buttons = []
+
+    for squad in squads:
+        config = premium_configs.get(squad.squad_uuid)
+        prefix = '💎' if config is not None else '⬜'
+        label = (
+            _premium_squad_display_name(config, squad.display_name, squad.squad_uuid)
+            if config is not None
+            else squad.display_name
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f'{prefix} {label}',
+                    callback_data=f'trf_psq:{tariff_id}:{squad.squad_uuid}',
+                )
+            ]
+        )
+
+    buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=f'admin_tariff_view:{tariff_id}')])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_premium_squad_keyboard(tariff_id: int, squad_uuid: str, language: str) -> InlineKeyboardMarkup:
+    """Клавиатура настроек премиум-лимита одного сквада."""
+    texts = get_texts(language)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text='📶 Лимит ГБ', callback_data=f'trf_psq_limit:{tariff_id}:{squad_uuid}')],
+            [InlineKeyboardButton(text='✏️ Название', callback_data=f'trf_psq_name:{tariff_id}:{squad_uuid}')],
+            [InlineKeyboardButton(text='🔢 Порядок показа', callback_data=f'trf_psq_order:{tariff_id}:{squad_uuid}')],
+            [InlineKeyboardButton(text='🔁 Докупка вкл/выкл', callback_data=f'trf_psq_topup:{tariff_id}:{squad_uuid}')],
+            [InlineKeyboardButton(text='📦 Пакеты докупки', callback_data=f'trf_psq_pkg:{tariff_id}:{squad_uuid}')],
+            [InlineKeyboardButton(text='📊 Потолок докупки', callback_data=f'trf_psq_max:{tariff_id}:{squad_uuid}')],
+            [InlineKeyboardButton(text=texts.BACK, callback_data=f'admin_tariff_premium_squads:{tariff_id}')],
+        ]
+    )
+
+
+@admin_required
+@error_handler
+async def show_premium_squads_list(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+):
+    """Показывает список серверов для настройки премиум-лимитов трафика."""
+    tariff_id = int(callback.data.split(':')[1])
+    tariff = await get_tariff_by_id(db, tariff_id)
+
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    squads, _ = await get_all_server_squads(db, limit=10000)
+    if not squads:
+        await callback.answer('Нет доступных серверов', show_alert=True)
+        return
+
+    premium_configs = get_premium_squads_for_tariff(tariff)
+
+    await callback.message.edit_text(
+        f'💎 <b>Премиум-лимиты трафика для «{html.escape(tariff.name)}»</b>\n\n'
+        f'Настроено: {len(premium_configs)} из {len(squads)}\n\n'
+        'Премиум-лимит — отдельная квота трафика внутри одного сервера. '
+        'Нулевой лимит означает «отдельного ограничения нет», а не «доступ закрыт».\n\n'
+        'Выберите сервер:',
+        reply_markup=get_premium_squads_list_keyboard(tariff_id, squads, premium_configs, db_user.language),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def show_premium_squad_settings(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+):
+    """Показывает настройки премиум-лимита конкретного сквада."""
+    parts = callback.data.split(':')
+    tariff_id = int(parts[1])
+    squad_uuid = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    server = await get_server_squad_by_uuid(db, squad_uuid)
+    server_name = server.display_name if server else None
+
+    await callback.message.edit_text(
+        format_premium_squad_settings(tariff, squad_uuid, server_name),
+        reply_markup=get_premium_squad_keyboard(tariff_id, squad_uuid, db_user.language),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def toggle_premium_squad_topup(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+):
+    """Переключает включение докупки премиум-трафика для сквада."""
+    parts = callback.data.split(':')
+    tariff_id = int(parts[1])
+    squad_uuid = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+
+    if not config.topup_enabled and not config.topup_packages:
+        # Включать нечего: без пакетов докупка всё равно не сработает
+        # (см. `parse_premium_squad` — enabled сводится к False при пустых
+        # пакетах), а включённый тумблер без единого пакета обманывал бы
+        # оператора видимостью работающей продажи.
+        await callback.answer('Сначала настройте хотя бы один пакет докупки', show_alert=True)
+        return
+
+    new_config = replace(config, topup_enabled=not config.topup_enabled)
+    tariff = await update_tariff(db, tariff, server_traffic_limits={squad_uuid: _premium_squad_record(new_config)})
+
+    status_text = 'включена' if new_config.topup_enabled else 'отключена'
+    await callback.answer(f'Докупка премиум-трафика {status_text}')
+
+    server = await get_server_squad_by_uuid(db, squad_uuid)
+    server_name = server.display_name if server else None
+
+    try:
+        await callback.message.edit_text(
+            format_premium_squad_settings(tariff, squad_uuid, server_name),
+            reply_markup=get_premium_squad_keyboard(tariff_id, squad_uuid, db_user.language),
+            parse_mode='HTML',
+        )
+    except TelegramBadRequest:
+        pass
+
+
+@admin_required
+@error_handler
+async def start_edit_premium_squad_limit(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Начинает редактирование лимита трафика премиум-сквада."""
+    texts = get_texts(db_user.language)
+    parts = callback.data.split(':')
+    tariff_id = int(parts[1])
+    squad_uuid = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    await state.set_state(AdminStates.editing_tariff_premium_squad_limit)
+    await state.update_data(tariff_id=tariff_id, squad_uuid=squad_uuid, language=db_user.language)
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+
+    await callback.message.edit_text(
+        '📶 <b>Лимит трафика для сквада</b>\n\n'
+        f'Текущий лимит: <b>{_format_premium_squad_limit(config.limit_gb)}</b>\n\n'
+        'Введите лимит в ГБ.\n'
+        '• <code>0</code> — отдельного лимита нет, действует общий лимит тарифа '
+        '(это не отключает и не закрывает доступ к серверу)',
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=texts.CANCEL, callback_data=f'trf_psq:{tariff_id}:{squad_uuid}')]
+            ]
+        ),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def process_edit_premium_squad_limit(
+    message: types.Message,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Обрабатывает новый лимит трафика премиум-сквада."""
+    data = await state.get_data()
+    tariff_id = data.get('tariff_id')
+    squad_uuid = data.get('squad_uuid')
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await message.answer('Тариф не найден')
+        await state.clear()
+        return
+
+    text = (message.text or '').strip()
+    try:
+        limit_gb = int(text)
+        if limit_gb < 0:
+            raise ValueError('Negative value')
+    except ValueError:
+        await message.answer(
+            'Некорректное значение. Введите целое неотрицательное число ГБ (0 — отдельного лимита нет).'
+        )
+        return
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    new_config = replace(config, limit_gb=limit_gb)
+
+    tariff = await update_tariff(db, tariff, server_traffic_limits={squad_uuid: _premium_squad_record(new_config)})
+    await state.clear()
+
+    server = await get_server_squad_by_uuid(db, squad_uuid)
+    server_name = server.display_name if server else None
+
+    await message.answer(
+        '✅ Лимит обновлён!\n\n' + format_premium_squad_settings(tariff, squad_uuid, server_name),
+        reply_markup=get_premium_squad_keyboard(tariff_id, squad_uuid, db_user.language),
+        parse_mode='HTML',
+    )
+
+
+@admin_required
+@error_handler
+async def start_edit_premium_squad_name(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Начинает редактирование названия премиум-лимита сквада."""
+    texts = get_texts(db_user.language)
+    parts = callback.data.split(':')
+    tariff_id = int(parts[1])
+    squad_uuid = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    await state.set_state(AdminStates.editing_tariff_premium_squad_name)
+    await state.update_data(tariff_id=tariff_id, squad_uuid=squad_uuid, language=db_user.language)
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    current_display = html.escape(config.name) if config.name else 'не задано'
+
+    await callback.message.edit_text(
+        '✏️ <b>Название премиум-лимита</b>\n\n'
+        f'Текущее: <b>{current_display}</b>\n\n'
+        'Введите название (до 64 символов) — пригодится, если премиум-серверов несколько.\n'
+        'Отправьте «-», чтобы использовать имя сервера.',
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=texts.CANCEL, callback_data=f'trf_psq:{tariff_id}:{squad_uuid}')]
+            ]
+        ),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def process_edit_premium_squad_name(
+    message: types.Message,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Обрабатывает новое название премиум-лимита сквада."""
+    data = await state.get_data()
+    tariff_id = data.get('tariff_id')
+    squad_uuid = data.get('squad_uuid')
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await message.answer('Тариф не найден')
+        await state.clear()
+        return
+
+    text = (message.text or '').strip()
+    if text == '-':
+        new_name = None
+    elif not text:
+        await message.answer('Пожалуйста, отправьте текстовое сообщение или «-».')
+        return
+    elif len(text) > 64:
+        await message.answer('Название слишком длинное (максимум 64 символа).')
+        return
+    else:
+        new_name = text
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    new_config = replace(config, name=new_name)
+
+    tariff = await update_tariff(db, tariff, server_traffic_limits={squad_uuid: _premium_squad_record(new_config)})
+    await state.clear()
+
+    server = await get_server_squad_by_uuid(db, squad_uuid)
+    server_name = server.display_name if server else None
+
+    await message.answer(
+        '✅ Название обновлено!\n\n' + format_premium_squad_settings(tariff, squad_uuid, server_name),
+        reply_markup=get_premium_squad_keyboard(tariff_id, squad_uuid, db_user.language),
+        parse_mode='HTML',
+    )
+
+
+@admin_required
+@error_handler
+async def start_edit_premium_squad_sort_order(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Начинает редактирование порядка показа премиум-лимита сквада."""
+    texts = get_texts(db_user.language)
+    parts = callback.data.split(':')
+    tariff_id = int(parts[1])
+    squad_uuid = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    await state.set_state(AdminStates.editing_tariff_premium_squad_sort_order)
+    await state.update_data(tariff_id=tariff_id, squad_uuid=squad_uuid, language=db_user.language)
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    current_display = config.sort_order or 'не задан'
+
+    await callback.message.edit_text(
+        '🔢 <b>Порядок показа премиум-лимита</b>\n\n'
+        f'Текущий: <b>{current_display}</b>\n\n'
+        'Введите неотрицательное целое число. Чем меньше — тем выше строка в списке.\n'
+        '<code>0</code> у всех сквадов означает «порядок не настраивали» — тогда строки идут по UUID.',
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=texts.CANCEL, callback_data=f'trf_psq:{tariff_id}:{squad_uuid}')]
+            ]
+        ),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def process_edit_premium_squad_sort_order(
+    message: types.Message,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Обрабатывает новый порядок показа премиум-лимита сквада."""
+    data = await state.get_data()
+    tariff_id = data.get('tariff_id')
+    squad_uuid = data.get('squad_uuid')
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await message.answer('Тариф не найден')
+        await state.clear()
+        return
+
+    text = (message.text or '').strip()
+    try:
+        sort_order = int(text)
+        if sort_order < 0:
+            raise ValueError('Negative value')
+    except ValueError:
+        await message.answer('Некорректное значение. Введите целое неотрицательное число.')
+        return
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    new_config = replace(config, sort_order=sort_order)
+
+    tariff = await update_tariff(db, tariff, server_traffic_limits={squad_uuid: _premium_squad_record(new_config)})
+    await state.clear()
+
+    server = await get_server_squad_by_uuid(db, squad_uuid)
+    server_name = server.display_name if server else None
+
+    await message.answer(
+        '✅ Порядок показа обновлён!\n\n' + format_premium_squad_settings(tariff, squad_uuid, server_name),
+        reply_markup=get_premium_squad_keyboard(tariff_id, squad_uuid, db_user.language),
+        parse_mode='HTML',
+    )
+
+
+@admin_required
+@error_handler
+async def start_edit_premium_squad_topup_packages(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Начинает редактирование пакетов докупки премиум-трафика."""
+    texts = get_texts(db_user.language)
+    parts = callback.data.split(':')
+    tariff_id = int(parts[1])
+    squad_uuid = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    await state.set_state(AdminStates.editing_tariff_premium_squad_topup_packages)
+    await state.update_data(tariff_id=tariff_id, squad_uuid=squad_uuid, language=db_user.language)
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    if config.topup_packages:
+        packages_display = '\n'.join(
+            f'  • {gb} ГБ: {format_price_kopeks(price)}' for gb, price in sorted(config.topup_packages.items())
+        )
+    else:
+        packages_display = '  Не настроены'
+
+    await callback.message.edit_text(
+        '📦 <b>Пакеты докупки премиум-трафика</b>\n\n'
+        f'<b>Текущие пакеты:</b>\n{packages_display}\n\n'
+        'Введите пакеты в формате:\n'
+        '<code>5:5000, 10:9000</code>\n'
+        '(ГБ:цена_в_копейках, через запятую)\n\n'
+        'После сохранения включите докупку отдельной кнопкой, если она ещё не включена.',
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=texts.CANCEL, callback_data=f'trf_psq:{tariff_id}:{squad_uuid}')]
+            ]
+        ),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def process_edit_premium_squad_topup_packages(
+    message: types.Message,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Обрабатывает новые пакеты докупки премиум-трафика."""
+    data = await state.get_data()
+    tariff_id = data.get('tariff_id')
+    squad_uuid = data.get('squad_uuid')
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await message.answer('Тариф не найден')
+        await state.clear()
+        return
+
+    if not message.text:
+        await message.answer(
+            'Пожалуйста, отправьте текстовое сообщение.\n\n'
+            'Формат: <code>ГБ:цена_в_копейках</code>\n'
+            'Пример: <code>5:5000, 10:9000</code>',
+            parse_mode='HTML',
+        )
+        return
+
+    packages = _parse_premium_squad_topup_packages(message.text.strip())
+
+    if not packages:
+        await message.answer(
+            'Не удалось распознать пакеты.\n\n'
+            'Формат: <code>ГБ:цена_в_копейках</code>\n'
+            'Пример: <code>5:5000, 10:9000</code>',
+            parse_mode='HTML',
+        )
+        return
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    new_config = replace(config, topup_packages=packages)
+
+    tariff = await update_tariff(db, tariff, server_traffic_limits={squad_uuid: _premium_squad_record(new_config)})
+    await state.clear()
+
+    server = await get_server_squad_by_uuid(db, squad_uuid)
+    server_name = server.display_name if server else None
+
+    await message.answer(
+        '✅ Пакеты обновлены!\n\n' + format_premium_squad_settings(tariff, squad_uuid, server_name),
+        reply_markup=get_premium_squad_keyboard(tariff_id, squad_uuid, db_user.language),
+        parse_mode='HTML',
+    )
+
+
+@admin_required
+@error_handler
+async def start_edit_premium_squad_max_topup(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Начинает редактирование потолка докупки премиум-трафика."""
+    texts = get_texts(db_user.language)
+    parts = callback.data.split(':')
+    tariff_id = int(parts[1])
+    squad_uuid = parts[2]
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await callback.answer('Тариф не найден', show_alert=True)
+        return
+
+    await state.set_state(AdminStates.editing_tariff_premium_squad_max_topup)
+    await state.update_data(tariff_id=tariff_id, squad_uuid=squad_uuid, language=db_user.language)
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    current_display = f'{config.max_topup_gb} ГБ' if config.max_topup_gb > 0 else 'Без ограничений'
+
+    await callback.message.edit_text(
+        '📊 <b>Потолок докупки премиум-трафика</b>\n\n'
+        f'Текущий: <b>{current_display}</b>\n\n'
+        'Введите максимальный общий объём премиум-трафика по этому скваду (в ГБ) после всех докупок.\n'
+        'Введите <code>0</code> для снятия ограничения.',
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=texts.CANCEL, callback_data=f'trf_psq:{tariff_id}:{squad_uuid}')]
+            ]
+        ),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def process_edit_premium_squad_max_topup(
+    message: types.Message,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Обрабатывает новый потолок докупки премиум-трафика."""
+    data = await state.get_data()
+    tariff_id = data.get('tariff_id')
+    squad_uuid = data.get('squad_uuid')
+
+    tariff = await get_tariff_by_id(db, tariff_id)
+    if not tariff:
+        await message.answer('Тариф не найден')
+        await state.clear()
+        return
+
+    text = (message.text or '').strip()
+    try:
+        max_topup_gb = int(text)
+        if max_topup_gb < 0:
+            raise ValueError('Negative value')
+    except ValueError:
+        await message.answer('Некорректное значение. Введите целое неотрицательное число ГБ (0 — без ограничения).')
+        return
+
+    config = _get_premium_squad_config(tariff, squad_uuid)
+    new_config = replace(config, max_topup_gb=max_topup_gb)
+
+    tariff = await update_tariff(db, tariff, server_traffic_limits={squad_uuid: _premium_squad_record(new_config)})
+    await state.clear()
+
+    server = await get_server_squad_by_uuid(db, squad_uuid)
+    server_name = server.display_name if server else None
+
+    await message.answer(
+        '✅ Потолок докупки обновлён!\n\n' + format_premium_squad_settings(tariff, squad_uuid, server_name),
+        reply_markup=get_premium_squad_keyboard(tariff_id, squad_uuid, db_user.language),
+        parse_mode='HTML',
+    )
+
+
 def register_handlers(dp: Dispatcher):
     """Регистрирует обработчики для управления тарифами."""
     # Произвольный трафик регистрируется до общего toggle-фильтра.
@@ -3092,3 +3837,20 @@ def register_handlers(dp: Dispatcher):
     # Режим сброса трафика
     dp.callback_query.register(start_edit_traffic_reset_mode, F.data.startswith('admin_tariff_edit_reset_mode:'))
     dp.callback_query.register(set_traffic_reset_mode, F.data.startswith('admin_tariff_set_reset_mode:'))
+
+    # Премиум-лимиты трафика по скваду (специфичные префиксы — до общего 'trf_psq:')
+    dp.callback_query.register(show_premium_squads_list, F.data.startswith('admin_tariff_premium_squads:'))
+    dp.callback_query.register(toggle_premium_squad_topup, F.data.startswith('trf_psq_topup:'))
+    dp.callback_query.register(start_edit_premium_squad_limit, F.data.startswith('trf_psq_limit:'))
+    dp.callback_query.register(start_edit_premium_squad_name, F.data.startswith('trf_psq_name:'))
+    dp.callback_query.register(start_edit_premium_squad_sort_order, F.data.startswith('trf_psq_order:'))
+    dp.callback_query.register(start_edit_premium_squad_topup_packages, F.data.startswith('trf_psq_pkg:'))
+    dp.callback_query.register(start_edit_premium_squad_max_topup, F.data.startswith('trf_psq_max:'))
+    dp.callback_query.register(show_premium_squad_settings, F.data.startswith('trf_psq:'))
+    dp.message.register(process_edit_premium_squad_limit, AdminStates.editing_tariff_premium_squad_limit)
+    dp.message.register(process_edit_premium_squad_name, AdminStates.editing_tariff_premium_squad_name)
+    dp.message.register(process_edit_premium_squad_sort_order, AdminStates.editing_tariff_premium_squad_sort_order)
+    dp.message.register(
+        process_edit_premium_squad_topup_packages, AdminStates.editing_tariff_premium_squad_topup_packages
+    )
+    dp.message.register(process_edit_premium_squad_max_topup, AdminStates.editing_tariff_premium_squad_max_topup)

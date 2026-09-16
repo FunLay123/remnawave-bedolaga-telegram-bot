@@ -239,6 +239,13 @@ class AdminStates(StatesGroup):
     editing_tariff_custom_traffic_max = State()
     editing_tariff_daily_price = State()
 
+    # Премиум-лимиты трафика по скваду
+    editing_tariff_premium_squad_limit = State()
+    editing_tariff_premium_squad_name = State()
+    editing_tariff_premium_squad_sort_order = State()
+    editing_tariff_premium_squad_topup_packages = State()
+    editing_tariff_premium_squad_max_topup = State()
+
 
 class SupportStates(StatesGroup):
     waiting_for_message = State()
