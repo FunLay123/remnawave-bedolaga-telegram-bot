@@ -17,11 +17,17 @@ from app.database.crud.campaign import (
     get_campaign_registration_by_user,
     get_campaign_statistics,
 )
+from app.database.crud.premium_traffic import (
+    add_extra_bytes,
+    get_or_create_state,
+    get_states_for_subscription,
+)
 from app.database.crud.promo_group import get_promo_groups_with_counts
 from app.database.crud.server_squad import (
     get_all_server_squads,
     get_server_squad_by_id,
     get_server_squad_by_uuid,
+    get_squad_display_names,
 )
 from app.database.crud.tariff import get_all_tariffs, get_tariff_by_id
 from app.database.crud.user import (
@@ -31,7 +37,14 @@ from app.database.crud.user import (
     get_user_by_telegram_id,
     get_user_by_username,
 )
-from app.database.models import Subscription, SubscriptionStatus, TransactionType, User, UserStatus
+from app.database.models import (
+    Subscription,
+    SubscriptionPremiumTraffic,
+    SubscriptionStatus,
+    TransactionType,
+    User,
+    UserStatus,
+)
 from app.keyboards.admin import (
     get_admin_pagination_keyboard,
     get_admin_users_filters_keyboard,
@@ -50,6 +63,12 @@ from app.utils.decorators import admin_required, error_handler
 from app.utils.formatters import format_datetime, format_time_ago
 from app.utils.formatting import user_html_link
 from app.utils.photo_message import safe_edit_or_resend
+from app.utils.premium_traffic import (
+    BYTES_IN_GB,
+    PremiumSquadConfig,
+    get_premium_squads_for_tariff,
+    get_squad_record_for_tariff,
+)
 from app.utils.user_utils import get_effective_referral_commission_percent
 
 
@@ -939,6 +958,11 @@ async def _render_user_subscription_overview(
         else:
             text += '\n<b>Подключенные серверы:</b> отсутствуют\n'
 
+        premium_rows, _ = await _collect_premium_traffic_rows(db, subscription)
+        premium_summary = _format_premium_traffic_summary(premium_rows)
+        if premium_summary:
+            text += f'\n{premium_summary}\n'
+
         keyboard = [
             [
                 types.InlineKeyboardButton(text='⏰ Продлить', callback_data=f'admin_sub_extend_{user_id}{_sid}'),
@@ -968,6 +992,15 @@ async def _render_user_subscription_overview(
                 types.InlineKeyboardButton(text='💳 Автоплатёж', callback_data=f'admin_user_autopay_{user_id}{_sid}'),
             ],
         ]
+
+        if premium_rows:
+            keyboard.append(
+                [
+                    types.InlineKeyboardButton(
+                        text='💎 Премиум-трафик', callback_data=f'admin_user_premium_{user_id}{_sid}'
+                    )
+                ]
+            )
 
         # Кнопки тарифов в режиме тарифов
         if settings.is_tariffs_mode():
@@ -4221,6 +4254,655 @@ async def process_traffic_edit_text(message: types.Message, db_user: User, state
     await state.clear()
 
 
+# =============================================================================
+# Премиум-трафик в карточке подписки
+# =============================================================================
+#
+# Разбор лимитов тарифа (три исторические формы записи) и правило «ноль = нет
+# отдельного лимита, а не безлимит и не закрытый доступ» уже реализованы в
+# `app/utils/premium_traffic.py` — здесь его не переизобретаем, только читаем.
+#
+# Экран различает четыре непересекающихся состояния сквада:
+#   1) нет отдельного лимита (`traffic_limit_gb == 0` в тарифе) — учёта нет
+#      вообще, действует общий лимит тарифа;
+#   2) снят автоматически за перерасход (`is_limited=True`, `closed_at=None`,
+#      лимит исчерпан) — сам вернётся с новым периодом;
+#   3) закрыт администратором (`closed_at` стоит) — переживает смену периода,
+#      докупку и уход сквада из тарифа, снимается только явным открытием;
+#   4) открыт администратором, но ещё не возвращён в панель воркером
+#      (`closed_at=None`, `is_limited=True`, лимит уже не исчерпан — расход
+#      обнулён открытием). Это то же самое переходное состояние, которое
+#      кабинет показывает как «всё ещё ограничено», и это верно: панель сквад
+#      ещё не отдала. Здесь оно НЕ должно называться «закрыто администратором».
+
+
+class PremiumSquadCardState(Enum):
+    """Четыре состояния премиум-сквада, которые нельзя путать в интерфейсе."""
+
+    NO_LIMIT = 'no_limit'
+    ACTIVE = 'active'
+    EXHAUSTED = 'exhausted'
+    CLOSED = 'closed'
+    REOPENED_PENDING = 'reopened_pending'
+
+
+def _classify_premium_traffic_state(
+    config: PremiumSquadConfig, state: SubscriptionPremiumTraffic | None
+) -> PremiumSquadCardState:
+    """Определить состояние сквада. Порядок проверок важен, см. модульный докстринг.
+
+    `closed_at` проверяем первым: пока он стоит, значения `is_limited` и
+    `is_exhausted` ничего не решают (`start_new_period` и `add_extra_bytes`
+    сами не трогают `is_limited`, пока закрытие не снято явно). Переходное
+    «открыт, но не возвращён» отличаем от «снят за перерасход» тем же
+    условием, что и воркер для возврата сквада — `is_limited and not
+    is_exhausted` (`_restore_squad` в `premium_traffic_service.py`): `/reopen`
+    обнуляет `used_bytes`, поэтому `is_exhausted` сразу становится `False`.
+    """
+    if state is not None and state.closed_at is not None:
+        return PremiumSquadCardState.CLOSED
+    if state is not None and state.is_limited:
+        return PremiumSquadCardState.REOPENED_PENDING if not state.is_exhausted else PremiumSquadCardState.EXHAUSTED
+    if config.limit_gb <= 0:
+        return PremiumSquadCardState.NO_LIMIT
+    return PremiumSquadCardState.ACTIVE
+
+
+async def _collect_premium_traffic_rows(
+    db: AsyncSession, subscription: 'Subscription'
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Премиум-сквады, «относящиеся» к этой подписке, и подпись остальных.
+
+    Подписчику эта подписка принадлежит целиком, поэтому «относящиеся» здесь —
+    не все сквады сервера (это экран тарифа, Task 10), а объединение:
+    • сквады, премиумные в текущем тарифе И подключённые к подписке — то, чем
+      она реально пользуется сейчас;
+    • сквады, у которых уже есть строка `subscription_premium_traffic` для
+      этой подписки, вне зависимости от тарифа и подключения — иначе админское
+      закрытие, пережившее уход сквада из тарифа или отключение от подписки
+      (см. `_drop_orphan_premium_states`, сохраняющую именно такие строки),
+      стало бы невидимым и неснимаемым с этого экрана.
+
+    Второе возвращаемое значение — имена подключённых сквадов без отдельного
+    лимита и без истории премиум-состояний: их не за чем показывать построчно
+    с кнопками управления, но явно отметить как «не отдельный лимит, а не
+    закрыто» — это ровно то смешение, которого требует избежать задача.
+    """
+    tariff = getattr(subscription, 'tariff', None)
+    configs = get_premium_squads_for_tariff(tariff)
+    connected = set(subscription.connected_squads or [])
+    states = {state.squad_uuid: state for state in await get_states_for_subscription(db, subscription.id)}
+
+    managed_uuids = {uuid for uuid in configs if uuid in connected} | set(states)
+    unmanaged_uuids = connected - managed_uuids
+
+    if not managed_uuids and not unmanaged_uuids:
+        return [], []
+
+    names = await get_squad_display_names(db, list(managed_uuids | unmanaged_uuids))
+
+    rows: list[dict[str, Any]] = []
+    for squad_uuid in managed_uuids:
+        config = configs.get(squad_uuid) or get_squad_record_for_tariff(tariff, squad_uuid)
+        rows.append(
+            {
+                'squad_uuid': squad_uuid,
+                'config': config,
+                'state': states.get(squad_uuid),
+                'connected': squad_uuid in connected,
+                'name': config.name or names.get(squad_uuid) or squad_uuid,
+            }
+        )
+    rows.sort(key=lambda row: (row['config'].sort_order, row['squad_uuid']))
+
+    unmanaged_names = sorted(names.get(uuid, uuid) for uuid in unmanaged_uuids)
+    return rows, unmanaged_names
+
+
+def _premium_gb(value_bytes: int | None) -> float:
+    return round((value_bytes or 0) / BYTES_IN_GB, 2)
+
+
+def _format_premium_traffic_summary(rows: list[dict[str, Any]]) -> str | None:
+    """Короткая строка для карточки подписки. `None`, если показывать нечего."""
+    if not rows:
+        return None
+
+    closed = exhausted = pending = 0
+    for row in rows:
+        state_kind = _classify_premium_traffic_state(row['config'], row['state'])
+        if state_kind is PremiumSquadCardState.CLOSED:
+            closed += 1
+        elif state_kind is PremiumSquadCardState.EXHAUSTED:
+            exhausted += 1
+        elif state_kind is PremiumSquadCardState.REOPENED_PENDING:
+            pending += 1
+
+    badges = []
+    if closed:
+        badges.append(f'🔒 закрыто: {closed}')
+    if exhausted:
+        badges.append(f'⛔ исчерпано: {exhausted}')
+    if pending:
+        badges.append(f'🔓 ожидает возврата: {pending}')
+
+    line = f'<b>Премиум-трафик:</b> {len(rows)} сквад(ов)'
+    if badges:
+        line += ' (' + ', '.join(badges) + ')'
+    return line
+
+
+def _format_premium_traffic_row(row: dict[str, Any], state_kind: PremiumSquadCardState) -> str:
+    """Одна строка деталей: лимит, израсходовано, докуплено, остаток, снят ли сквад."""
+    config: PremiumSquadConfig = row['config']
+    state: SubscriptionPremiumTraffic | None = row['state']
+    name = html.escape(row['name'])
+
+    lines = [f'💠 <b>{name}</b>']
+
+    if state_kind is PremiumSquadCardState.NO_LIMIT:
+        lines.append('  ♾️ Без отдельного лимита — действует общий лимит тарифа, доступ не закрыт')
+        return '\n'.join(lines)
+
+    if state is not None:
+        limit_gb = _premium_gb(state.limit_bytes)
+        extra_gb = _premium_gb(state.extra_bytes)
+        used_gb = _premium_gb(state.used_bytes)
+        remaining_gb = _premium_gb(state.remaining_bytes)
+    else:
+        limit_gb = config.limit_gb
+        extra_gb = 0.0
+        used_gb = 0.0
+        remaining_gb = config.limit_gb
+
+    lines.append(f'  Лимит: {limit_gb} ГБ, докуплено: {extra_gb} ГБ')
+    lines.append(f'  Израсходовано: {used_gb} ГБ, остаток: {remaining_gb} ГБ')
+
+    is_removed_from_panel = bool(state.is_limited) if state is not None else False
+    lines.append(f'  Снят из панели: {"да" if is_removed_from_panel else "нет"}')
+
+    if state_kind is PremiumSquadCardState.EXHAUSTED:
+        lines.append('  ⛔ Снят автоматически: лимит исчерпан. Вернётся сам с началом нового периода.')
+    elif state_kind is PremiumSquadCardState.CLOSED:
+        closed_at = format_datetime(state.closed_at) if state is not None and state.closed_at else '—'
+        lines.append(f'  🔒 Доступ закрыт администратором ({closed_at}). Снимается только явным открытием.')
+    elif state_kind is PremiumSquadCardState.REOPENED_PENDING:
+        lines.append('  🔓 Открыт администратором, ожидает возврата в панель воркером (обычно несколько минут).')
+    else:
+        lines.append('  ✅ Активен, ограничение не сработало')
+
+    return '\n'.join(lines)
+
+
+def _extract_premium_squad_context(callback_data: str) -> tuple[int, int | None, int]:
+    """user_id, опциональный subscription_id и индекс сквада из хвоста callback_data.
+
+    Тот же приём, что и в `process_traffic_addition_button`/`set_user_traffic_button`:
+    ручной разбор `parts[-N]`, а не regex — здесь просто на одно поле больше.
+    """
+    parts = callback_data.split('_')
+    idx = int(parts[-1])
+    if parts[-2].startswith('s') and parts[-2][1:].isdigit():
+        subscription_id = int(parts[-2][1:])
+        user_id = int(parts[-3])
+    else:
+        subscription_id = None
+        user_id = int(parts[-2])
+    return user_id, subscription_id, idx
+
+
+def _extract_premium_squad_value_context(callback_data: str) -> tuple[int, int | None, int, int]:
+    """Как `_extract_premium_squad_context`, но с ещё одним числом в хвосте (ГБ)."""
+    parts = callback_data.split('_')
+    value = int(parts[-1])
+    idx = int(parts[-2])
+    if parts[-3].startswith('s') and parts[-3][1:].isdigit():
+        subscription_id = int(parts[-3][1:])
+        user_id = int(parts[-4])
+    else:
+        subscription_id = None
+        user_id = int(parts[-3])
+    return user_id, subscription_id, idx, value
+
+
+async def _grant_premium_traffic(
+    db: AsyncSession,
+    user_id: int,
+    subscription_id: int | None,
+    squad_uuid: str,
+    gb: int,
+    admin_id: int,
+) -> tuple[bool, str]:
+    """Ручная выдача премиум-ГБ — компенсация без оплаты.
+
+    Требуем положительный лимит в ТЕКУЩЕМ тарифе (`configs.get(squad_uuid)`) —
+    то же условие, что и у ручной выдачи в кабинете (`grant_premium_traffic`):
+    докупать поверх лимита, которого сейчас нет, некуда. Закрытие администратором
+    выдаче не мешает: `add_extra_bytes` само не снимает `closed_at`.
+    """
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        return False, '❌ Подписка не найдена'
+
+    configs = get_premium_squads_for_tariff(getattr(subscription, 'tariff', None))
+    config = configs.get(squad_uuid)
+    if config is None:
+        return False, '❌ В тарифе больше нет премиум-лимита для этого сервера'
+
+    state = await get_or_create_state(
+        db,
+        subscription.id,
+        squad_uuid,
+        limit_bytes=config.limit_bytes,
+        period_start_at=datetime.now(UTC),
+    )
+    add_extra_bytes(state, gb * BYTES_IN_GB)
+    await db.commit()
+
+    logger.info(
+        'Админ вручную начислил премиум-трафик из карточки подписки',
+        admin_id=admin_id,
+        user_id=user_id,
+        subscription_id=subscription.id,
+        squad_uuid=squad_uuid,
+        gb=gb,
+    )
+    return True, f'✅ Начислено {gb} ГБ премиум-трафика ({html.escape(config.name or squad_uuid)})'
+
+
+async def _render_premium_traffic_screen(
+    callback: types.CallbackQuery, db: AsyncSession, user_id: int, subscription_id: int | None
+) -> bool:
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return False
+
+    rows, unmanaged_names = await _collect_premium_traffic_rows(db, subscription)
+
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    back_cb = (
+        f'admin_user_sub_select_{user_id}_{subscription_id}'
+        if subscription_id and settings.is_multi_tariff_enabled()
+        else f'admin_user_subscription_{user_id}'
+    )
+
+    lines = ['💎 <b>Премиум-трафик подписки</b>', '']
+
+    if not bool(getattr(settings, 'PREMIUM_TRAFFIC_ENABLED', True)):
+        # Рубильник не проверяется на записи (там же, где он не проверяется у
+        # покупки самим пользователем) — экран обязан сам сказать, что докупка
+        # пользователю сейчас недоступна, хотя управление ниже продолжает работать
+        # (это решение админа, а не покупка).
+        lines.append(
+            '⛔ Функция глобально отключена (PREMIUM_TRAFFIC_ENABLED=False): '
+            'докупка недоступна пользователям, но управление ниже продолжает работать.'
+        )
+        lines.append('')
+
+    keyboard: list[list[types.InlineKeyboardButton]] = []
+
+    if not rows:
+        lines.append('Для этой подписки нет премиум-сквадов — ни настроенных в тарифе, ни ранее закрытых.')
+    else:
+        for idx, row in enumerate(rows):
+            state_kind = _classify_premium_traffic_state(row['config'], row['state'])
+            lines.append(_format_premium_traffic_row(row, state_kind))
+            lines.append('')
+            label = f'💠 {row["name"]}'
+            if len(label) > 40:
+                label = label[:37] + '...'
+            keyboard.append(
+                [types.InlineKeyboardButton(text=label, callback_data=f'admin_user_premium_sq_{user_id}{_sid}_{idx}')]
+            )
+
+    if unmanaged_names:
+        lines.append(
+            '♾️ Без отдельного лимита (общий лимит тарифа): ' + ', '.join(html.escape(name) for name in unmanaged_names)
+        )
+        lines.append('')
+
+    keyboard.append([types.InlineKeyboardButton(text='⬅️ Назад', callback_data=back_cb)])
+
+    await callback.message.edit_text(
+        '\n'.join(lines).strip(), reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard)
+    )
+    return True
+
+
+async def _render_premium_squad_detail(
+    callback: types.CallbackQuery,
+    db: AsyncSession,
+    user_id: int,
+    subscription_id: int | None,
+    idx: int,
+) -> bool:
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return False
+
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    if idx < 0 or idx >= len(rows):
+        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
+        return False
+
+    row = rows[idx]
+    state_kind = _classify_premium_traffic_state(row['config'], row['state'])
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    list_cb = f'admin_user_premium_{user_id}{_sid}'
+
+    text = '💎 <b>Премиум-трафик: сквад</b>\n\n' + _format_premium_traffic_row(row, state_kind)
+
+    keyboard: list[list[types.InlineKeyboardButton]] = []
+    # Выдать ГБ и закрыть доступ можно только там, где в тарифе сейчас есть
+    # положительный лимит — то же условие, что у `_close_access`/ручной выдачи
+    # в кабинете: докупать или закрывать период, которого сейчас не существует,
+    # нельзя. Открыть ранее закрытый доступ можно и без этого условия — у
+    # `_reopen_access` для этого достаточно самой строки состояния.
+    if row['config'].limit_gb > 0:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text='📊 Выдать ГБ', callback_data=f'admin_user_premium_grant_{user_id}{_sid}_{idx}'
+                )
+            ]
+        )
+    if state_kind is PremiumSquadCardState.CLOSED:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text='🔓 Открыть доступ', callback_data=f'admin_user_premium_reopen_{user_id}{_sid}_{idx}'
+                )
+            ]
+        )
+    elif row['config'].limit_gb > 0:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text='🔒 Закрыть доступ', callback_data=f'admin_user_premium_close_{user_id}{_sid}_{idx}'
+                )
+            ]
+        )
+    keyboard.append([types.InlineKeyboardButton(text='⬅️ Назад', callback_data=list_cb)])
+
+    await callback.message.edit_text(text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard))
+    return True
+
+
+@admin_required
+@error_handler
+async def show_premium_traffic_screen(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+    user_id, subscription_id = _extract_admin_sub_context(callback.data)
+    if await _render_premium_traffic_screen(callback, db, user_id, subscription_id):
+        await callback.answer()
+
+
+@admin_required
+@error_handler
+async def show_premium_squad_detail(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+    if await _render_premium_squad_detail(callback, db, user_id, subscription_id, idx):
+        await callback.answer()
+
+
+@admin_required
+@error_handler
+async def start_premium_traffic_grant(
+    callback: types.CallbackQuery, db_user: User, state: FSMContext, db: AsyncSession
+):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return
+
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    if idx < 0 or idx >= len(rows) or rows[idx]['config'].limit_gb <= 0:
+        await callback.answer('❌ Сквад недоступен для выдачи трафика', show_alert=True)
+        return
+
+    row = rows[idx]
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+
+    await state.update_data(
+        premium_grant_user_id=user_id,
+        premium_grant_subscription_id=subscription_id,
+        premium_grant_squad_uuid=row['squad_uuid'],
+    )
+    await state.set_state(AdminStates.granting_premium_traffic)
+
+    await callback.message.edit_text(
+        f'📊 <b>Выдача премиум-трафика: {html.escape(row["name"])}</b>\n\n'
+        'Компенсация без оплаты — гигабайты добавятся к лимиту текущего периода.\n'
+        'Введите количество ГБ (1-100000) или выберите пресет:',
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    types.InlineKeyboardButton(
+                        text='5 ГБ', callback_data=f'admin_user_premium_grant_set_{user_id}{_sid}_{idx}_5'
+                    ),
+                    types.InlineKeyboardButton(
+                        text='10 ГБ', callback_data=f'admin_user_premium_grant_set_{user_id}{_sid}_{idx}_10'
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text='50 ГБ', callback_data=f'admin_user_premium_grant_set_{user_id}{_sid}_{idx}_50'
+                    ),
+                    types.InlineKeyboardButton(
+                        text='100 ГБ', callback_data=f'admin_user_premium_grant_set_{user_id}{_sid}_{idx}_100'
+                    ),
+                ],
+                [
+                    types.InlineKeyboardButton(
+                        text='❌ Отмена', callback_data=f'admin_user_premium_sq_{user_id}{_sid}_{idx}'
+                    )
+                ],
+            ]
+        ),
+    )
+    await state.set_state(AdminStates.granting_premium_traffic)
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def apply_premium_traffic_grant_preset(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+    user_id, subscription_id, idx, gb = _extract_premium_squad_value_context(callback.data)
+
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return
+
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    if idx < 0 or idx >= len(rows):
+        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
+        return
+
+    squad_uuid = rows[idx]['squad_uuid']
+    _success, message = await _grant_premium_traffic(db, user_id, subscription_id, squad_uuid, gb, db_user.id)
+
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    detail_cb = f'admin_user_premium_sq_{user_id}{_sid}_{idx}'
+    await callback.message.edit_text(
+        message,
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ К скваду', callback_data=detail_cb)]]
+        ),
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def apply_premium_traffic_grant_text(message: types.Message, db_user: User, state: FSMContext, db: AsyncSession):
+    data = await state.get_data()
+    user_id = data.get('premium_grant_user_id')
+    subscription_id = data.get('premium_grant_subscription_id')
+    squad_uuid = data.get('premium_grant_squad_uuid')
+
+    if not user_id or not squad_uuid:
+        await message.answer('❌ Не удалось определить сквад для выдачи трафика')
+        await state.clear()
+        return
+
+    try:
+        gb = int(message.text.strip())
+    except (TypeError, ValueError):
+        await message.answer('❌ Введите целое число ГБ от 1 до 100000')
+        return
+
+    if gb < 1 or gb > 100_000:
+        await message.answer('❌ Количество ГБ должно быть от 1 до 100000')
+        return
+
+    _success, result_message = await _grant_premium_traffic(db, user_id, subscription_id, squad_uuid, gb, db_user.id)
+
+    await state.clear()
+
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    back_cb = f'admin_user_premium_{user_id}{_sid}'
+    await message.answer(
+        result_message,
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ К премиум-трафику', callback_data=back_cb)]]
+        ),
+    )
+
+
+@admin_required
+@error_handler
+async def ask_close_premium_access(callback: types.CallbackQuery, db_user: User):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    detail_cb = f'admin_user_premium_sq_{user_id}{_sid}_{idx}'
+    confirm_cb = f'admin_user_premium_close_confirm_{user_id}{_sid}_{idx}'
+
+    await callback.message.edit_text(
+        '🔒 <b>Закрытие доступа к премиум-скваду</b>\n\n'
+        'Лимит тарифа при этом не меняется — обнулять его для «закрытия» нельзя: '
+        'ноль означает «отдельного лимита нет», а не «доступ закрыт».\n\n'
+        'Сквад будет доведён до исчерпанного лимита и снят из панели воркером. '
+        'Автоматически (сменой периода или докупкой) закрытие не снимается — '
+        'только явным открытием.\n\n'
+        'Продолжить?',
+        reply_markup=get_confirmation_keyboard(confirm_cb, detail_cb, db_user.language),
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def confirm_close_premium_access(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return
+
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    if idx < 0 or idx >= len(rows):
+        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
+        return
+
+    squad_uuid = rows[idx]['squad_uuid']
+
+    from app.cabinet.routes.admin_premium_traffic import _close_access
+
+    result_state = await _close_access(db, subscription, squad_uuid, datetime.now(UTC))
+
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    back_cb = f'admin_user_premium_{user_id}{_sid}'
+
+    if result_state is None:
+        await callback.message.edit_text(
+            '❌ В тарифе больше нет премиум-лимита для этого сервера — закрывать нечего',
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ Назад', callback_data=back_cb)]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    await db.commit()
+
+    logger.info(
+        'Админ закрыл доступ к премиум-скваду из карточки подписки',
+        admin_id=db_user.id,
+        user_id=user_id,
+        subscription_id=subscription.id,
+        squad_uuid=squad_uuid,
+    )
+
+    await callback.message.edit_text(
+        '✅ Доступ к скваду закрыт',
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ К премиум-трафику', callback_data=back_cb)]]
+        ),
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def reopen_premium_access_handler(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return
+
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    if idx < 0 or idx >= len(rows):
+        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
+        return
+
+    squad_uuid = rows[idx]['squad_uuid']
+
+    from app.cabinet.routes.admin_premium_traffic import _reopen_access
+
+    result_state = await _reopen_access(db, subscription, squad_uuid)
+
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    back_cb = f'admin_user_premium_{user_id}{_sid}'
+
+    if result_state is None:
+        await callback.message.edit_text(
+            '❌ Состояние премиум-лимита для этого сквада не найдено',
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ Назад', callback_data=back_cb)]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    await db.commit()
+
+    logger.info(
+        'Админ открыл доступ к премиум-скваду из карточки подписки',
+        admin_id=db_user.id,
+        user_id=user_id,
+        subscription_id=subscription.id,
+        squad_uuid=squad_uuid,
+    )
+
+    # `is_limited` намеренно не снимает сам /reopen (см. `_reopen_access`) — это
+    # то самое переходное состояние: сквад вернёт ближайший проход воркера.
+    pending_note = ' Сквад ожидает возврата в панель воркером.' if result_state.is_limited else ''
+    await callback.message.edit_text(
+        f'✅ Доступ открыт.{pending_note}',
+        reply_markup=types.InlineKeyboardMarkup(
+            inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ К премиум-трафику', callback_data=back_cb)]]
+        ),
+    )
+    await callback.answer()
+
+
 @admin_required
 @error_handler
 async def confirm_reset_devices(callback: types.CallbackQuery, db_user: User):
@@ -6419,6 +7101,31 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(set_user_traffic_button, F.data.startswith('admin_user_traffic_set_'))
 
     dp.message.register(process_traffic_edit_text, AdminStates.editing_user_traffic)
+
+    # Премиум-трафик в карточке подписки. Порядок важен: специфичные
+    # варианты (детали сквада, установка пресета, подтверждение закрытия)
+    # регистрируем раньше общего входа на экран.
+    dp.callback_query.register(show_premium_squad_detail, F.data.startswith('admin_user_premium_sq_'))
+    dp.callback_query.register(apply_premium_traffic_grant_preset, F.data.startswith('admin_user_premium_grant_set_'))
+    dp.callback_query.register(
+        start_premium_traffic_grant,
+        F.data.startswith('admin_user_premium_grant_') & ~F.data.contains('_set_'),
+    )
+    dp.callback_query.register(confirm_close_premium_access, F.data.startswith('admin_user_premium_close_confirm_'))
+    dp.callback_query.register(
+        ask_close_premium_access,
+        F.data.startswith('admin_user_premium_close_') & ~F.data.contains('confirm'),
+    )
+    dp.callback_query.register(reopen_premium_access_handler, F.data.startswith('admin_user_premium_reopen_'))
+    dp.callback_query.register(
+        show_premium_traffic_screen,
+        F.data.startswith('admin_user_premium_')
+        & ~F.data.contains('_sq_')
+        & ~F.data.contains('_grant_')
+        & ~F.data.contains('_close_')
+        & ~F.data.contains('_reopen_'),
+    )
+    dp.message.register(apply_premium_traffic_grant_text, AdminStates.granting_premium_traffic)
 
     dp.callback_query.register(
         confirm_reset_devices, F.data.startswith('admin_user_reset_devices_') & ~F.data.contains('confirm')

@@ -154,6 +154,9 @@ class AdminStates(StatesGroup):
     editing_user_traffic = State()
     editing_user_referrals = State()
     editing_user_referral_percent = State()
+    # Ручная выдача премиум-трафика (компенсация без оплаты) конкретному скваду
+    # подписки — текстовый ввод ГБ, когда админ не воспользовался пресетом.
+    granting_premium_traffic = State()
 
     # Тестовое начисление реферального дохода
     test_referral_earning_input = State()
