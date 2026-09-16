@@ -31,7 +31,11 @@ from app.localization.texts import Texts, get_texts
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
 from app.utils.formatting import format_period, format_price_kopeks, format_traffic
-from app.utils.premium_traffic import PremiumSquadConfig, get_premium_squads_for_tariff
+from app.utils.premium_traffic import (
+    PremiumSquadConfig,
+    get_premium_squads_for_tariff,
+    get_squad_record_for_tariff,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -3006,15 +3010,19 @@ async def set_traffic_reset_mode(
 def _get_premium_squad_config(tariff: Tariff, squad_uuid: str) -> PremiumSquadConfig:
     """Текущие настройки премиум-лимита сквада или пустые, если ещё не заданы.
 
-    Читаем через общий разбор (`get_premium_squads_for_tariff`), а не напрямую
-    из `tariff.server_traffic_limits`: у поля три исторические формы записи, и
+    Читаем через `get_squad_record_for_tariff`, а не напрямую из
+    `tariff.server_traffic_limits`: у поля три исторические формы записи, и
     ручной разбор здесь разошёлся бы с воркером и кабинетом (та ошибка уже
     была найдена и исправлена в веб-API этой же ветки).
+
+    Намеренно НЕ `get_premium_squads_for_tariff`: та отбрасывает сквады с
+    limit_gb <= 0 (сквад сейчас не премиумный) — правильно для воркера и
+    кабинета, которым нужен только список действующих лимитов, но не для
+    редактора одного сквада. Если бы читали через неё, то правка любого поля
+    временно обнулённого сквада (лимит=0, но сохранены имя/пакеты/сортировка)
+    записала бы синтетическую пустую конфигурацию и молча стёрла эти поля.
     """
-    existing = get_premium_squads_for_tariff(tariff).get(squad_uuid)
-    if existing is not None:
-        return existing
-    return PremiumSquadConfig(squad_uuid=squad_uuid, limit_gb=0)
+    return get_squad_record_for_tariff(tariff, squad_uuid)
 
 
 def _premium_squad_record(config: PremiumSquadConfig) -> dict:

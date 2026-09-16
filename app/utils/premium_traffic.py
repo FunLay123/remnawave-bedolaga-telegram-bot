@@ -93,11 +93,16 @@ def _parse_packages(raw: Any) -> dict[int, int]:
     return packages
 
 
-def parse_premium_squad(squad_uuid: str, raw: Any) -> PremiumSquadConfig | None:
-    """Разобрать одну запись `server_traffic_limits`.
+def parse_squad_record(squad_uuid: str, raw: Any) -> PremiumSquadConfig:
+    """Разобрать одну запись `server_traffic_limits` целиком, не отбрасывая нулевой лимит.
 
-    Возвращает None, если у сквада нет положительного лимита — тогда он не
-    премиумный и отдельного учёта не требует.
+    В отличие от `parse_premium_squad` (нужен воркеру и кабинету для отбора
+    только *действующих* премиум-сквадов), эта функция — источник истины для
+    редакторов настроек (бот, кабинет). Ноль в лимите означает «сквад сейчас
+    не премиумный», а не «остальные поля записи не нужны»: если оператор
+    обнулил лимит, но у сквада остались сохранённые имя, сортировка или
+    пакеты докупки, следующая правка любого другого поля того же сквада не
+    должна их стирать. Так что здесь запись возвращается как есть, целиком.
     """
     if isinstance(raw, dict):
         limit_gb = _coerce_int(raw.get('traffic_limit_gb'))
@@ -116,9 +121,6 @@ def parse_premium_squad(squad_uuid: str, raw: Any) -> PremiumSquadConfig | None:
         packages = {}
         max_topup_gb = 0
 
-    if limit_gb <= 0:
-        return None
-
     return PremiumSquadConfig(
         squad_uuid=squad_uuid,
         limit_gb=limit_gb,
@@ -130,6 +132,19 @@ def parse_premium_squad(squad_uuid: str, raw: Any) -> PremiumSquadConfig | None:
         topup_packages=packages,
         max_topup_gb=max_topup_gb,
     )
+
+
+def parse_premium_squad(squad_uuid: str, raw: Any) -> PremiumSquadConfig | None:
+    """Разобрать одну запись `server_traffic_limits`.
+
+    Возвращает None, если у сквада нет положительного лимита — тогда он не
+    премиумный и отдельного учёта не требует (воркер и кабинет читают именно
+    так: их интересует только набор *действующих* лимитов).
+    """
+    config = parse_squad_record(squad_uuid, raw)
+    if config.limit_gb <= 0:
+        return None
+    return config
 
 
 def parse_premium_squads(server_traffic_limits: Any) -> dict[str, PremiumSquadConfig]:
@@ -162,6 +177,21 @@ def get_premium_squads_for_tariff(tariff: Any) -> dict[str, PremiumSquadConfig]:
     if tariff is None:
         return {}
     return parse_premium_squads(getattr(tariff, 'server_traffic_limits', None))
+
+
+def get_squad_record_for_tariff(tariff: Any, squad_uuid: str) -> PremiumSquadConfig:
+    """Полная запись одного сквада вне зависимости от текущего значения лимита.
+
+    Нужна редакторам настроек: `get_premium_squads_for_tariff` отбрасывает
+    сквады с limit_gb <= 0, и если экран редактирования читал бы через неё,
+    правка любого поля временно обнулённого сквада перезаписала бы запись
+    синтетической пустышкой, стирая сохранённые имя/пакеты/сортировку.
+    Возвращает пустую конфигурацию, если записи о скваде вообще ещё нет.
+    """
+    limits = getattr(tariff, 'server_traffic_limits', None) if tariff is not None else None
+    if isinstance(limits, dict) and squad_uuid in limits:
+        return parse_squad_record(squad_uuid, limits[squad_uuid])
+    return PremiumSquadConfig(squad_uuid=squad_uuid, limit_gb=0)
 
 
 def exclude_limited_squads(squads: Iterable[str] | None, limited_uuids: Iterable[str]) -> list[str]:

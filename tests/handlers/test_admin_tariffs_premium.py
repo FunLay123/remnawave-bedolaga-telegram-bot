@@ -206,6 +206,70 @@ async def test_saving_packages_preserves_own_squads_limit_and_name(monkeypatch):
     assert record['sort_order'] == 2
 
 
+async def test_editing_other_field_after_zeroing_limit_preserves_stored_name_and_packages(monkeypatch):
+    """Обнуление лимита не должно стирать остальные поля при следующей правке.
+
+    `parse_premium_squad` намеренно отбрасывает записи с limit_gb <= 0 (сквад
+    временно не премиумный) — это верно для воркера и кабинета, которым нужен
+    только список *активных* премиум-сквадов. Но экран редактирования должен
+    видеть полную хранимую запись даже для временно обнулённого сквада: иначе
+    правка любого другого поля перезапишет её синтетической пустышкой и молча
+    сотрёт имя/пакеты/сортировку, которые оператор уже настроил.
+    """
+    tariff = _tariff(
+        server_traffic_limits={
+            SQUAD_A: {
+                'traffic_limit_gb': 0,
+                'name': 'Мобильный',
+                'sort_order': 3,
+                'topup_packages': {'5': 1000},
+                'max_topup_gb': 20,
+            }
+        }
+    )
+    message = _message('7')
+    state = _state(tariff_id=7, squad_uuid=SQUAD_A)
+
+    monkeypatch.setattr(tariffs_mod, 'get_tariff_by_id', AsyncMock(return_value=tariff))
+    monkeypatch.setattr(tariffs_mod, 'update_tariff', _fake_update_tariff(tariff))
+    monkeypatch.setattr(tariffs_mod, 'get_server_squad_by_uuid', AsyncMock(return_value=None))
+
+    # Правим порядок сортировки — лимит трогать не должны, но squad всё ещё
+    # «не премиумный» (limit_gb == 0) в момент чтения текущей конфигурации.
+    await _unwrap(tariffs_mod.process_edit_premium_squad_sort_order)(message, _db_user(), MagicMock(), state)
+
+    record = tariff.server_traffic_limits[SQUAD_A]
+    assert record['sort_order'] == 7
+    assert record['traffic_limit_gb'] == 0
+    assert record['name'] == 'Мобильный'
+    assert record['topup_packages'] == {'5': 1000}
+    assert record['max_topup_gb'] == 20
+
+
+async def test_editing_other_field_after_zeroing_limit_preserves_legacy_shape_without_limit_key(monkeypatch):
+    """То же самое для исторической формы записи без ключа `traffic_limit_gb`."""
+    tariff = _tariff(
+        server_traffic_limits={
+            SQUAD_A: {
+                'name': 'Резервный',
+                'topup_packages': {'10': 2000},
+            }
+        }
+    )
+    message = _message('Обновлённое имя')
+    state = _state(tariff_id=7, squad_uuid=SQUAD_A)
+
+    monkeypatch.setattr(tariffs_mod, 'get_tariff_by_id', AsyncMock(return_value=tariff))
+    monkeypatch.setattr(tariffs_mod, 'update_tariff', _fake_update_tariff(tariff))
+    monkeypatch.setattr(tariffs_mod, 'get_server_squad_by_uuid', AsyncMock(return_value=None))
+
+    await _unwrap(tariffs_mod.process_edit_premium_squad_name)(message, _db_user(), MagicMock(), state)
+
+    record = tariff.server_traffic_limits[SQUAD_A]
+    assert record['name'] == 'Обновлённое имя'
+    assert record['topup_packages'] == {'10': 2000}
+
+
 async def test_removing_squad_from_premium_set_zeroes_limit_key_stays(monkeypatch):
     """Снятие премиума со сквада — это лимит=0, а не удаление ключа из карты."""
     tariff = _tariff(server_traffic_limits={SQUAD_A: {'traffic_limit_gb': 50}})
