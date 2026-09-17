@@ -23,7 +23,7 @@ from app.database.crud.tariff import (
 )
 from app.database.models import PromoGroup, Subscription, SubscriptionStatus, Tariff, Transaction, TransactionType, User
 from app.services.panel_sync import patch_panel_squads
-from app.utils.premium_traffic import parse_premium_squads
+from app.utils.premium_traffic import PremiumSquadConfig, parse_premium_squads
 
 from ..dependencies import get_cabinet_db, require_permission
 from ..schemas.tariffs import (
@@ -51,21 +51,26 @@ router = APIRouter(prefix='/admin/tariffs', tags=['Cabinet Admin Tariffs'])
 
 
 async def _get_tariff_servers(
-    db: AsyncSession, allowed_squads: list[str], server_traffic_limits: dict = None
+    db: AsyncSession, allowed_squads: list[str], premium_squads: dict[str, PremiumSquadConfig]
 ) -> list[ServerInfo]:
-    """Get server info for tariff."""
+    """Get server info for tariff.
+
+    `premium_squads` — уже разобранный `parse_premium_squads(server_traffic_limits)`,
+    тот же самый словарь, из которого `get_tariff` строит `server_limits_response`.
+    Раньше здесь был свой разбор сырого `server_traffic_limits` (isinstance-цепочка),
+    который разошёлся с общим парсером: сквад с нулевым (уже не действующим)
+    лимитом попадал сюда как `traffic_limit_gb: 0`, а из `server_limits_response`
+    пропадал — парсер отбрасывает неположительные лимиты. Один ответ показывал два
+    противоречащих друг другу взгляда на одну и ту же конфигурацию.
+
+    Беря значение из общего словаря, а не из сырого поля, мы гарантируем: сквад
+    либо есть в обоих полях с одинаковым лимитом, либо не премиумный и здесь
+    показан как `None` («индивидуального лимита нет»), а не как обманчивый ноль.
+    """
     servers, _ = await get_all_server_squads(db, available_only=False)
-    limits = server_traffic_limits or {}
     result = []
     for server in servers:
-        # Получаем индивидуальный лимит трафика для сервера
-        server_limit = None
-        if server.squad_uuid in limits:
-            limit_data = limits[server.squad_uuid]
-            if isinstance(limit_data, dict) and 'traffic_limit_gb' in limit_data:
-                server_limit = limit_data['traffic_limit_gb']
-            elif isinstance(limit_data, int):
-                server_limit = limit_data
+        config = premium_squads.get(server.squad_uuid)
 
         result.append(
             ServerInfo(
@@ -74,7 +79,7 @@ async def _get_tariff_servers(
                 display_name=server.display_name,
                 country_code=server.country_code,
                 is_selected=server.squad_uuid in allowed_squads,
-                traffic_limit_gb=server_limit,
+                traffic_limit_gb=config.limit_gb if config is not None else None,
             )
         )
     return result
@@ -223,16 +228,25 @@ async def get_tariff(
 
     allowed_squads = tariff.allowed_squads or []
     server_traffic_limits = tariff.server_traffic_limits or {}
-    servers = await _get_tariff_servers(db, allowed_squads, server_traffic_limits)
+
+    # Разбираем сырое поле один раз через общий парсер, которым пользуются
+    # воркер и покупка премиум-трафика (`parse_premium_squads`), а не через
+    # сырое значение поля. Разбор терпим к трём историческим формам записи и
+    # сводит `topup_enabled=True` без пакетов к «выключено» — если собирать
+    # ответ из сырых данных напрямую, оператор увидел бы включённую докупку,
+    # которой в проверках воркера и покупки не существует.
+    #
+    # Оба поля ответа — `servers[].traffic_limit_gb` и `server_limits_response`
+    # — строятся из этого же самого словаря, поэтому разойтись они не могут:
+    # либо сквад премиумный и виден в обоих одинаково, либо не премиумный и
+    # отсутствует в `server_limits_response`, а в `servers[]` показан как
+    # `None`, а не как обманчивый нулевой лимит.
+    premium_squads = parse_premium_squads(server_traffic_limits)
+
+    servers = await _get_tariff_servers(db, allowed_squads, premium_squads)
     promo_groups = await _get_tariff_promo_groups(db, tariff)
     subs_count = await get_tariff_subscriptions_count(db, tariff.id)
 
-    # Строим ответ из того же разбора, которым пользуются воркер и покупка
-    # премиум-трафика (`parse_premium_squads`), а не из сырого значения поля.
-    # Разбор терпим к трём историческим формам записи и сводит
-    # `topup_enabled=True` без пакетов к «выключено» — если собирать ответ из
-    # сырых данных напрямую, оператор увидел бы включённую докупку, которой в
-    # проверках воркера и покупки не существует.
     server_limits_response = {
         uuid: ServerTrafficLimit(
             traffic_limit_gb=config.limit_gb,
@@ -242,7 +256,7 @@ async def get_tariff(
             topup_packages={str(gb): price for gb, price in config.topup_packages.items()},
             max_topup_gb=config.max_topup_gb,
         )
-        for uuid, config in parse_premium_squads(server_traffic_limits).items()
+        for uuid, config in premium_squads.items()
     }
 
     return TariffDetailResponse(

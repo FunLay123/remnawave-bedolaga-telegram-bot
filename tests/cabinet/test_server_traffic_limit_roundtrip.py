@@ -20,7 +20,14 @@ from fastapi.testclient import TestClient
 from app.cabinet.dependencies import get_cabinet_db
 from app.cabinet.routes import admin_tariffs as route
 from app.cabinet.schemas.tariffs import ServerTrafficLimit
-from app.database.models import PromoGroup, ServerSquad, Subscription, Tariff, tariff_promo_groups
+from app.database.models import (
+    PromoGroup,
+    ServerSquad,
+    Subscription,
+    Tariff,
+    server_squad_promo_groups,
+    tariff_promo_groups,
+)
 from app.utils.premium_traffic import parse_premium_squad
 from tests.fixtures.sqlite_memory import memory_session
 
@@ -98,6 +105,7 @@ _TABLES = (
     PromoGroup.__table__,
     tariff_promo_groups,
     ServerSquad.__table__,
+    server_squad_promo_groups,
     Subscription.__table__,
 )
 
@@ -114,7 +122,7 @@ def _override_permission_dependencies(app: FastAPI) -> None:
 
 
 @contextlib.asynccontextmanager
-async def _tariff_app(monkeypatch, *, server_traffic_limits=None):
+async def _tariff_app(monkeypatch, *, server_traffic_limits=None, servers=None):
     async with memory_session(monkeypatch, _TABLES) as db:
         db.add(
             Tariff(
@@ -125,6 +133,8 @@ async def _tariff_app(monkeypatch, *, server_traffic_limits=None):
                 server_traffic_limits=server_traffic_limits or {},
             )
         )
+        for server in servers or ():
+            db.add(server)
         await db.flush()
 
         app = FastAPI()
@@ -202,3 +212,37 @@ async def test_write_rejects_malformed_packages(monkeypatch):
         )
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_servers_and_server_limits_response_agree_on_a_zero_limit_squad(monkeypatch):
+    """`servers[]` и `server_traffic_limits` ответа не должны расходиться во мнении об одном скваде.
+
+    Ревью всей ветки, находка 1: `servers[]` собирался отдельным разбором сырого
+    поля тарифа и мог показать `traffic_limit_gb: 0` для сквада, которого
+    парсер (`parse_premium_squads`, из него строится `server_traffic_limits`
+    ответа) уже исключил как непремиумный. Оба поля обязаны строиться из одного
+    и того же разбора: сквад либо премиумный и виден одинаково в обоих, либо
+    нет — и тогда в `servers[]` он `None`, а не обманчивый ноль.
+    """
+    limits = {SQUAD: {'traffic_limit_gb': 0, 'name': 'Отключённый резерв'}}
+    servers = [
+        ServerSquad(squad_uuid=SQUAD, display_name='DE-1'),
+        ServerSquad(squad_uuid=OTHER_SQUAD, display_name='FR-1'),
+    ]
+    async with _tariff_app(monkeypatch, server_traffic_limits=limits, servers=servers) as http:
+        response = http.get('/cabinet/admin/tariffs/1')
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    # Не премиумный (нулевой лимит) — отсутствует в отфильтрованном представлении.
+    assert SQUAD not in body['server_traffic_limits']
+
+    # ...и в списке серверов НЕ показан как «лимит 0» — это и была бы ложь.
+    server_row = next(row for row in body['servers'] if row['squad_uuid'] == SQUAD)
+    assert server_row['traffic_limit_gb'] is None
+
+    other_row = next(row for row in body['servers'] if row['squad_uuid'] == OTHER_SQUAD)
+    assert other_row['traffic_limit_gb'] is None
+    assert OTHER_SQUAD not in body['server_traffic_limits']

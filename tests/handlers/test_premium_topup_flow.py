@@ -405,6 +405,49 @@ class TestBuySucceeds:
             callback.message.edit_text.assert_awaited_once()
 
 
+# ============================= Текст экрана: состояние сквада =============================
+
+
+class TestStateWording:
+    """Экран не должен путать «исчерпан лимитом» и «открыт админом, но не возвращён» (ревью всей ветки).
+
+    `is_limited` истинен в обоих случаях (сквад снят из ``activeInternalSquads``),
+    различает их только ``is_exhausted`` — ровно то же условие, что и
+    `PremiumSquadCardState` в `admin/users.py`.
+    """
+
+    async def test_exhausted_squad_says_limit_is_exhausted(self, monkeypatch):
+        subscription = _subscription()
+        _patch_resolve(monkeypatch, subscription)
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.is_limited = True
+            state.used_bytes = 5 * BYTES_IN_GB  # лимит выбран целиком
+            await db.commit()
+
+            callback = _callback('premium_traffic_topup')
+            await traffic_mod.handle_premium_traffic_topup(callback, _db_user(), db)
+
+            (rendered_text,) = callback.message.edit_text.await_args.args[:1]
+            assert 'исчерпания лимита' in rendered_text
+
+    async def test_reopened_pending_squad_is_not_called_exhausted(self, monkeypatch):
+        """Админ открыл доступ, воркер ещё не вернул сквад в панель — лимит не исчерпан."""
+        subscription = _subscription()
+        _patch_resolve(monkeypatch, subscription)
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.is_limited = True  # ещё не возвращён воркером, но closed_at нет и лимит не выбран
+            await db.commit()
+
+            callback = _callback('premium_traffic_topup')
+            await traffic_mod.handle_premium_traffic_topup(callback, _db_user(), db)
+
+            (rendered_text,) = callback.message.edit_text.await_args.args[:1]
+            assert 'исчерпания лимита' not in rendered_text
+            assert 'открыт администратором' in rendered_text
+
+
 # ============================= Потолок докупки: только отображение =============================
 
 

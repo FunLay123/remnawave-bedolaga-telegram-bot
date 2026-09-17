@@ -837,7 +837,16 @@ async def _render_premium_traffic_packages(
         remaining_gb = round(state.remaining_bytes / BYTES_IN_GB, 2)
         lines.append(f'Остаток в текущем периоде: {remaining_gb} ГБ')
         if state.is_limited:
-            lines.append('⛔ Сервер сейчас ограничен из-за исчерпания лимита — докупка вернёт доступ')
+            # `_get_purchasable_premium_squads` уже отсеяла закрытые администратором
+            # сквады (`closed_at is not None`), так что здесь `is_limited=True`
+            # означает одно из двух: расход исчерпал лимит, либо администратор уже
+            # открыл доступ, но воркер ещё не успел вернуть сквад в панель. Это
+            # разные состояния (см. `PremiumSquadCardState` в `admin/users.py`), и
+            # называть второе «исчерпанием лимита» неверно — лимит как раз не исчерпан.
+            if state.is_exhausted:
+                lines.append('⛔ Сервер сейчас ограничен из-за исчерпания лимита — докупка вернёт доступ')
+            else:
+                lines.append('🔓 Доступ уже открыт администратором, сервер вот-вот вернётся — обычно занимает пару минут')
 
     if config.max_topup_gb > 0:
         # Потолок только показываем — решает, укладывается ли покупка в него,
