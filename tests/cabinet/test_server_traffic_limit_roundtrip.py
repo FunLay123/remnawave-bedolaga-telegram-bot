@@ -138,7 +138,17 @@ async def _tariff_app(monkeypatch, *, server_traffic_limits=None):
 
 @pytest.mark.asyncio
 async def test_get_reports_topup_disabled_when_no_packages(monkeypatch):
-    """topup_enabled=true без пакетов — это выключенная докупка, так и отдаём."""
+    """topup_enabled=true без пакетов — это выключенная докупка, так и отдаём.
+
+    Раздел 7 ревью (находка 2.1): недостаточно проверить только ответ `GET` —
+    он сегодня строится из `parse_premium_squads` (см. комментарий в
+    `admin_tariffs.get_tariff`), но это деталь реализации, а не гарантия,
+    закреплённая тестом. Здесь сверяются оба взгляда на одни и те же сырые
+    данные тарифа: то, что отдаёт кабинет по HTTP, и то, что увидел бы воркер,
+    разобрав их напрямую через `parse_premium_squad`. Если раздел когда-нибудь
+    станет собирать ответ из сырого поля в обход разбора, эта проверка
+    разойдётся первой.
+    """
     limits = {SQUAD: {'traffic_limit_gb': 5, 'topup_enabled': True, 'topup_packages': {}}}
     async with _tariff_app(monkeypatch, server_traffic_limits=limits) as http:
         response = http.get('/cabinet/admin/tariffs/1')
@@ -146,6 +156,11 @@ async def test_get_reports_topup_disabled_when_no_packages(monkeypatch):
     assert response.status_code == 200, response.text
     body = response.json()
     assert body['server_traffic_limits'][SQUAD]['topup_enabled'] is False
+
+    # То же самое видит воркер, разобрав те же сырые данные тарифа напрямую.
+    worker_config = parse_premium_squad(SQUAD, limits[SQUAD])
+    assert worker_config is not None
+    assert worker_config.topup_enabled is False
 
 
 @pytest.mark.asyncio
