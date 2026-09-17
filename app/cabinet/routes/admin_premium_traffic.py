@@ -60,7 +60,7 @@ from app.database.crud.premium_traffic import (
 )
 from app.database.crud.server_squad import get_squad_display_names
 from app.database.crud.subscription import get_subscription_by_id
-from app.database.models import User
+from app.database.models import SubscriptionPremiumTraffic, User
 from app.services.remnawave_service import RemnaWaveService
 from app.utils.premium_traffic import BYTES_IN_GB, get_premium_squads_for_tariff
 
