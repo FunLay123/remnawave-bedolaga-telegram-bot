@@ -18,7 +18,13 @@ from app.database.crud.transaction import get_user_total_spent_kopeks
 from app.database.crud.user import update_user
 from app.database.crud.user_message import get_random_active_message
 from app.database.models import InfoPage, PromoGroup, User
-from app.handlers.subscription.traffic import add_traffic, handle_add_traffic
+from app.handlers.subscription.traffic import (
+    add_traffic,
+    buy_premium_traffic,
+    handle_add_traffic,
+    handle_premium_traffic_squad,
+    handle_premium_traffic_topup,
+)
 from app.keyboards.inline import (
     get_info_menu_keyboard,
     get_language_selection_keyboard,
@@ -1792,5 +1798,11 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(handle_add_traffic, F.data == 'buy_traffic')
 
     dp.callback_query.register(add_traffic, F.data.startswith('add_traffic_'))
+
+    dp.callback_query.register(handle_premium_traffic_topup, F.data == 'premium_traffic_topup')
+
+    dp.callback_query.register(handle_premium_traffic_squad, F.data.startswith('premium_traffic_squad_'))
+
+    dp.callback_query.register(buy_premium_traffic, F.data.startswith('premium_traffic_buy_'))
 
     dp.callback_query.register(handle_activate_button, F.data == 'activate_button')

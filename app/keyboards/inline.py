@@ -2653,6 +2653,7 @@ def get_add_traffic_keyboard(
     subscription_end_date: datetime = None,
     discount_percent: int = 0,
     sub_id: int | None = None,
+    has_premium_topup: bool = False,
 ) -> InlineKeyboardMarkup:
     from app.config import settings
 
@@ -2660,6 +2661,12 @@ def get_add_traffic_keyboard(
     language_code = (language or DEFAULT_LANGUAGE).split('-')[0].lower()
     use_russian_fallback = language_code in {'ru', 'fa'}
     back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'menu_subscription'
+
+    premium_button = (
+        [InlineKeyboardButton(text='💠 Премиум-трафик', callback_data='premium_traffic_topup')]
+        if has_premium_topup
+        else None
+    )
 
     # Считаем по дням (как в кабинете и подтверждении)
     if subscription_end_date:
@@ -2675,17 +2682,18 @@ def get_add_traffic_keyboard(
     enabled_packages = [pkg for pkg in packages if pkg['enabled'] and pkg['price'] > 0]
 
     if not enabled_packages:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('NO_TRAFFIC_PACKAGES', '❌ Нет доступных пакетов'),
-                        callback_data='no_traffic_packages',
-                    )
-                ],
-                [InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)],
-            ]
-        )
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text=texts.t('NO_TRAFFIC_PACKAGES', '❌ Нет доступных пакетов'),
+                    callback_data='no_traffic_packages',
+                )
+            ],
+        ]
+        if premium_button:
+            buttons.append(premium_button)
+        buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
 
     buttons = []
 
@@ -2718,6 +2726,9 @@ def get_add_traffic_keyboard(
 
         buttons.append([InlineKeyboardButton(text=text, callback_data=f'add_traffic_{gb}')])
 
+    if premium_button:
+        buttons.append(premium_button)
+
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2729,6 +2740,7 @@ def get_add_traffic_keyboard_from_tariff(
     subscription_end_date: datetime = None,
     discount_percent: int = 0,
     sub_id: int | None = None,
+    has_premium_topup: bool = False,
 ) -> InlineKeyboardMarkup:
     """
     Клавиатура для докупки трафика из настроек тарифа.
@@ -2739,24 +2751,32 @@ def get_add_traffic_keyboard_from_tariff(
         subscription_end_date: Дата окончания подписки для расчета цены
         discount_percent: Процент скидки
         sub_id: ID подписки для формирования обратной ссылки в multi-tariff режиме
+        has_premium_topup: показывать ли кнопку докупки премиум-трафика (посквадных лимитов)
     """
     texts = get_texts(language)
     language_code = (language or DEFAULT_LANGUAGE).split('-')[0].lower()
     use_russian_fallback = language_code in {'ru', 'fa'}
     back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'menu_subscription'
 
+    premium_button = (
+        [InlineKeyboardButton(text='💠 Премиум-трафик', callback_data='premium_traffic_topup')]
+        if has_premium_topup
+        else None
+    )
+
     if not packages:
-        return InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('NO_TRAFFIC_PACKAGES', '❌ Нет доступных пакетов'),
-                        callback_data='no_traffic_packages',
-                    )
-                ],
-                [InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)],
-            ]
-        )
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text=texts.t('NO_TRAFFIC_PACKAGES', '❌ Нет доступных пакетов'),
+                    callback_data='no_traffic_packages',
+                )
+            ],
+        ]
+        if premium_button:
+            buttons.append(premium_button)
+        buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
+        return InlineKeyboardMarkup(inline_keyboard=buttons)
 
     buttons = []
 
@@ -2786,7 +2806,78 @@ def get_add_traffic_keyboard_from_tariff(
 
         buttons.append([InlineKeyboardButton(text=text, callback_data=f'add_traffic_{gb}')])
 
+    # Без этого блока кнопка докупки премиум-трафика пропадала бы всякий раз,
+    # когда в тарифе настроены обычные пакеты трафика — то есть в основном
+    # рабочем случае режима тарифов, а не только в пустом списке пакетов выше.
+    if premium_button:
+        buttons.append(premium_button)
+
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_premium_traffic_squads_keyboard(
+    language: str,
+    rows: list[dict],
+    *,
+    back_callback: str,
+) -> InlineKeyboardMarkup:
+    """Клавиатура выбора сервера для докупки премиум-трафика (посквадных лимитов).
+
+    ``rows`` — результат `_get_purchasable_premium_squads`, уже отфильтрованный
+    от закрытых администратором сквадов и от выключенного рубильника: здесь
+    только отображение, без повторных проверок.
+    """
+    texts = get_texts(language)
+
+    buttons = [
+        [InlineKeyboardButton(text=f'💠 {row["name"]}', callback_data=f'premium_traffic_squad_{idx}')]
+        for idx, row in enumerate(rows)
+    ]
+    buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
+
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_premium_traffic_packages_keyboard(
+    language: str,
+    idx: int,
+    packages: list[tuple[int, int]],
+    discount_percent: int = 0,
+    *,
+    back_callback: str,
+) -> InlineKeyboardMarkup:
+    """Клавиатура выбора объёма докупки премиум-трафика для одного сервера.
+
+    ``packages`` — `PremiumSquadConfig.available_packages()`: список
+    `(ГБ, цена в копейках)`, уже отсортированный и без нулевых/выключенных
+    записей. ``idx`` — позиция сервера в списке, который построил вызывающий
+    (`_get_purchasable_premium_squads`) — тот же список перечитывается перед
+    списанием, поэтому индекс должен указывать туда же.
+    """
+    texts = get_texts(language)
+    language_code = (language or DEFAULT_LANGUAGE).split('-')[0].lower()
+    use_russian_fallback = language_code in {'ru', 'fa'}
+
+    buttons = []
+    for gb, price_kopeks in packages:
+        discounted_price, discount_value = apply_percentage_discount(price_kopeks, discount_percent)
+
+        if use_russian_fallback:
+            text = f'📊 +{gb} ГБ - {discounted_price // 100} ₽'
+        else:
+            text = f'📊 +{gb} GB - {discounted_price // 100} ₽'
+
+        if discount_percent > 0 and discount_value > 0:
+            if use_russian_fallback:
+                text += f' (скидка {discount_percent}%: -{discount_value // 100}₽)'
+            else:
+                text += f' (discount {discount_percent}%: -{discount_value // 100}₽)'
+
+        buttons.append([InlineKeyboardButton(text=text, callback_data=f'premium_traffic_buy_{idx}_{gb}')])
+
+    buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
