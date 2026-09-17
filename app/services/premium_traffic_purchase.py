@@ -101,6 +101,29 @@ def _ensure_topup_fits(config: PremiumSquadConfig, already_bytes: int | None, gb
         )
 
 
+def _ensure_squad_is_not_closed(state) -> None:
+    """Отказать, если сквад закрыт администратором (``closed_at``).
+
+    Единая точка проверки для обоих вызовов (``quote_premium_topup`` и
+    ``apply_premium_topup``): без неё покупка через веб-кабинет проходила бы
+    молча — `quote_premium_topup` цену считает, `apply_premium_topup`
+    начисляет `extra_bytes` (Task 9 намеренно не снимает этим закрытие), а
+    доступ так и остаётся закрыт. Деньги списаны, ничего не открыто.
+
+    Гейт строго на ``closed_at``, а не на ``is_limited``: сквад в состоянии
+    REOPENED_PENDING (администратор снял закрытие, но воркер ещё не вернул
+    сквад в панель) имеет ``closed_at is None`` при всё ещё поднятом
+    ``is_limited`` — и такую покупку отклонять нельзя, `apply_premium_topup`
+    сама снимет ограничение при начислении (см. `test_admin_users_premium.py`,
+    `PremiumSquadCardState.REOPENED_PENDING`).
+    """
+    if state is not None and state.closed_at is not None:
+        raise PremiumTopupError(
+            'squad_closed',
+            'Доступ к этому серверу закрыт администратором, докупка недоступна',
+        )
+
+
 async def quote_premium_topup(
     db: AsyncSession,
     subscription,
@@ -126,12 +149,17 @@ async def quote_premium_topup(
     if price is None:
         raise PremiumTopupError('package_not_found', f'Пакет {gb} ГБ не настроен для этого сервера')
 
+    # Состояние читаем один раз для обеих проверок ниже (закрытие и потолок):
+    # это единственная точка входа для покупки что в боте, что в кабинете, и
+    # закрытие сквада администратором проверяется здесь у самой власти, а не у
+    # каждого вызывающего по отдельности (см. Task 13).
+    state = await get_state(db, subscription.id, squad_uuid)
+    _ensure_squad_is_not_closed(state)
+
     if config.max_topup_gb > 0:
         # Быстрый отказ до списания: читаем без блокировки, потому что решение
         # по этому чтению не записывается. Окончательная проверка — в
-        # apply_premium_topup, под блокировкой строки. Без потолка не читаем
-        # вовсе: лишний запрос на каждую котировку не нужен.
-        state = await get_state(db, subscription.id, squad_uuid)
+        # apply_premium_topup, под блокировкой строки.
         _ensure_topup_fits(config, state.extra_bytes if state else 0, gb)
 
     return PremiumTopupQuote(squad_uuid=squad_uuid, gb=gb, base_price_kopeks=price, config=config)
@@ -177,6 +205,11 @@ async def apply_premium_topup(
     # транзакции, что и начисление. Тем же приёмом lock_user_for_pricing
     # защищает баланс.
     _ensure_topup_fits(quote.config, state.extra_bytes, quote.gb)
+    # То же самое для закрытия: quote проверяла closed_at без блокировки, и
+    # администратор мог закрыть сквад в промежутке между quote и apply (списание
+    # балансом ещё не значит, что начисление уже случилось). Перечитанное здесь
+    # состояние — то же самое, под FOR UPDATE, так что вторая проверка не лишняя.
+    _ensure_squad_is_not_closed(state)
 
     was_limited = bool(state.is_limited)
     add_extra_bytes(state, quote.bytes)

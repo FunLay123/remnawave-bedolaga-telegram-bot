@@ -134,6 +134,41 @@ class TestQuote:
             # значит и до списания баланса в роутере дело дойти не могло бы.
             assert await get_state(db, 1, SQUAD) is None
 
+    async def test_closed_squad_refuses_the_purchase(self, monkeypatch):
+        """Task 13: закрытый администратором сквад нельзя купить ни через бота, ни через кабинет.
+
+        Проверка живёт в сервисе (единая точка входа для обеих поверхностей),
+        а не только на экране бота — до этого фикса ровно эта проверка в
+        сервисе отсутствовала, и кабинет пропускал оплату закрытого сквада.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.closed_at = NOW
+            await db.commit()
+
+            with pytest.raises(PremiumTopupError) as error:
+                await quote_premium_topup(db, _subscription(), SQUAD, 5)
+
+            assert error.value.code == 'squad_closed'
+
+    async def test_reopened_pending_squad_is_still_purchasable(self, monkeypatch):
+        """Гейт строго на ``closed_at``, а не на ``is_limited``.
+
+        REOPENED_PENDING: администратор снял закрытие (``closed_at is None``),
+        но воркер ещё не вернул сквад в панель, поэтому ``is_limited`` всё ещё
+        поднят. Такая покупка обязана пройти — она и есть путь возврата
+        доступа, см. `apply_premium_topup`/`restored`.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.is_limited = True
+            state.closed_at = None
+            await db.commit()
+
+            quote = await quote_premium_topup(db, _subscription(), SQUAD, 5)
+
+            assert quote.gb == 5
+
     async def test_zero_ceiling_means_no_limit(self, monkeypatch):
         limits = {SQUAD: {**WITH_TOPUP, 'max_topup_gb': 0}}
         async with memory_session(monkeypatch, TABLES) as db:
@@ -195,6 +230,32 @@ class TestApply:
 
             assert restored is False
             assert state.is_limited is True
+
+    async def test_apply_refuses_a_squad_closed_after_the_quote(self, monkeypatch):
+        """Перепроверка закрытия под блокировкой строки, симметрично потолку.
+
+        `quote_premium_topup` читает `closed_at` без блокировки; если
+        администратор закрывает сквад в промежутке между quote и apply,
+        решающая проверка обязана случиться здесь же, а не быть пропущена.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription()
+            # Состояние заводим заранее, иначе quote его не увидит и не с чем
+            # будет сравнивать «до» и «после» закрытия.
+            await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            await db.commit()
+            quote = await quote_premium_topup(db, subscription, SQUAD, 5)
+
+            state = await get_state(db, 1, SQUAD)
+            state.closed_at = NOW
+            await db.commit()
+
+            with pytest.raises(PremiumTopupError) as error:
+                await apply_premium_topup(db, subscription, quote, period_start_at=NOW)
+
+            assert error.value.code == 'squad_closed'
+            state = await get_state(db, 1, SQUAD)
+            assert state.extra_bytes == 0
 
     async def test_second_purchase_adds_up(self, monkeypatch):
         async with memory_session(monkeypatch, TABLES) as db:

@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from fastapi import HTTPException
 
@@ -22,9 +24,14 @@ from app.cabinet.routes.subscription_modules import traffic as traffic_route
 from app.cabinet.schemas.subscription import PremiumTrafficPurchaseRequest
 from app.config import settings
 from app.database.crud import user as user_crud
-from app.database.models import User
+from app.database.crud.premium_traffic import get_or_create_state
+from app.database.models import SubscriptionPremiumTraffic, User
 from app.services import premium_traffic_purchase as purchase_service
-from app.utils.premium_traffic import PremiumSquadConfig
+from app.utils.premium_traffic import BYTES_IN_GB, PremiumSquadConfig
+from tests.fixtures.sqlite_memory import memory_session
+
+
+NOW = datetime(2026, 9, 6, 12, 0, tzinfo=UTC)
 
 
 SQUAD = 'e4f819ca-2cfd-4425-9354-16a262b180c1'
@@ -87,6 +94,55 @@ async def test_purchase_route_refuses_when_feature_disabled(monkeypatch):
     # Решающая проверка: списания не было вообще.
     assert subtract_calls == []
     assert user.balance_kopeks == 1_000_000
+
+
+@pytest.mark.asyncio
+async def test_purchase_route_refuses_a_squad_closed_by_admin(monkeypatch):
+    """Task 13: закрытый сквад нельзя купить через веб-кабинет.
+
+    До фикса ``quote_premium_topup`` не проверял ``closed_at`` вовсе, а бот
+    страховал это отдельным экраном — веб-кабинет передавал
+    ``request.squad_uuid`` напрямую и такой проверки не имел, поэтому оплата
+    проходила, а доступ не возвращался (см. Task 9: `add_extra_bytes` не
+    снимает закрытие). Решающая проверка здесь — что запрос отклоняется 400, а
+    не падает 500 и не списывает баланс, а не только то, что где-то есть
+    исключение.
+    """
+    async with memory_session(monkeypatch, (SubscriptionPremiumTraffic.__table__,)) as db:
+        state = await get_or_create_state(
+            db, _FakeSubscription.id, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW
+        )
+        state.closed_at = NOW
+        await db.commit()
+
+        async def _fake_resolve(db, user, subscription_id):
+            return _FakeSubscription()
+
+        monkeypatch.setattr(traffic_route, 'resolve_subscription', _fake_resolve)
+
+        subtract_calls: list[int] = []
+
+        async def _fake_subtract(db, user, amount, description):
+            subtract_calls.append(amount)
+            return True
+
+        monkeypatch.setattr(traffic_route, 'subtract_user_balance', _fake_subtract)
+
+        user = _make_user()
+        request = PremiumTrafficPurchaseRequest(squad_uuid=SQUAD, gb=5)
+
+        with pytest.raises(HTTPException) as error:
+            await traffic_route.purchase_premium_traffic(
+                request,
+                user=user,
+                db=db,
+                subscription_id=None,
+            )
+
+        assert error.value.status_code == 400
+        assert error.value.detail['code'] == 'squad_closed'
+        assert subtract_calls == []
+        assert user.balance_kopeks == 1_000_000
 
 
 class _FakeSession:
