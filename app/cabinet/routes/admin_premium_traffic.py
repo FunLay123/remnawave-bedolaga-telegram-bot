@@ -61,6 +61,7 @@ from app.database.crud.premium_traffic import (
 from app.database.crud.server_squad import get_squad_display_names
 from app.database.crud.subscription import get_subscription_by_id
 from app.database.models import SubscriptionPremiumTraffic, User
+from app.services.premium_traffic_service import panel_user_id_for_subscription
 from app.services.remnawave_service import RemnaWaveService
 from app.utils.premium_traffic import BYTES_IN_GB, get_premium_squads_for_tariff
 
@@ -193,9 +194,9 @@ async def _reset_regular(db: AsyncSession, subscription, scope: str, now: dateti
             detail={'code': 'panel_unavailable', 'message': 'Панель Remnawave не настроена'},
         )
 
-    panel_user_id = getattr(subscription, 'remnawave_id', None) or (
-        subscription.user.remnawave_id if subscription.user else None
-    )
+    # Тот же выбор, что у воркера: в мультиподписках подстановка аккаунта
+    # пользователя сбросила бы трафик соседней подписки.
+    panel_user_id = panel_user_id_for_subscription(subscription)
     if not panel_user_id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -238,6 +239,9 @@ async def _reset_premium(db: AsyncSession, subscription, squad_uuid: str | None,
             period_start_at=now,
         )
         start_new_period(state, period_start_at=now, limit_bytes=config.limit_bytes)
+        # Период начат вручную с этой секунды — фиксируем. Незамеренную запись
+        # воркер считает временной и переносит её начало назад, к расчётному.
+        state.last_checked_at = now
         reset.append(uuid)
     return reset
 

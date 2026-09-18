@@ -67,7 +67,9 @@ class FakeRemnawaveApi:
         return self.panel_user
 
 
-def _state(limit_gb=5, used_bytes=0, extra_bytes=0, is_limited=False, notified_80=False, baseline_bytes=0):
+def _state(
+    limit_gb=5, used_bytes=0, extra_bytes=0, is_limited=False, notified_80=False, baseline_bytes=0, closed_at=None
+):
     """Лёгкий двойник состояния: воркер обращается только к этим полям."""
     limit_bytes = limit_gb * BYTES_IN_GB
 
@@ -84,6 +86,9 @@ def _state(limit_gb=5, used_bytes=0, extra_bytes=0, is_limited=False, notified_8
             self.last_checked_at = None
             self.period_start_at = NOW
             self.panel_reset_ack_at = None
+            # Закрыто администратором намеренно, а не за перерасход — по
+            # умолчанию нет, у него своя ветка тестов (`TestOrphanedLimits`).
+            self.closed_at = closed_at
 
         @property
         def total_limit_bytes(self):
@@ -567,6 +572,59 @@ class TestDecisions:
 
         assert pushed == []
 
+    async def test_limit_that_never_reached_the_panel_is_resent(self, monkeypatch):
+        """Флаг `is_limited` пишется до отправки: иначе фильтр её не увидит.
+
+        Если сама отправка не дошла — панель отказала по лимиту запросов или была
+        недоступна, — флаг уже стоит, и ветка «снять» сюда больше не попадёт.
+        Без сверки исчерпанный премиум-сервер работал бы до конца периода.
+        """
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+
+        outcome, pushed = await self._apply(
+            service,
+            _target(),
+            state,
+            5 * BYTES_IN_GB,
+            monkeypatch,
+            panel_user=SimpleNamespace(active_internal_squads=[{'uuid': SQUAD, 'name': 'LTE'}]),
+        )
+
+        assert outcome == 'limited'
+        assert state.is_limited is True
+        assert pushed == [1]
+
+    async def test_limited_squad_already_gone_from_panel_is_left_alone(self, monkeypatch):
+        """Снятие дошло — отправлять повторно нечего, иначе панель дёргалась бы каждый проход."""
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+
+        outcome, pushed = await self._apply(
+            service,
+            _target(),
+            state,
+            5 * BYTES_IN_GB,
+            monkeypatch,
+            panel_user=SimpleNamespace(active_internal_squads=[]),
+        )
+
+        assert outcome is None
+        assert pushed == []
+
+    async def test_limited_squad_with_unknown_panel_state_is_left_alone(self, monkeypatch):
+        """Панель не сказала, что у пользователя, — снимать повторно вслепую нельзя."""
+        service = PremiumTrafficService()
+
+        for panel_user in (None, SimpleNamespace(active_internal_squads=None)):
+            state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+            outcome, pushed = await self._apply(
+                service, _target(), state, 5 * BYTES_IN_GB, monkeypatch, panel_user=panel_user
+            )
+
+            assert outcome is None
+            assert pushed == []
+
     async def test_missing_state_is_not_an_error(self, monkeypatch):
         service = PremiumTrafficService()
 
@@ -580,6 +638,282 @@ class TestDecisions:
         )
 
         assert outcome is None
+
+
+class TestNewStatePeriod:
+    """Новая запись берёт верное начало периода, а не момент своего создания.
+
+    Запись создаётся «с этой секунды»: верное начало без карточки из панели не
+    посчитать. Проверка на смену периода его не подхватывает — верное начало
+    всегда раньше «сейчас», — и расход с начала периода до включения лимита
+    пропадал. Так было на первом запуске: у всех записей период начался в день
+    включения лимита, хотя у тарифов скользящий месяц.
+    """
+
+    async def _resolve(self, state, monkeypatch, *, first_connected_at=None, panel_reset_at=None):
+        service = PremiumTrafficService()
+
+        async def _get_or_create(_db, _sub_id, _squad, **_kwargs):
+            return state
+
+        async def _panel_user(_api, _panel_user_id):
+            return SimpleNamespace(
+                first_connected_at=first_connected_at,
+                last_traffic_reset_at=panel_reset_at,
+                active_internal_squads=None,
+            )
+
+        monkeypatch.setattr('app.services.premium_traffic_service.get_or_create_state', _get_or_create)
+        monkeypatch.setattr(service, '_panel_user', _panel_user)
+        target = _target()
+        target.subscription.tariff.traffic_reset_mode = 'MONTH_ROLLING'
+        period_start = await service._resolve_period(_Db(), FakeRemnawaveApi(), target, NOW)
+        return service, period_start
+
+    async def test_new_state_starts_at_the_real_period_start(self, monkeypatch):
+        state = _state(limit_gb=15, baseline_bytes=None)
+        # Первое подключение 40 дней назад: окна по 30 дней, текущее началось 10 дней назад.
+        _, period_start = await self._resolve(state, monkeypatch, first_connected_at=NOW - timedelta(days=40))
+
+        assert period_start == NOW - timedelta(days=10)
+        assert state.period_start_at == NOW - timedelta(days=10)
+
+    async def test_usage_since_the_period_start_is_counted_in_full(self, monkeypatch):
+        state = _state(limit_gb=15, baseline_bytes=None)
+        service, period_start = await self._resolve(state, monkeypatch, first_connected_at=NOW - timedelta(days=40))
+
+        # Период начался не сегодня — поправка первого дня не нужна, весь расход наш.
+        assert service._net_usage(state, 7 * BYTES_IN_GB, period_start, NOW) == 7 * BYTES_IN_GB
+
+    async def test_topup_before_the_first_measurement_is_kept(self, monkeypatch):
+        """Докупка могла создать запись раньше воркера — купленное не должно пропасть."""
+        state = _state(limit_gb=15, extra_bytes=5 * BYTES_IN_GB, baseline_bytes=None)
+
+        await self._resolve(state, monkeypatch, first_connected_at=NOW - timedelta(days=40))
+
+        assert state.extra_bytes == 5 * BYTES_IN_GB
+        assert state.period_start_at == NOW - timedelta(days=10)
+
+    async def test_measured_state_keeps_its_period(self, monkeypatch):
+        """Замеренную запись не трогаем: её начало уже верное или выставлено вручную."""
+        state = _state(limit_gb=15)
+        state.last_checked_at = NOW - timedelta(minutes=5)
+        state.period_start_at = NOW - timedelta(hours=1)  # например, ручной сброс админом
+
+        await self._resolve(state, monkeypatch, first_connected_at=NOW - timedelta(days=40))
+
+        assert state.period_start_at == NOW - timedelta(hours=1)
+
+    async def test_panel_reset_after_the_window_start_wins(self, monkeypatch):
+        """Панель сбросила трафик досрочно — премиум-период идёт следом."""
+        state = _state(limit_gb=15, baseline_bytes=None)
+        reset_at = NOW - timedelta(days=2)
+
+        await self._resolve(state, monkeypatch, first_connected_at=NOW - timedelta(days=40), panel_reset_at=reset_at)
+
+        assert state.period_start_at == reset_at
+        assert state.panel_reset_ack_at == reset_at
+
+
+class _ApiService:
+    """Сервис панели: воркеру от него нужен только клиент в контекстном менеджере."""
+
+    def __init__(self):
+        self.opened = 0
+
+    def get_api_client(self):
+        service = self
+
+        class _Ctx:
+            async def __aenter__(self):
+                service.opened += 1
+                return FakeRemnawaveApi()
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        return _Ctx()
+
+
+class TestOrphanedLimits:
+    """`_reconcile_limited_states` восстанавливает право, стёртое чтением панели.
+
+    Отменённый лимит (клиент сменил тариф или лимит сняли в админке) — не её
+    забота: снятие отметки, возврат сквада в панель и удаление строки делает
+    `_collect_orphans`/`_clear_orphan` этим же проходом `process_once`, с
+    `closed_at` и отложенной записью в придачу. Эта функция такие записи
+    только пропускает — иначе один и тот же сквад дважды за проход уехал бы в
+    панель.
+    """
+
+    @staticmethod
+    def _subscription(*, premium_on_squad: bool, status: str = 'active', connected=(SQUAD,), allowed=(SQUAD,)):
+        limits = {SQUAD: {'traffic_limit_gb': 5}} if premium_on_squad else {}
+        return SimpleNamespace(
+            id=1,
+            status=status,
+            connected_squads=list(connected),
+            remnawave_id=PANEL_USER_ID,
+            user=SimpleNamespace(remnawave_id=PANEL_USER_ID),
+            tariff=SimpleNamespace(
+                server_traffic_limits=limits,
+                external_squad_uuid=None,
+                allowed_squads=list(allowed),
+            ),
+        )
+
+    async def _release(self, monkeypatch, subscription):
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=6 * BYTES_IN_GB, is_limited=True)
+        state.squad_uuid = SQUAD
+        pushed = []
+
+        async def _limited(_db):
+            return [(state, subscription)]
+
+        async def _push(_db, _api, sub, panel_user_id):
+            # Отменённый лимит эта функция в панель больше не отправляет —
+            # это, вместе со снятием отметки, теперь целиком забота
+            # `_clear_orphan`. Монитор здесь не мёртвый код, а сторож: если
+            # отправка когда-нибудь сюда вернётся, `pushed` перестанет быть
+            # пустым и тест это заметит.
+            pushed.append((sub.id, panel_user_id))
+
+        monkeypatch.setattr(service, '_limited_states', _limited)
+        monkeypatch.setattr(service, '_push_subscription_squads', _push)
+        api_service = _ApiService()
+        released = await service._reconcile_limited_states(_Db(), api_service)
+        return released, state, pushed, api_service
+
+    async def test_orphaned_limit_is_left_untouched_for_collect_orphans_to_release(self, monkeypatch):
+        """Отменённый лимит не отпускает эта функция — снятие и отправка не её забота.
+
+        Раньше `_reconcile_limited_states` сама снимала отметку и отправляла
+        сквад в панель. `_collect_orphans`/`_clear_orphan` делают ровно то же
+        самое следом, этим же проходом `process_once`, да ещё с `closed_at`,
+        удалением строки и учётом отложенной записи — двум отправкам в
+        панель за один проход тут взяться неоткуда, если эта функция orphaned-
+        записи не трогает вовсе.
+        """
+        released, state, pushed, api_service = await self._release(
+            monkeypatch, self._subscription(premium_on_squad=False)
+        )
+
+        assert released == 0
+        assert state.is_limited is True, 'отметку снимет `_clear_orphan`, не эта функция'
+        assert pushed == []
+        assert api_service.opened == 0, 'к панели тут вообще не ходят'
+
+    async def test_closed_squad_is_never_touched_even_when_the_limit_is_gone(self, monkeypatch):
+        """Админское закрытие не должно расшатываться отменённым лимитом тарифа.
+
+        Без явной проверки ``closed_at`` эта запись выглядела бы точь-в-точь как
+        осиротевшая: лимита в тарифе больше нет, флаг ``is_limited`` стоит.
+        Уборка сняла бы отметку и вернула сквад в панель — ровно то, чего
+        закрытие админом обязано не допускать.
+        """
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=6 * BYTES_IN_GB, is_limited=True, closed_at=NOW)
+        state.squad_uuid = SQUAD
+        subscription = self._subscription(premium_on_squad=False)
+        pushed = []
+
+        async def _limited(_db):
+            return [(state, subscription)]
+
+        async def _push(_db, _api, sub, panel_user_id):
+            pushed.append((sub.id, panel_user_id))
+
+        monkeypatch.setattr(service, '_limited_states', _limited)
+        monkeypatch.setattr(service, '_push_subscription_squads', _push)
+        api_service = _ApiService()
+
+        released = await service._reconcile_limited_states(_Db(), api_service)
+
+        assert released == 0
+        assert state.is_limited is True, 'закрытая запись не снимается автоматической уборкой'
+        assert pushed == [], 'закрытый сквад нельзя досылать в панель'
+        assert api_service.opened == 0, 'закрытую запись обходят стороной ещё до похода к панели'
+
+    async def test_limit_still_in_force_is_left_alone(self, monkeypatch):
+        released, state, pushed, api_service = await self._release(
+            monkeypatch, self._subscription(premium_on_squad=True)
+        )
+
+        assert released == 0
+        assert state.is_limited is True
+        assert pushed == []
+        assert api_service.opened == 0, 'без отменённых лимитов к панели ходить незачем'
+
+    async def test_entitlement_erased_by_panel_sync_is_restored(self, monkeypatch):
+        """Чтение панели переносит её сквады в право подписки, а снятый мы оттуда убрали.
+
+        Полная синхронизация вычёркивает его из `connected_squads`, и после
+        сброса периода возвращать было бы нечего — отправка берёт набор из права.
+        """
+        subscription = self._subscription(premium_on_squad=True, connected=())
+        restored, state, pushed, api_service = await self._release(monkeypatch, subscription)
+
+        assert subscription.connected_squads == [SQUAD]
+        assert state.is_limited is True, 'лимит в силе — отметку не трогаем'
+        assert restored == 1
+        assert pushed == []
+        assert api_service.opened == 0, 'право правится в базе, панель тут ни при чём'
+
+    async def test_entitlement_is_not_restored_when_the_tariff_no_longer_gives_it(self, monkeypatch):
+        """Сквад убрали из тарифа — возвращать право нельзя, это не сбой синхронизации."""
+        subscription = self._subscription(premium_on_squad=True, connected=(), allowed=())
+        await self._release(monkeypatch, subscription)
+
+        assert subscription.connected_squads == []
+
+    async def test_entitlement_in_place_is_left_alone(self, monkeypatch):
+        """Ничего не потеряно — список не трогаем и дублей не заводим."""
+        subscription = self._subscription(premium_on_squad=True)
+        await self._release(monkeypatch, subscription)
+
+        assert subscription.connected_squads == [SQUAD]
+
+    async def test_reconcile_runs_even_when_no_tariff_has_premium(self, monkeypatch):
+        """Премиум убрали из всех тарифов — целей нет, но право восстановить всё равно надо."""
+        service = PremiumTrafficService()
+        calls = []
+
+        class _Remnawave:
+            is_configured = True
+
+        class _Session:
+            async def __aenter__(self):
+                return _Db()
+
+            async def __aexit__(self, *_exc):
+                return False
+
+        async def _release(_db, _service):
+            calls.append('release')
+            return 1
+
+        async def _no_targets(_db):
+            calls.append('targets')
+            return []
+
+        async def _no_orphans(_db):
+            # Без цели и без осиротевших состояний проход обязан выйти сразу
+            # после сбора — реальный `_collect_orphans` тут упал бы: `_Db`
+            # заглушки не умеет `execute`.
+            calls.append('orphans')
+            return []
+
+        monkeypatch.setattr('app.services.premium_traffic_service.RemnaWaveService', _Remnawave)
+        monkeypatch.setattr('app.services.premium_traffic_service.AsyncSessionLocal', _Session)
+        monkeypatch.setattr(service, '_reconcile_limited_states', _release)
+        monkeypatch.setattr(service, '_collect_targets', _no_targets)
+        monkeypatch.setattr(service, '_collect_orphans', _no_orphans)
+
+        stats = await service.process_once()
+
+        assert calls == ['release', 'targets', 'orphans']
+        assert stats['restored'] == 1
 
 
 class TestPanelUserCache:
@@ -890,6 +1224,7 @@ class TestOrphanStates:
             monkeypatch.setattr('app.database.crud.subscription._lock_subscription_row', AsyncMock())
             monkeypatch.setattr('app.database.crud.subscription._housekeep_expired_purchases', AsyncMock())
             monkeypatch.setattr('app.database.crud.subscription.clear_notifications', AsyncMock())
+            monkeypatch.setattr('app.services.grace_access_echo.undo_grace_overlay_echo', AsyncMock(return_value=set()))
             monkeypatch.setattr(
                 'app.database.crud.tariff.get_tariff_by_id',
                 AsyncMock(return_value=SimpleNamespace(is_daily=False, server_traffic_limits={})),
@@ -924,6 +1259,7 @@ class TestOrphanStates:
             monkeypatch.setattr('app.database.crud.subscription._lock_subscription_row', AsyncMock())
             monkeypatch.setattr('app.database.crud.subscription._housekeep_expired_purchases', AsyncMock())
             monkeypatch.setattr('app.database.crud.subscription.clear_notifications', AsyncMock())
+            monkeypatch.setattr('app.services.grace_access_echo.undo_grace_overlay_echo', AsyncMock(return_value=set()))
             monkeypatch.setattr(
                 'app.database.crud.tariff.get_tariff_by_id',
                 AsyncMock(

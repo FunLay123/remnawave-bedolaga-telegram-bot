@@ -3,6 +3,9 @@
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+
 from app.cabinet.routes.admin_premium_traffic import _close_access, _reopen_access, _reset_premium, _reset_regular
 from app.database.crud.premium_traffic import (
     add_extra_bytes,
@@ -123,6 +126,19 @@ class TestPremiumReset:
             states = await get_states_for_subscription(db, 1)
             assert len(states) == 1
             assert states[0].limit_bytes == 5 * BYTES_IN_GB
+
+    async def test_manual_reset_is_not_moved_back_by_the_worker(self, monkeypatch):
+        """Незамеренную запись воркер считает временной и переносит её начало назад.
+
+        Ручной сброс начинает период с этой секунды намеренно — он фиксирует
+        запись, иначе первый же проход вернул бы расход до сброса.
+        """
+        async with memory_session(monkeypatch, TABLES) as db:
+            await _reset_premium(db, _subscription(), SQUAD, NOW)
+            await db.commit()
+
+            (state,) = await get_states_for_subscription(db, 1)
+            assert state.last_checked_at is not None
 
 
 class TestPremiumClose:
@@ -300,6 +316,28 @@ class TestRegularReset:
             assert state.used_bytes == 5 * BYTES_IN_GB
             assert state.is_limited is True
             assert state.period_start_at == period_before
+
+    async def test_multi_tariff_never_resets_the_user_account(self, monkeypatch):
+        """В мультиподписках у подписки свой аккаунт в панели.
+
+        Пока его нет, сбрасывать нечего: аккаунт пользователя принадлежит
+        соседней подписке, и сброс ушёл бы ей.
+        """
+        api = _FakeApi()
+        monkeypatch.setattr('app.cabinet.routes.admin_premium_traffic.RemnaWaveService', lambda: _FakeService(api))
+        monkeypatch.setattr(
+            'app.services.premium_traffic_service.settings',
+            SimpleNamespace(is_multi_tariff_enabled=lambda: True),
+        )
+        subscription = _subscription()
+        subscription.remnawave_id = None
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            with pytest.raises(HTTPException) as caught:
+                await _reset_regular(db, subscription, 'regular', NOW)
+
+        assert caught.value.status_code == 409
+        assert api.reset_calls == []
 
     async def test_panel_reset_is_acknowledged_so_the_worker_ignores_it(self, monkeypatch):
         """Иначе воркер примет его за досрочный сброс и обнулит премиум следом."""

@@ -9,6 +9,7 @@ import pytest
 from app.database.models import SubscriptionStatus
 from app.external.remnawave_api import RemnaWaveAPIError, RemnaWaveTransientError
 from app.services.panel_sync import push_subscription
+from app.services.panel_sync.expiry import _MINIMUM_FUTURE as MARGIN, SKEW_RETRY_MARGIN
 
 
 NOW = datetime(2026, 9, 9, 12, 0, tzinfo=UTC)
@@ -72,8 +73,10 @@ def _api(**overrides):
 
 
 def _db(*, panel_id_holder=None):
+    """``scalar_one_or_none`` — занятость id для записи связи; ``first`` — поиск хозяина
+    аккаунта: здесь его нет (чужие аккаунты — ``test_foreign_panel_owner.py``)."""
     db = AsyncMock()
-    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: panel_id_holder))
+    db.execute = AsyncMock(return_value=SimpleNamespace(scalar_one_or_none=lambda: panel_id_holder, first=lambda: None))
     return db
 
 
@@ -102,7 +105,7 @@ async def test_unknown_account_is_created():
 async def test_panel_says_user_is_gone_so_it_is_recreated():
     """Протухший id в базе не должен ронять синхронизацию."""
     api = _api(get_user_by_id=_panel_user())
-    api.update_user.side_effect = RemnaWaveAPIError('not found', response_data={'errorCode': 'A018'})
+    api.update_user.side_effect = RemnaWaveAPIError('User not found', 404, {'errorCode': 'A025'})
 
     result = await push_subscription(api, _user(), _sub(remnawave_id=42), multi_tariff=True, now=NOW)
 
@@ -131,7 +134,7 @@ async def test_expired_subscription_extinguishes_a_future_date_known_in_advance(
 
     assert result.expiry_extinguished is True
     assert api.update_user.await_count == 1
-    assert api.update_user.await_args.kwargs['expire_at'] == NOW + timedelta(minutes=1)
+    assert api.update_user.await_args.kwargs['expire_at'] == NOW + MARGIN
 
 
 @pytest.mark.asyncio
@@ -148,7 +151,7 @@ async def test_expired_subscription_extinguishes_a_future_date_learned_from_the_
 
     assert result.expiry_extinguished is True
     assert api.update_user.await_count == 2
-    assert api.update_user.await_args.kwargs['expire_at'] == NOW + timedelta(minutes=1)
+    assert api.update_user.await_args.kwargs['expire_at'] == NOW + MARGIN
 
 
 @pytest.mark.asyncio
@@ -220,7 +223,7 @@ async def test_recreated_account_replaces_the_stale_link():
     аккаунт заново.
     """
     api = _api(get_user_by_id=_panel_user(user_id=42))
-    api.update_user.side_effect = RemnaWaveAPIError('not found', response_data={'errorCode': 'A018'})
+    api.update_user.side_effect = RemnaWaveAPIError('User not found', 404, {'errorCode': 'A025'})
     api.create_user.return_value = _panel_user(user_id=99)
     subscription = _sub(remnawave_id=42)
     user = _user(remnawave_id=42)
@@ -230,3 +233,129 @@ async def test_recreated_account_replaces_the_stale_link():
     assert result.action == 'created'
     assert subscription.remnawave_id == 99, 'в колонке остался id удалённого аккаунта'
     assert user.remnawave_id == 99
+
+
+# ---------------------------------------------------------------------------
+# Разъезд часов: панель сравнивает дату со своими часами
+# ---------------------------------------------------------------------------
+
+
+def _past_date_error() -> RemnaWaveAPIError:
+    """Ответ панели 3.4.3, снятый живьём: PATCH с датой, которую она считает прошедшей."""
+    return RemnaWaveAPIError(
+        'Validation failed',
+        400,
+        {
+            'statusCode': 400,
+            'message': 'Validation failed',
+            'errors': [{'code': 'custom', 'path': ['expireAt'], 'message': 'Expiration date cannot be in the past'}],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_extinguish_learned_from_the_answer_retries_with_a_bigger_margin():
+    """Второй PATCH отвергнут как «прошлое» — повтор с большим запасом, а не ошибка прохода."""
+    api = _api(get_user_by_id=_panel_user(expire_at=None))
+    api.get_user_by_id.return_value = SimpleNamespace(id=42, short_uuid='abc123', subscription_url='u')
+    api.update_user.side_effect = [
+        _panel_user(expire_at=NOW + timedelta(days=100)),  # статус уехал, панель показала будущее
+        _past_date_error(),  # гашение «сейчас + запас» для панели уже прошлое
+        _panel_user(expire_at=NOW + SKEW_RETRY_MARGIN),  # повтор с большим запасом принят
+    ]
+    sub = _sub(status=SubscriptionStatus.EXPIRED.value, end_date=NOW - timedelta(days=5), remnawave_id=42)
+
+    result = await push_subscription(api, _user(), sub, multi_tariff=True, now=NOW)
+
+    assert result.expiry_extinguished is True
+    assert api.update_user.await_count == 3
+    sent = [call.kwargs.get('expire_at') for call in api.update_user.await_args_list]
+    assert sent == [None, NOW + MARGIN, NOW + SKEW_RETRY_MARGIN]
+
+
+@pytest.mark.asyncio
+async def test_extinguish_known_in_advance_falls_back_to_status_first():
+    """Дата уехала одним PATCH с остальными полями, и панель отвергла всё: поля важнее — шлём без даты, дату гасим отдельно."""
+    stale = _panel_user(expire_at=NOW + timedelta(days=100))
+    api = _api(get_user_by_id=stale)
+    api.update_user.side_effect = [
+        _past_date_error(),  # статус + дата: отвергнуто целиком
+        stale,  # статус без даты: принят, панель всё ещё показывает будущее
+        _past_date_error(),  # гашение с обычным запасом: снова «прошлое»
+        _panel_user(expire_at=NOW + SKEW_RETRY_MARGIN),  # повтор с большим запасом
+    ]
+    sub = _sub(status=SubscriptionStatus.EXPIRED.value, end_date=NOW - timedelta(days=5), remnawave_id=42)
+
+    result = await push_subscription(api, _user(), sub, multi_tariff=True, now=NOW)
+
+    assert result.expiry_extinguished is True
+    calls = api.update_user.await_args_list
+    # Истёкшей подписке статус в панель не уезжает вовсе: истечение панель выводит
+    # сама, а DISABLED значил бы «отключена администратором».
+    assert 'expire_at' in calls[0].kwargs and 'status' not in calls[0].kwargs
+    assert 'expire_at' not in calls[1].kwargs and 'status' not in calls[1].kwargs
+    assert calls[2].kwargs == {'user_id': 42, 'expire_at': NOW + MARGIN}
+    assert calls[3].kwargs == {'user_id': 42, 'expire_at': NOW + SKEW_RETRY_MARGIN}
+
+
+@pytest.mark.asyncio
+async def test_a_second_rejection_is_a_real_error():
+    """Если и большой запас панель считает прошлым, это не разъезд часов — ошибку не глотаем."""
+    api = _api(get_user_by_id=_panel_user(expire_at=None))
+    api.get_user_by_id.return_value = SimpleNamespace(id=42, short_uuid='abc123', subscription_url='u')
+    api.update_user.side_effect = [
+        _panel_user(expire_at=NOW + timedelta(days=100)),
+        _past_date_error(),
+        _past_date_error(),
+    ]
+    sub = _sub(status=SubscriptionStatus.EXPIRED.value, end_date=NOW - timedelta(days=5), remnawave_id=42)
+
+    with pytest.raises(RemnaWaveAPIError):
+        await push_subscription(api, _user(), sub, multi_tariff=True, now=NOW)
+
+
+@pytest.mark.asyncio
+async def test_other_validation_errors_are_not_mistaken_for_clock_skew():
+    api = _api(get_user_by_id=_panel_user(expire_at=None))
+    api.get_user_by_id.return_value = SimpleNamespace(id=42, short_uuid='abc123', subscription_url='u')
+    other = RemnaWaveAPIError('Validation failed', 400, {'errors': [{'path': ['tag'], 'message': 'Invalid tag'}]})
+    api.update_user.side_effect = [_panel_user(expire_at=NOW + timedelta(days=100)), other]
+    sub = _sub(status=SubscriptionStatus.EXPIRED.value, end_date=NOW - timedelta(days=5), remnawave_id=42)
+
+    with pytest.raises(RemnaWaveAPIError):
+        await push_subscription(api, _user(), sub, multi_tariff=True, now=NOW)
+    assert api.update_user.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_paid_subscription_without_a_tag_clears_the_trial_tag_left_in_the_panel(monkeypatch):
+    """Жалоба 17.09: общий триальный тег задан, платный — нет, у тарифа тега нет.
+    После покупки аккаунт в панели оставался с TRIAL, потому что поле не отправлялось."""
+    from app.services.panel_sync import tags as tags_module
+
+    monkeypatch.setattr(
+        tags_module,
+        'settings',
+        SimpleNamespace(get_trial_user_tag=lambda: 'TRIAL', get_paid_subscription_user_tag=lambda: None),
+    )
+    api = _api(get_user_by_id=_panel_user())
+
+    await push_subscription(api, _user(), _sub(remnawave_id=42, is_trial=False), multi_tariff=True, now=NOW)
+
+    kwargs = api.update_user.await_args.kwargs
+    assert 'tag' in kwargs
+    assert kwargs['tag'] is None
+
+
+@pytest.mark.asyncio
+async def test_patch_panel_account_clears_the_tag_only_when_told_to():
+    """Карточка аккаунта: без ``tag`` в вызове поле не трогается, ``tag=None`` — снимает."""
+    from app.services.panel_sync.writer import patch_panel_account
+
+    api = _api()
+
+    await patch_panel_account(api, user_id=42, description='d')
+    assert 'tag' not in api.update_user.await_args.kwargs
+
+    await patch_panel_account(api, user_id=42, tag=None)
+    assert api.update_user.await_args.kwargs['tag'] is None

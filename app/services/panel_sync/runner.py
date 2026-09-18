@@ -16,7 +16,12 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 import structlog
+from sqlalchemy.exc import DBAPIError
 
+from app.database.models import UserStatus
+from app.external.remnawave_api import RemnaWaveTransientError
+from app.services.panel_sync.db_session import rollback_quietly
+from app.services.panel_sync.identity import PanelAccountOwnedByAnotherUser
 from app.services.panel_sync.writer import push_subscription
 
 
@@ -34,6 +39,31 @@ class SyncStats:
 
     def as_dict(self) -> dict[str, int]:
         return {'created': self.created, 'updated': self.updated, 'errors': self.errors}
+
+
+async def _load_batch(db, get_subscriptions_batch, *, offset: int, limit: int):
+    """Прочитать пачку и сразу закрыть транзакцию чтения.
+
+    Дальше минуты сетевых запросов к панели (с паузами по 429 — десятки минут);
+    открытая на это время транзакция — гарантированный обрыв соединения по
+    простою. Обрыв при самом чтении — повтор один раз на свежем соединении.
+    """
+    for attempt in (1, 2):
+        try:
+            subscriptions = await get_subscriptions_batch(db, offset=offset, limit=limit)
+            await db.commit()
+            return subscriptions
+        except DBAPIError as error:
+            logger.warning(
+                'Соединение с базой потеряно при чтении пачки подписок — повтор',
+                offset=offset,
+                attempt=attempt,
+                error=str(error)[:200],
+            )
+            await rollback_quietly(db)
+            if attempt == 2:
+                raise
+    return []
 
 
 async def push_all_subscriptions(
@@ -58,13 +88,19 @@ async def push_all_subscriptions(
     semaphore = asyncio.Semaphore(concurrency)
 
     while True:
-        subscriptions = await get_subscriptions_batch(db, offset=offset, limit=batch_size)
+        subscriptions = await _load_batch(db, get_subscriptions_batch, offset=offset, limit=batch_size)
         if not subscriptions:
             break
 
         # Подписка без пользователя — осиротевшая строка: в панель её отправлять
-        # не от чьего имени.
-        valid = [subscription for subscription in subscriptions if subscription.user]
+        # не от чьего имени. Удалённого человека — тоже: иначе проход заводит
+        # аккаунты, которые удаление убрало из панели, и пишет в адреса, которые
+        # у него остались от прошлого (#3245: мягкое удаление не спасало).
+        valid = [
+            subscription
+            for subscription in subscriptions
+            if subscription.user and getattr(subscription.user, 'status', None) != UserStatus.DELETED.value
+        ]
         if not valid:
             if len(subscriptions) < batch_size:
                 break
@@ -93,7 +129,30 @@ async def push_all_subscriptions(
                     # Записанный id не проверяем отдельным запросом: на большой
                     # базе это удвоило бы число обращений к панели, а протухший
                     # id обнаружится по ответу на PATCH и приведёт к пересозданию.
-                    result = await push_subscription(api, locked.user, locked, db=locked_db, verify_recorded_id=False)
+                    # Синхронизация — не продление: устройства не сбрасываем (и не удваиваем
+                    # число запросов к панели, которая и так ограничивает частоту).
+                    result = await push_subscription(
+                        api, locked.user, locked, db=locked_db, verify_recorded_id=False, reset_devices=False
+                    )
+                except PanelAccountOwnedByAnotherUser as error:
+                    # Не сбой, а две записи одного человека: поиск уже предупредил
+                    # с подробностями, проход идёт дальше.
+                    logger.warning(
+                        'Синхронизация в панель пропущена: аккаунт закреплён за другим пользователем бота',
+                        subscription_id=subscription.id,
+                        panel_user_id=error.panel_user_id,
+                        owner_user_id=error.owner_user_id,
+                    )
+                    return 'skipped'
+                except RemnaWaveTransientError as error:
+                    # Троттлинг/недоступность панели — warning: это не ошибка приложения,
+                    # и в админ-чат такому не место (форвардер шлёт только error+).
+                    logger.warning(
+                        'Панель временно не приняла подписку (троттлинг или недоступность)',
+                        subscription_id=subscription.id,
+                        error=str(error)[:200],
+                    )
+                    return 'error'
                 except Exception as error:
                     logger.error(
                         'Ошибка синхронизации подписки в панель',
@@ -124,13 +183,9 @@ async def push_all_subscriptions(
             else:
                 errors += 1
 
-        try:
-            await db.commit()
-        except Exception as commit_error:
-            logger.error('Ошибка фиксации транзакции при синхронизации в панель', error=commit_error)
-            await db.rollback()
-            errors += len(valid)
-
+        # Записи подписок ушли через сессии лиз (каждая коммитит сама); здесь
+        # фиксировать нечего — прежний коммит на общей сессии падал по обрыву
+        # соединения и засчитывал всю пачку ошибками.
         logger.info(
             '📦 Обработана партия подписок',
             offset=offset + len(subscriptions),

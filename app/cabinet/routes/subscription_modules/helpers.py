@@ -6,8 +6,10 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from fastapi import HTTPException, status
 
 from app.config import settings
+from app.utils.legacy_subscription import is_legacy_subscription
 
 
 if TYPE_CHECKING:
@@ -64,7 +66,13 @@ async def resolve_subscription(
         return None
 
     await db.refresh(user, ['subscriptions'])
-    return user.subscription
+    subscription = user.subscription
+    if subscription is not None and subscription.tariff_id is not None:
+        # Связь с тарифом ленивая, а маршруты читают subscription.tariff напрямую: в async это
+        # падает или даёт None — и «Продлить» показывало «Нет вариантов продления» при истёкшей
+        # подписке на обычном тарифе. Мульти-ветка грузит тариф через selectinload — выравниваем.
+        await db.refresh(subscription, ['tariff'])
+    return subscription
 
 
 def _get_addon_discount_percent(
@@ -153,6 +161,21 @@ async def build_premium_traffic_info(
             )
         )
     return result
+
+
+def ensure_subscription_has_tariff(subscription: Any) -> None:
+    """Докупки старой подписке не продаются — сперва переход на тариф.
+
+    Старая подписка (платная, без тарифа при включённых тарифах) считала бы
+    докупку устройств и трафика по классическим настройкам. Кабинет такие
+    кнопки прячет, а здесь отказ до списания — для старого кабинета и прямых
+    запросов. ``None`` пропускаем: «подписки нет» отвечает сам маршрут.
+    """
+    if is_legacy_subscription(subscription):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={'code': 'tariff_required', 'message': 'Subscription has no tariff. Choose a tariff first.'},
+        )
 
 
 def _subscription_to_response(
@@ -249,10 +272,15 @@ def _subscription_to_response(
     # Проверяем настройку скрытия ссылки (скрывается только текст, кнопки работают)
     hide_link = settings.should_hide_subscription_link()
 
+    is_trial_subscription = bool(subscription.is_trial or actual_status == 'trial')
+    # Старая подписка: продлить нельзя — кабинет ведёт на выбор тарифа и не
+    # показывает автоплатёж (правило одно на бота и кабинет).
+    requires_tariff_selection = is_legacy_subscription(subscription)
+
     return SubscriptionResponse(
         id=subscription.id,
         status=actual_status,  # Use actual_status instead of raw status
-        is_trial=subscription.is_trial or actual_status == 'trial',
+        is_trial=is_trial_subscription,
         start_date=subscription.start_date,
         end_date=subscription.end_date,
         days_left=days_left,
@@ -281,4 +309,5 @@ def _subscription_to_response(
         tariff_name=tariff_name,
         traffic_reset_mode=traffic_reset_mode,
         premium_traffic=premium_traffic or [],
+        requires_tariff_selection=requires_tariff_selection,
     )

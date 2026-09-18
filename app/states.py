@@ -241,6 +241,12 @@ class AdminStates(StatesGroup):
     editing_tariff_custom_traffic_min = State()
     editing_tariff_custom_traffic_max = State()
     editing_tariff_daily_price = State()
+    editing_tariff_panel_tag = State()
+    editing_tariff_lava_product = State()
+    editing_tariff_display_order = State()
+    editing_tariff_custom_days_price = State()
+    editing_tariff_custom_days_min = State()
+    editing_tariff_custom_days_max = State()
 
     # Премиум-лимиты трафика по скваду
     editing_tariff_premium_squad_limit = State()

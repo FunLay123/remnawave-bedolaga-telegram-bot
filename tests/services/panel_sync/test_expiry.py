@@ -23,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.services.panel_sync import panel_expire_at
+from app.services.panel_sync.expiry import _MINIMUM_FUTURE as MARGIN
 
 
 NOW = datetime(2026, 9, 8, 12, 0, tzinfo=UTC)
@@ -72,9 +73,7 @@ def test_blocked_but_not_expired_subscription_still_pushes_its_real_date():
 
 def test_expired_subscription_extinguishes_a_future_date_in_the_panel():
     """Панель держит будущее — гасим ближайшим допустимым моментом."""
-    assert panel_expire_at(PAST, is_active=False, creating=False, now=NOW, panel_current=FUTURE) == NOW + timedelta(
-        minutes=1
-    )
+    assert panel_expire_at(PAST, is_active=False, creating=False, now=NOW, panel_current=FUTURE) == NOW + MARGIN
 
 
 def test_expired_subscription_leaves_a_past_date_in_the_panel_alone():
@@ -93,9 +92,7 @@ def test_naive_panel_date_is_read_as_utc():
     """Панель отдаёт UTC; наивное значение нельзя считать локальным временем."""
     naive_future = FUTURE.replace(tzinfo=None)
 
-    assert panel_expire_at(
-        PAST, is_active=False, creating=False, now=NOW, panel_current=naive_future
-    ) == NOW + timedelta(minutes=1)
+    assert panel_expire_at(PAST, is_active=False, creating=False, now=NOW, panel_current=naive_future) == NOW + MARGIN
 
 
 # ==================== сторож на все точки записи ====================
@@ -134,12 +131,32 @@ def _sends_a_date_itself(path: pathlib.Path) -> bool:
     return False
 
 
+#: Пишут словари с ``expire_at`` в базу, а не в панель: эвристика выше их путает с
+#: payload. Каждый обязан не звать запись в панель (test_snapshot_stores_never_write_to_the_panel).
+_SNAPSHOT_STORES = {
+    'app/services/grace_access_codec.py': 'снимки грейса (биллинг, панель, оверлей) в строке сессии',
+}
+
+
 def _modules_sending_a_date_to_the_panel() -> list[pathlib.Path]:
     return [
         path
         for path in sorted(pathlib.Path('app').rglob('*.py'))
-        if not any(str(path).startswith(owner) for owner in _RULE_OWNERS) and _sends_a_date_itself(path)
+        if not any(str(path).startswith(owner) for owner in _RULE_OWNERS)
+        and str(path) not in _SNAPSHOT_STORES
+        and _sends_a_date_itself(path)
     ]
+
+
+@pytest.mark.parametrize('path', sorted(_SNAPSHOT_STORES))
+def test_snapshot_stores_never_write_to_the_panel(path):
+    tree = ast.parse(pathlib.Path(path).read_text(encoding='utf-8'))
+    calls = {
+        getattr(node.func, 'attr', getattr(node.func, 'id', ''))
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
+    assert not calls & _PANEL_WRITE_CALLS, f'{path} исключён как хранилище снимков, но пишет в панель'
 
 
 @pytest.mark.parametrize('path', sorted(pathlib.Path('app').rglob('*.py')), ids=str)
@@ -294,6 +311,7 @@ def test_a_date_a_few_minutes_ahead_is_left_alone_too():
 
 
 def test_a_genuinely_live_panel_date_is_still_extinguished():
-    assert panel_expire_at(
-        PAST, is_active=False, creating=False, now=NOW, panel_current=NOW + timedelta(hours=2)
-    ) == NOW + timedelta(minutes=1)
+    assert (
+        panel_expire_at(PAST, is_active=False, creating=False, now=NOW, panel_current=NOW + timedelta(hours=2))
+        == NOW + MARGIN
+    )
