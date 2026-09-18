@@ -1,7 +1,7 @@
 import asyncio
 import html
 import json
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 import structlog
 from aiogram import Dispatcher, F, types
@@ -20,6 +20,7 @@ from app.localization.texts import get_texts
 from app.services.referral_withdrawal_service import referral_withdrawal_service
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
+from app.utils.timezone import format_local_datetime, local_day_bounds, local_day_start
 
 
 logger = structlog.get_logger(__name__)
@@ -117,7 +118,7 @@ async def show_referral_statistics(callback: types.CallbackQuery, db_user: User,
         if stats.get('active_referrers', 0) > 0:
             avg_per_referrer = stats.get('total_paid_kopeks', 0) / stats['active_referrers']
 
-        current_time = datetime.now(UTC).strftime('%H:%M:%S')
+        current_time = format_local_datetime(datetime.now(UTC), '%H:%M:%S')
 
         text = f"""
 🤝 <b>Реферальная статистика</b>
@@ -195,7 +196,7 @@ async def show_referral_statistics(callback: types.CallbackQuery, db_user: User,
     except Exception as e:
         logger.error('Ошибка в show_referral_statistics', error=e, exc_info=True)
 
-        current_time = datetime.now(UTC).strftime('%H:%M:%S')
+        current_time = format_local_datetime(datetime.now(UTC), '%H:%M:%S')
         text = f"""
 🤝 <b>Реферальная статистика</b>
 
@@ -446,7 +447,7 @@ async def show_pending_withdrawal_requests(callback: types.CallbackQuery, db_use
 
         text += f'<b>#{req.id}</b> — {user_name} (ID{user_tg_id})\n'
         text += f'💰 {req.amount_kopeks / 100:.0f}₽ | {risk_emoji} Риск: {req.risk_score}/100\n'
-        text += f'📅 {req.created_at.strftime("%d.%m.%Y %H:%M")}\n\n'
+        text += f'📅 {format_local_datetime(req.created_at, "%d.%m.%Y %H:%M")}\n\n'
 
     keyboard_rows = []
     for req in requests[:5]:
@@ -508,7 +509,7 @@ async def view_withdrawal_request(callback: types.CallbackQuery, db_user: User, 
 💳 <b>Реквизиты:</b>
 <code>{html.escape(request.payment_details or '')}</code>
 
-📅 Создана: {request.created_at.strftime('%d.%m.%Y %H:%M')}
+📅 Создана: {format_local_datetime(request.created_at, '%d.%m.%Y %H:%M')}
 
 {referral_withdrawal_service.format_analysis_for_admin(analysis)}
 """
@@ -786,28 +787,18 @@ async def process_test_referral_earning(message: types.Message, db_user: User, d
 
 
 def _get_period_dates(period: str) -> tuple[datetime, datetime]:
-    """Возвращает начальную и конечную даты для заданного периода."""
+    """Границы периода — календарные дни settings.TIMEZONE, как моменты в UTC."""
     now = datetime.now(UTC)
-    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start, tomorrow_start = local_day_bounds(now)
 
-    if period == 'today':
-        start_date = today
-        end_date = today + timedelta(days=1)
-    elif period == 'yesterday':
-        start_date = today - timedelta(days=1)
-        end_date = today
-    elif period == 'week':
-        start_date = today - timedelta(days=7)
-        end_date = today + timedelta(days=1)
-    elif period == 'month':
-        start_date = today - timedelta(days=30)
-        end_date = today + timedelta(days=1)
-    else:
-        # По умолчанию — сегодня
-        start_date = today
-        end_date = today + timedelta(days=1)
-
-    return start_date, end_date
+    if period == 'yesterday':
+        return local_day_start(now, days_back=1), today_start
+    if period == 'week':
+        return local_day_start(now, days_back=7), tomorrow_start
+    if period == 'month':
+        return local_day_start(now, days_back=30), tomorrow_start
+    # 'today' и всё неизвестное — сегодня
+    return today_start, tomorrow_start
 
 
 def _get_period_display_name(period: str) -> str:

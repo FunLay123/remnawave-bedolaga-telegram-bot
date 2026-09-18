@@ -23,10 +23,12 @@ from app.database.crud.tariff import (
     update_tariff,
 )
 from app.database.models import Tariff, User
+from app.handlers.admin.tariff_custom_days import format_custom_days_settings, register_custom_days_handlers
 from app.handlers.admin.tariff_custom_traffic import (
     format_custom_traffic_settings,
     register_custom_traffic_handlers,
 )
+from app.handlers.admin.tariff_panel_settings import format_panel_settings, register_panel_settings_handlers
 from app.localization.texts import Texts, get_texts
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
@@ -197,6 +199,10 @@ def get_tariff_view_keyboard(
                 text='⚙️ Произвольный трафик',
                 callback_data=f'admin_tariff_edit_custom_traffic:{tariff.id}',
             ),
+            InlineKeyboardButton(
+                text='📅 Произвольные дни',
+                callback_data=f'admin_tariff_edit_custom_days:{tariff.id}',
+            ),
         ]
     )
     buttons.append(
@@ -220,6 +226,7 @@ def get_tariff_view_keyboard(
     buttons.append(
         [
             InlineKeyboardButton(text='💎 Премиум-сквады', callback_data=f'admin_tariff_premium_squads:{tariff.id}'),
+            InlineKeyboardButton(text='⚙️ Ещё настройки', callback_data=f'admin_tariff_edit_more:{tariff.id}'),
         ]
     )
 
@@ -346,7 +353,9 @@ def format_tariff_info(tariff: Tariff, language: str, subs_count: int = 0) -> st
 
     # Форматируем произвольный трафик и докупку трафика
     custom_traffic_display = format_custom_traffic_settings(tariff)
+    custom_days_display = format_custom_days_settings(tariff)
     traffic_topup_display = _format_traffic_topup_packages(tariff)
+    panel_settings_display = format_panel_settings(tariff)
 
     # Премиум-лимиты по скваду считаем через общий разбор, а не по сырому полю:
     # у него три исторические формы записи, разбор терпим к ним и отбрасывает
@@ -387,6 +396,9 @@ def format_tariff_info(tariff: Tariff, language: str, subs_count: int = 0) -> st
 <b>Произвольный трафик:</b>
 {custom_traffic_display}
 
+<b>Произвольные дни:</b>
+{custom_days_display}
+
 <b>Докупка трафика:</b>
 {traffic_topup_display}
 
@@ -398,6 +410,9 @@ def format_tariff_info(tariff: Tariff, language: str, subs_count: int = 0) -> st
 
 <b>Серверы:</b> {squads_display}
 <b>Промогруппы:</b> {promo_display}
+
+<b>Панель и прочее:</b>
+{panel_settings_display}
 
 📊 Подписок на тарифе: {subs_count}
 
@@ -3740,8 +3755,10 @@ async def process_edit_premium_squad_max_topup(
 
 def register_handlers(dp: Dispatcher):
     """Регистрирует обработчики для управления тарифами."""
-    # Произвольный трафик регистрируется до общего toggle-фильтра.
+    # Отдельные экраны регистрируются до общего toggle-фильтра.
     register_custom_traffic_handlers(dp)
+    register_custom_days_handlers(dp)
+    register_panel_settings_handlers(dp)
 
     # Список тарифов
     dp.callback_query.register(show_tariffs_list, F.data == 'admin_tariffs')

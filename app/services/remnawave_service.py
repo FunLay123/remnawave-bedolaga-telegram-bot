@@ -36,10 +36,12 @@ from app.external.remnawave_api import (
 )
 from app.services.panel_sync import (
     BULK_SNAPSHOT,
+    link_subscription_panel_identity,
     project_onto_subscription,
     push_all_subscriptions,
     read_panel_user,
 )
+from app.services.panel_sync.db_session import release_transaction, rollback_quietly
 from app.utils.premium_traffic import effective_panel_squads
 from app.utils.subscription_utils import (
     coerce_panel_device_limit,
@@ -549,7 +551,7 @@ class RemnaWaveService:
                 logger.info('Получение системной статистики RemnaWave...')
 
                 try:
-                    system_stats = await api.get_system_stats(tz=settings.TIMEZONE)
+                    system_stats = await api.get_system_stats()
                     logger.info('Системная статистика получена')
                 except Exception as e:
                     logger.error('Ошибка получения системной статистики', error=e)
@@ -1245,6 +1247,9 @@ class RemnaWaveService:
                         continue
 
                     try:
+                        # Право на переезд не отменяет уже снятый за перерасход
+                        # премиум-лимита сквад — без фильтра миграция вернула бы
+                        # исчерпанный сквад в панель заодно с переносом.
                         await update_panel_user_grace_safe(
                             api,
                             subscription.id,
@@ -1352,6 +1357,9 @@ class RemnaWaveService:
             await exit_stack.aclose()
 
     async def sync_users_from_panel(self, db: AsyncSession, sync_type: str = 'all') -> dict[str, int]:
+        # Выгрузка панели идёт минутами; транзакцию, с которой пришла сессия
+        # (авторизация кабинета, middleware бота), на это время не держим.
+        await release_transaction(db)
         # In multi-tariff mode, match panel users to subscriptions by remnawave_id
         if settings.is_multi_tariff_enabled():
             return await self._sync_users_from_panel_multi(db, sync_type)
@@ -1466,6 +1474,16 @@ class RemnaWaveService:
                 logger.info(
                     '📧 Пользователей в панели с Email (без Telegram)',
                     panel_users_email_only_count=len(panel_users_email_only),
+                )
+
+            # Аккаунты без Telegram id и без почты бот не создавал (он пишет
+            # личность в каждый свой аккаунт) — их не подтягиваем и не трогаем.
+            # Считаем явно, чтобы оператор видел, что они пропущены намеренно.
+            foreign_accounts_count = len(panel_users) - len(panel_users_with_tg) - len(panel_users_email_only)
+            if foreign_accounts_count > 0:
+                logger.info(
+                    '⏭️ Аккаунтов панели без Telegram ID и почты — созданы не ботом, пропускаем',
+                    foreign_accounts_count=foreign_accounts_count,
                 )
 
             # Для ускорения - подготовим данные о подписках
@@ -1964,6 +1982,7 @@ class RemnaWaveService:
 
         except Exception as e:
             logger.error('❌ Критическая ошибка синхронизации пользователей', error=e)
+            await rollback_quietly(db)  # иначе следующий шаг синхронизации упадёт на этой сессии
             return {'created': 0, 'updated': 0, 'errors': 1, 'deleted': 0}
 
     async def _sync_users_from_panel_multi(self, db: AsyncSession, sync_type: str) -> dict[str, int]:
@@ -2058,6 +2077,10 @@ class RemnaWaveService:
                 bot_users_by_email=len(bot_users_by_email),
             )
 
+            # Аккаунты без Telegram id и без почты бот не создавал — их не
+            # подтягиваем и не трогаем; считаем, чтобы пропуск был виден оператору.
+            foreign_accounts_count = 0
+
             # Match and update
             for panel_user in panel_users:
                 panel_user_id = _normalize_panel_user_id(panel_user.get('id'))
@@ -2114,11 +2137,14 @@ class RemnaWaveService:
                         _bot_user = bot_users_by_email.get(_panel_email)
 
                     if not _bot_user:
-                        logger.debug(
-                            '⚠️ [multi-tariff] Panel user has no matching bot user',
-                            panel_user_id=panel_user_id,
-                            username=panel_user.get('username'),
-                        )
+                        if not _panel_tg and not _panel_email:
+                            foreign_accounts_count += 1
+                        else:
+                            logger.debug(
+                                '⚠️ [multi-tariff] Panel user has no matching bot user',
+                                panel_user_id=panel_user_id,
+                                username=panel_user.get('username'),
+                            )
                         continue
 
                     # Check MAX_ACTIVE_SUBSCRIPTIONS
@@ -2239,6 +2265,12 @@ class RemnaWaveService:
 
             await db.commit()
 
+            if foreign_accounts_count > 0:
+                logger.info(
+                    '⏭️ [multi-tariff] Аккаунтов панели без Telegram ID и почты — созданы не ботом, пропускаем',
+                    foreign_accounts_count=foreign_accounts_count,
+                )
+
             logger.info(
                 '🎯 [multi-tariff] Синхронизация завершена',
                 updated=stats['updated'],
@@ -2248,6 +2280,7 @@ class RemnaWaveService:
 
         except Exception as e:
             logger.error('❌ [multi-tariff] Критическая ошибка синхронизации', error=e)
+            await rollback_quietly(db)  # иначе следующий шаг синхронизации упадёт на этой сессии
             return {'created': 0, 'updated': 0, 'errors': 1, 'deleted': 0}
 
     async def _create_subscription_from_panel_data(self, db: AsyncSession, user, panel_user):
@@ -2299,7 +2332,10 @@ class RemnaWaveService:
                 ),
             }
 
-            await create_subscription_no_commit(db, **subscription_data)
+            subscription = await create_subscription_no_commit(db, **subscription_data)
+            # Аккаунт панели — у подписки, а не только у пользователя: мультитариф и
+            # экраны по выбранной подписке (устройства, трафик) читают строго её id.
+            await link_subscription_panel_identity(db, subscription, _normalize_panel_user_id(panel_user.get('id')))
             logger.info('✅ Подготовлена подписка для пользователя', telegram_id=user.telegram_id, expire_at=expire_at)
 
         except Exception as e:
@@ -2394,6 +2430,8 @@ class RemnaWaveService:
                 policy=BULK_SNAPSHOT,
                 snapshot_taken_at=snapshot_taken_at,
             )
+            # Старый импорт оставлял строку без id панели — привязываем при первом проходе.
+            await link_subscription_panel_identity(db, subscription, _normalize_panel_user_id(panel_user.get('id')))
             if changed:
                 logger.debug(
                     'Подписка обновлена из панели',

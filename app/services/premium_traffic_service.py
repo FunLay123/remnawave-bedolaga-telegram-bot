@@ -69,6 +69,24 @@ PANEL_USER_CACHE_TTL_SECONDS = 3600
 PANEL_USER_CACHE_JITTER = 0.25
 
 
+def panel_user_id_for_subscription(subscription: Any) -> int | None:
+    """Аккаунт в панели, к которому относятся расход и сквады подписки.
+
+    В мультиподписках у каждой подписки свой аккаунт, и подстановка аккаунта
+    пользователя увела бы расход, снятие сквада или сброс трафика на соседний
+    тариф. Поэтому там — только аккаунт самой подписки, даже если его ещё нет.
+    """
+    if settings.is_multi_tariff_enabled():
+        raw = getattr(subscription, 'remnawave_id', None)
+    else:
+        user = getattr(subscription, 'user', None)
+        raw = getattr(subscription, 'remnawave_id', None) or (user.remnawave_id if user else None)
+    try:
+        return int(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class _Target:
     """Подписка, которую проверяем по одному конкретному премиум-скваду."""
@@ -178,6 +196,10 @@ class PremiumTrafficService:
             return stats
 
         async with AsyncSessionLocal() as db:
+            # До сбора целей: если премиум убрали из всех тарифов, целей не будет,
+            # а снятые сквады всё равно надо вернуть.
+            stats['restored'] += await self._reconcile_limited_states(db, service)
+
             targets = await self._collect_targets(db)
             # Осиротевшие состояния ищем всегда, даже когда целей нет: они как
             # раз и появляются там, где конфигурация исчезла, а строка осталась.
@@ -498,16 +520,91 @@ class PremiumTrafficService:
 
     @staticmethod
     def _panel_user_id(subscription: Subscription) -> int | None:
-        if settings.is_multi_tariff_enabled():
-            raw = getattr(subscription, 'remnawave_id', None)
-        else:
-            raw = getattr(subscription, 'remnawave_id', None) or (
-                subscription.user.remnawave_id if subscription.user else None
-            )
-        try:
-            return int(raw) if raw else None
-        except (TypeError, ValueError):
-            return None
+        return panel_user_id_for_subscription(subscription)
+
+    # ------------------------------------------------- отменённые лимиты
+
+    async def _reconcile_limited_states(self, db: AsyncSession, service: Any) -> int:
+        """Вернуть право на снятый сквад, если его стёрло чтение панели.
+
+        Полная синхронизация переносит набор сквадов панели в
+        ``connected_squads`` (`panel_sync.projection`), а снятый за перерасход
+        сквад мы из панели убрали — синхронизация вычёркивает его из права
+        подписки. После этого сквад не вернулся бы даже сбросом периода:
+        отправка берёт набор именно из права. Тариф всё ещё должен его давать
+        — иначе право восстанавливать не за чем, см. ``_restore_lost_entitlement``.
+
+        Отменённый лимит (сквад пропал из премиум-списка тарифа) сюда не
+        относится — та же проверка, `_limit_no_longer_applies`, что и в
+        ``_collect_orphans``, но с удалением строки, возвратом сквада в
+        панель, ``closed_at`` и учётом отложенной записи. Раньше эта функция
+        делала это сама, и в одном проходе воркера сквад уезжал в панель
+        дважды: один раз отсюда, второй раз — из ``_clear_orphan`` следом,
+        когда запись оставалась ``is_limited`` (отправка не подтвердилась —
+        упала или была отложена оверлеем).
+        """
+        limited = await self._limited_states(db)
+        if not limited:
+            return 0
+
+        restored = 0
+        for state, subscription in limited:
+            if state.closed_at is not None:
+                # Закрыто администратором намеренно, а не за перерасход — эту
+                # запись не трогаем, иначе решение админа развалилось бы само
+                # собой на следующем проходе воркера.
+                continue
+            if self._limit_no_longer_applies(state, subscription):
+                # Снятие и возврат в панель — забота `_collect_orphans` этим
+                # же проходом, повторно ходить в панель здесь незачем.
+                continue
+            if self._restore_lost_entitlement(state, subscription):
+                restored += 1
+        # Возвращённые права — в базу, даже если восстанавливать было нечего.
+        await db.commit()
+        return restored
+
+    @staticmethod
+    def _restore_lost_entitlement(state: Any, subscription: Any) -> bool:
+        """Вернуть право на снятый сквад, если его стёрла синхронизация с панелью.
+
+        Чтение панели переносит её набор сквадов в `connected_squads`
+        (`panel_sync.projection`), а снятый за перерасход сквад мы из панели
+        убрали — полная синхронизация вычёркивает его из права подписки. После
+        этого сквад не вернулся бы и по сбросу периода: возвращать было бы
+        нечего, отправка берёт набор именно из права.
+
+        Право сверяем с тарифом: сквад возвращаем, только если тариф его
+        по-прежнему даёт.
+        """
+        tariff = getattr(subscription, 'tariff', None)
+        allowed = getattr(tariff, 'allowed_squads', None) or []
+        connected = list(subscription.connected_squads or [])
+        if state.squad_uuid not in allowed or state.squad_uuid in connected:
+            return False
+
+        subscription.connected_squads = [*connected, state.squad_uuid]
+        logger.info(
+            'Право на премиум-сквад восстановлено: его стёрло чтение панели',
+            subscription_id=subscription.id,
+            squad_uuid=state.squad_uuid,
+        )
+        return True
+
+    @staticmethod
+    async def _limited_states(db: AsyncSession) -> list[tuple[Any, Subscription]]:
+        """Снятые записи вместе с подписками. Их единицы, выборка по флагу дешёвая."""
+        result = await db.execute(
+            select(SubscriptionPremiumTraffic, Subscription)
+            .join(Subscription, Subscription.id == SubscriptionPremiumTraffic.subscription_id)
+            .options(selectinload(Subscription.tariff), selectinload(Subscription.user))
+            .where(SubscriptionPremiumTraffic.is_limited.is_(True))
+        )
+        return list(result.tuples().all())
+
+    @staticmethod
+    def _limit_no_longer_applies(state: Any, subscription: Any) -> bool:
+        return state.squad_uuid not in get_premium_squads_for_tariff(getattr(subscription, 'tariff', None))
 
     # ------------------------------------------------------------- период
 
@@ -542,7 +639,18 @@ class PremiumTrafficService:
             acknowledged_panel_reset_at=state.panel_reset_ack_at,
         )
 
-        if state.period_start_at is None or resolved > _as_utc(state.period_start_at):
+        if state.last_checked_at is None:
+            # Запись ни разу не замерялась — её начало периода временное. Создают
+            # её «с этой секунды» и воркер, и докупка, и выдача админом: верное
+            # начало без карточки из панели не посчитать. Проверка на смену
+            # периода ниже его не подхватит — верное начало всегда раньше
+            # «сейчас», — и расход с начала периода до включения лимита терялся бы.
+            # Счётчики не обнуляем: докупленное до первого замера должно остаться.
+            state.period_start_at = resolved
+            state.baseline_bytes = None
+            if panel_reset_at is not None:
+                state.panel_reset_ack_at = panel_reset_at
+        elif resolved > _as_utc(state.period_start_at):
             start_new_period(
                 state,
                 period_start_at=resolved,
@@ -688,8 +796,9 @@ class PremiumTrafficService:
                 'Премиум-сквад досинхронизирован с панелью',
                 subscription_id=target.subscription.id,
                 squad_uuid=target.config.squad_uuid,
+                direction='снят' if state.is_limited else 'возвращён',
             )
-            return 'restored'
+            return 'limited' if state.is_limited else 'restored'
 
         # Зеркальная сверка на снятие. Ветки выше сюда уже не попадут — флаг-то
         # стоит, — а периодической пересылки сквадов в проекте нет:
@@ -908,6 +1017,13 @@ class PremiumTrafficService:
 
         Отдельный вход от ``_push_squads`` нужен уборке осиротевших состояний: у
         неё нет ``_Target`` — сквад из конфигурации тарифа как раз и исчез.
+
+        Фильтр вызывается здесь напрямую, с явной ``db``, а не через
+        ``patch_panel_squads``: у него своей сессии нет и открыть её пришлось бы
+        заново, а вызывающие (`_limit_squad`/`_restore_squad`) меняют
+        ``is_limited`` в этой же сессии внутри ``db.begin_nested()`` и только
+        ``flush``-ят, не коммитя. Отдельная сессия эту незакоммиченную запись
+        не увидела бы и отфильтровала бы сквад по устаревшему флагу.
 
         Возвращает ответ ``update_panel_user_grace_safe`` как есть: каждая
         точка, что пишет сквады, читает его через ``_raise_if_deferred`` —

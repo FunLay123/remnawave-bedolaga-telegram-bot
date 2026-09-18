@@ -9,22 +9,37 @@
 запрещены, сторож — ``tests/services/panel_sync/test_no_bypass.py``.
 """
 
-from app.services.panel_sync.expiry import panel_expire_at, stale_panel_expire_at
-from app.services.panel_sync.identity import PanelIdentity, resolve_panel_identity
-from app.services.panel_sync.liveness import is_subscription_live
+from app.services.panel_sync.expiry import panel_date_is_closing, panel_expire_at, stale_panel_expire_at
+from app.services.panel_sync.identity import (
+    PanelAccountOwnedByAnotherUser,
+    PanelIdentity,
+    PanelOwner,
+    find_foreign_panel_owner,
+    link_subscription_panel_identity,
+    panel_id_is_free_for,
+    resolve_panel_identity,
+    should_create_panel_account,
+    user_panel_id_is_free_for,
+)
+from app.services.panel_sync.liveness import is_subscription_expired, is_subscription_live
 from app.services.panel_sync.payload import PanelPayload, build_panel_payload
 from app.services.panel_sync.projection import (
     ADMIN_PULL,
     BULK_SNAPSHOT,
+    GRACE_MARKER_FIELDS,
     ROUTINE,
     WEBHOOK,
     PanelSnapshot,
     ProjectionPolicy,
+    panel_date_is_grace_overlay,
+    panel_date_is_grace_tail,
     panel_status_for_new_subscription,
     project_onto_subscription,
     read_panel_user,
 )
 from app.services.panel_sync.runner import SyncStats, push_all_subscriptions
+from app.services.panel_sync.tags import normalize_panel_tag, resolve_panel_user_tag
+from app.services.panel_sync.traffic_strategy import get_traffic_reset_strategy
 from app.services.panel_sync.writer import (
     PanelWriteResult,
     patch_panel_account,
@@ -36,17 +51,28 @@ from app.services.panel_sync.writer import (
 __all__ = [
     'ADMIN_PULL',
     'BULK_SNAPSHOT',
+    'GRACE_MARKER_FIELDS',
     'ROUTINE',
     'WEBHOOK',
+    'PanelAccountOwnedByAnotherUser',
     'PanelIdentity',
+    'PanelOwner',
     'PanelPayload',
     'PanelSnapshot',
     'PanelWriteResult',
     'ProjectionPolicy',
     'SyncStats',
     'build_panel_payload',
+    'find_foreign_panel_owner',
+    'get_traffic_reset_strategy',
+    'is_subscription_expired',
     'is_subscription_live',
+    'link_subscription_panel_identity',
+    'panel_date_is_closing',
+    'panel_date_is_grace_overlay',
+    'panel_date_is_grace_tail',
     'panel_expire_at',
+    'panel_id_is_free_for',
     'panel_status_for_new_subscription',
     'patch_panel_account',
     'patch_panel_squads',
@@ -55,5 +81,7 @@ __all__ = [
     'push_subscription',
     'read_panel_user',
     'resolve_panel_identity',
+    'should_create_panel_account',
     'stale_panel_expire_at',
+    'user_panel_id_is_free_for',
 ]

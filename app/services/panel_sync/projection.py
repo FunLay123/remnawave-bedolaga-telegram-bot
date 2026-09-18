@@ -6,44 +6,34 @@
 ``is_trial`` читали двое из шести, лимит устройств — четверо, а «когда доверять
 дате панели» у каждого было своё.
 
-Правила, собранные в одно место:
+Правило одно, решение владельца (2026-09-11): **панель — истина**. Панель сама
+считает, когда кончится подписка; бот — касса, он пишет в панель только при
+покупке, продлении и явных действиях админа, а синхронизация панель не трогает —
+«в бота пишется истина панели».
 
-* **Дата окончания** обновляется, только когда панель считает пользователя
-  ACTIVE, и только при расхождении больше минуты. У DISABLED и EXPIRED в панели
-  может лежать искусственная дата, проставленная старыми версиями бота
-  («сейчас плюс минута»), — ей нельзя перезаписывать настоящий срок.
-* **Статус** выводится из статуса панели и даты, но живую подписку в боте
-  никогда не гасит сама синхронизация: продление могло произойти между чтением
-  и записью. Гасит её мидлвара с буфером.
-* **Трафик** переносится, если разошёлся больше чем на 0.01 ГБ.
-* **Сквады** — панель авторитетна, но пустой список игнорируется: он значит
-  «панель ещё не знает», а не «отобрать все инбаунды».
-* **Лимит трафика и лимит устройств из панели НЕ читаются**: их источник —
-  тариф в боте. Иначе ручная правка в панели молча меняла бы оплаченный тариф.
-* Пока открыт грейс-доступ, биллинговое состояние (дата, статус, сквады) —
-  собственность бота, и панель его не переписывает. Расход трафика и ссылки
-  переносятся всё равно: они ничего не решают, а показывать устаревшие цифры
-  пользователю незачем.
+Что это значит для маппера:
 
-Политик три, и различаются они тем, насколько панели верят:
+* **Дата окончания, статус, трафик, сквады, лимиты трафика и устройств** берутся
+  из панели при любом статусе аккаунта. Дата — при расхождении больше минуты,
+  трафик — больше 0.01 ГБ.
+* **Статус**: ACTIVE с датой в будущем — живая (триал в боте остаётся триалом,
+  панель их не различает), LIMITED, DISABLED и EXPIRED переносятся как есть,
+  ACTIVE с прошедшей датой — истекла. Панель не назвала статус — статус не
+  трогаем, а по своей дате истечение доводит мониторинг.
+* **Сквады** — пустой список игнорируется: он значит «панель ещё не знает», а не
+  «отобрать все инбаунды».
+* От устаревшего снимка полного прохода защищает его возраст
+  (``snapshot_taken_at``): подписку, изменённую в боте после снимка (оплата,
+  продление), снимок не трогает — иначе он откатывал бы только что оплаченный
+  срок. Расход трафика и ссылки переносятся всё равно.
+* Пока открыт грейс-доступ, биллинговое состояние — собственность бота.
 
-* ``ROUTINE`` — фоновая синхронизация. Панель это подсказка: дату берём только у
-  ACTIVE, лимиты не берём вовсе.
-* ``BULK_SNAPSHOT`` — полный проход. Он выгружает весь список и применяет его
-  минутами позже, поэтому «исчерпана» и «истекла» применяются только когда с
-  панелью согласны данные самого бота: иначе только что оплаченная подписка
-  откатывалась бы в LIMITED и уезжала в грейс. А от снимка, который старше
-  правки в боте, защищает ``snapshot_taken_at`` — тогда не трогаются ни статус,
-  ни дата, ни лимиты.
-* ``ADMIN_PULL`` — админ нажал «из панели в бота». Здесь панель побеждает: дата
-  переносится при любом статусе, лимиты трафика и устройств тоже. Это
-  единственный случай, когда правка в панели меняет оплаченный тариф, и она
-  сделана осознанно.
-* ``WEBHOOK`` — панель прислала событие. Оно свежее любого снимка, поэтому дата
-  и лимит трафика берутся при любом статусе. Но подписку, намеренно отключённую
-  в боте (обнуление админом), вебхук не воскрешает: у панели могла остаться
-  старая дата, и списанные дни «вернулись» бы. Истёкшей вебхук подписку не
-  делает — это работа мониторинга.
+Политики ``ROUTINE`` (фоновое чтение), ``BULK_SNAPSHOT`` (полный проход) и
+``ADMIN_PULL`` (кнопка «из панели в бота») теперь одно и то же — ``PANEL_TRUTH``;
+имена оставлены, чтобы точки вызова говорили, откуда пришли. ``WEBHOOK`` —
+событие панели: свежее любого снимка, но подписку, намеренно отключённую в боте
+(обнуление админом), не воскрешает, и истёкшей её не делает — это работа
+мониторинга с его уведомлениями.
 """
 
 from __future__ import annotations
@@ -78,7 +68,7 @@ class ProjectionPolicy:
     takes_date: bool = True
     #: Брать дату только у ACTIVE (у остальных там бывает искусственная дата).
     date_only_from_active: bool = True
-    #: Как выводить статус: 'routine' | 'stale' | 'panel_wins' | 'webhook'.
+    #: Как выводить статус: 'panel_truth' | 'webhook' | 'routine' (только для полей по умолчанию).
     status_mode: str = 'routine'
     #: Брать из панели лимит трафика (обычно его задаёт тариф).
     takes_traffic_limit: bool = False
@@ -86,23 +76,22 @@ class ProjectionPolicy:
     takes_device_limit: bool = False
     #: Не переносить дату, пока подписка намеренно отключена в боте.
     respects_local_disable: bool = False
+    #: Брать из панели сквады.
+    takes_squads: bool = True
 
 
-#: Фоновая синхронизация: панель — подсказка.
-ROUTINE = ProjectionPolicy('routine')
-#: Полный проход: снимок мог протухнуть, пока список выгружался. Дату у живого
-#: аккаунта берём — иначе продление, сделанное руками в панели, бот не увидит и
-#: затрёт своим же обратным проходом. От протухшего снимка защищает не отказ от
-#: даты, а его возраст (``snapshot_taken_at``).
-BULK_SNAPSHOT = ProjectionPolicy('bulk_snapshot', status_mode='stale')
-#: Админ нажал «из панели в бота»: панель побеждает.
-ADMIN_PULL = ProjectionPolicy(
-    'admin_pull',
+#: Панель — истина: дата, статус и лимиты при любом статусе аккаунта.
+PANEL_TRUTH = ProjectionPolicy(
+    'panel_truth',
     date_only_from_active=False,
-    status_mode='panel_wins',
+    status_mode='panel_truth',
     takes_traffic_limit=True,
     takes_device_limit=True,
 )
+#: Фоновое чтение, полный проход и кнопка «из панели в бота» — одна и та же истина.
+ROUTINE = replace(PANEL_TRUTH, name='routine')
+BULK_SNAPSHOT = replace(PANEL_TRUTH, name='bulk_snapshot')
+ADMIN_PULL = replace(PANEL_TRUTH, name='admin_pull')
 #: Событие от панели: свежее любого снимка, но отключённую подписку не воскрешает.
 WEBHOOK = ProjectionPolicy(
     'webhook',
@@ -196,6 +185,48 @@ def read_panel_user(panel_user) -> PanelSnapshot:
     )
 
 
+#: Панель хранит миллисекунды и округляет; секунды хватает с запасом.
+_GRACE_TAIL_TOLERANCE_SECONDS = 2
+
+#: Поля подписки, по которым проекция узнаёт грейс. Подписку, загруженную до снимка
+#: панели, перед переносом перечитывают целиком по этому списку: хранилище пишет их
+#: до отправки оверлея, и только прочитанные после снимка видят любой грейс, который
+#: снимок мог показать (сторож ``test_projection_reads_grace_marker_after_snapshot``).
+GRACE_MARKER_FIELDS = ('grace_session_open', 'grace_tail_expire_at', 'grace_overlay_expire_at')
+
+
+def panel_date_is_grace_tail(subscription, snapshot: PanelSnapshot) -> bool:
+    """Совпадает ли дата в панели с той, что грейс-доступ там оставил."""
+    tail = getattr(subscription, 'grace_tail_expire_at', None)
+    if tail is None or snapshot.expire_at is None:
+        return False
+    return abs((panel_datetime_to_utc(tail) - snapshot.expire_at).total_seconds()) <= _GRACE_TAIL_TOLERANCE_SECONDS
+
+
+def panel_date_is_grace_overlay(subscription, snapshot: PanelSnapshot) -> bool:
+    """Совпадает ли дата в панели с «концом грейса», который выставил оверлей.
+
+    Такую дату (``сейчас + срок грейса`` до миллисекунд) даёт только грейс: ни
+    продление, ни админ её не повторят. Хранилище пишет её на подписку до
+    отправки оверлея в панель и при закрытии сессии не стирает.
+    """
+    marker = getattr(subscription, 'grace_overlay_expire_at', None)
+    if marker is None or snapshot.expire_at is None:
+        return False
+    return abs((panel_datetime_to_utc(marker) - snapshot.expire_at).total_seconds()) <= _GRACE_TAIL_TOLERANCE_SECONDS
+
+
+def _tail_confirms_own_expiry(
+    subscription, snapshot: PanelSnapshot, *, policy: ProjectionPolicy, trust_status: bool, now: datetime
+) -> bool:
+    """В хвосте грейса панель говорит «истёк», и по своей дате подписка тоже истекла."""
+    if not trust_status or policy.status_mode == 'webhook' or snapshot.status != 'EXPIRED':
+        return False
+    if subscription.status not in _RENEWABLE_STATUSES or subscription.end_date is None:
+        return False
+    return panel_datetime_to_utc(subscription.end_date) <= now
+
+
 def _next_status_from_webhook(subscription, snapshot: PanelSnapshot, *, now: datetime) -> str:
     """Статус по событию панели.
 
@@ -212,42 +243,30 @@ def _next_status_from_webhook(subscription, snapshot: PanelSnapshot, *, now: dat
     return subscription.status
 
 
-def _next_status_when_panel_wins(subscription, snapshot: PanelSnapshot, *, now: datetime) -> str:
-    """Статус по решению админа «привести бота к панели»."""
-    expire_at = snapshot.expire_at
-    if snapshot.status == 'ACTIVE' and expire_at is not None and expire_at > now:
-        return SubscriptionStatus.ACTIVE.value
-    if expire_at is not None and expire_at <= now:
-        return SubscriptionStatus.EXPIRED.value
-    return SubscriptionStatus.DISABLED.value
+def _next_status_panel_truth(subscription, snapshot: PanelSnapshot, *, now: datetime) -> str:
+    """Статус, как его видит панель — она истина.
 
-
-def _next_status_from_stale_snapshot(subscription, snapshot: PanelSnapshot, *, now: datetime) -> str:
-    """Статус по снимку, которому нельзя доверять на слово.
-
-    LIMITED и EXPIRED применяются только там, где данные бота согласны с панелью:
-    иначе только что оплаченная подписка откатывалась бы в грейс. А вот DISABLED
-    — это решение админа в панели, и его надо доносить: у многих установок
-    вебхуков нет, и полный проход остаётся единственным путём. От применения
-    поверх свежей правки защищает не статус, а возраст снимка (``snapshot_taken_at``).
+    ACTIVE с датой в будущем — живая; триал в боте остаётся триалом, панель их не
+    различает. ACTIVE с прошедшей датой — истекла: панель погасит аккаунт сама
+    через минуту, бот не ждёт. LIMITED, DISABLED, EXPIRED — как есть. Панель не
+    назвала статус (или дату не разобрать у ACTIVE) — не гадаем: по своей дате
+    истечение доводит мониторинг, сверившись с панелью.
     """
+    if snapshot.status == 'ACTIVE':
+        if snapshot.expire_at is None:
+            return subscription.status
+        if snapshot.expire_at <= now:
+            return SubscriptionStatus.EXPIRED.value
+        if subscription.status == SubscriptionStatus.TRIAL.value:
+            return subscription.status
+        return SubscriptionStatus.ACTIVE.value
+    if snapshot.status == 'LIMITED':
+        return SubscriptionStatus.LIMITED.value
     if snapshot.status == 'DISABLED':
         return SubscriptionStatus.DISABLED.value
-
-    if snapshot.status == 'LIMITED':
-        limit_gb = getattr(subscription, 'traffic_limit_gb', 0) or 0
-        used_gb = getattr(subscription, 'traffic_used_gb', 0) or 0
-        traffic_exhausted = bool(limit_gb) and used_gb >= limit_gb - _TRAFFIC_TOLERANCE_GB
-        if traffic_exhausted and subscription.status in _RENEWABLE_STATUSES:
-            return SubscriptionStatus.LIMITED.value
-        return subscription.status
-
-    if snapshot.status == 'EXPIRED' and subscription.end_date is not None:
-        end_date = panel_datetime_to_utc(subscription.end_date)
-        if end_date <= now and subscription.status in (*_RENEWABLE_STATUSES, SubscriptionStatus.LIMITED.value):
-            return SubscriptionStatus.EXPIRED.value
-
-    return subscription.status
+    if snapshot.status == 'EXPIRED':
+        return SubscriptionStatus.EXPIRED.value
+    return _next_status(subscription, snapshot, now=now)
 
 
 def _next_status(subscription, snapshot: PanelSnapshot, *, now: datetime) -> str:
@@ -314,7 +333,11 @@ def project_onto_subscription(
             # Подписку изменили уже после того, как снимок был снят: применять
             # его поверх свежей правки — значит откатывать оплату.
             trust_status = False
-            policy = replace(policy, takes_date=False, takes_traffic_limit=False, takes_device_limit=False)
+            # Сквады — тоже: снимок со старыми сквадами откатывал бы сквады покупки
+            # (или приносил сквад грейса, если снимок сняли во время грейса).
+            policy = replace(
+                policy, takes_date=False, takes_traffic_limit=False, takes_device_limit=False, takes_squads=False
+            )
 
     if snapshot.short_uuid and subscription.remnawave_short_uuid != snapshot.short_uuid:
         subscription.remnawave_short_uuid = snapshot.short_uuid
@@ -332,9 +355,36 @@ def project_onto_subscription(
             subscription.traffic_used_gb = snapshot.traffic_used_gb
             changed.add('traffic_used_gb')
 
-    if grace_open:
-        # Грейс — временное состояние, которое бот держит сам: дату, статус и
-        # сквады панель в это время не переписывает.
+    if grace_open or getattr(subscription, 'grace_session_open', False):
+        # Грейс — временное состояние, которое бот держит сам: дату, статус,
+        # лимит и сквады панель в это время не переписывает. Признак лежит на
+        # самой подписке (его ведёт хранилище грейс-сессий в той же транзакции),
+        # поэтому защищён любой вызывающий, даже забывший передать ``grace_open``:
+        # 2026-09-15 мониторинг так перенёс в бота дату и сквад грейса, и воркер
+        # принял это за продление.
+        return changed
+
+    if panel_date_is_grace_tail(subscription, snapshot):
+        # Хвост грейса: в панели стоит дата, которую оставил сам грейс-доступ
+        # (прошедшую дату PATCH не принимает, настоящую не вернуть). Это не
+        # правка в панели и не продление — дату подписки не трогаем, иначе
+        # истёкшая подписка «истекала» бы заново в конец грейса, а воркер
+        # выдавал грейс снова. Настоящее продление в панели даёт другую дату
+        # и импортируется как обычно.
+        if _tail_confirms_own_expiry(subscription, snapshot, policy=policy, trust_status=trust_status, now=moment):
+            # Панель погасила аккаунт, и собственный срок подписки вышел — «истекла»
+            # правда. Платные гасит мониторинг по своей дате, а триал и суточную —
+            # только этот импорт: без него они навсегда оставались «trial»/«active»
+            # (стенд, 2026-09-15). В кандидаты грейса не метим — инцидент его уже получил.
+            subscription.status = SubscriptionStatus.EXPIRED.value
+            changed.add('status')
+        return changed
+
+    if panel_date_is_grace_overlay(subscription, snapshot):
+        # Снимок оверлея, обработанный уже после закрытия грейса (досрочный откат,
+        # конфликт, слив; снимок полного прохода, снятый раньше), — не продление:
+        # признак открытой сессии уже снят, хвост — другая дата, а дата, сквад и
+        # лимит в снимке — грейса.
         return changed
 
     locally_disabled = subscription.status == SubscriptionStatus.DISABLED.value
@@ -353,8 +403,7 @@ def project_onto_subscription(
             changed.add('end_date')
 
     status_rules = {
-        'panel_wins': _next_status_when_panel_wins,
-        'stale': _next_status_from_stale_snapshot,
+        'panel_truth': _next_status_panel_truth,
         'webhook': _next_status_from_webhook,
         'routine': _next_status,
     }
@@ -369,8 +418,8 @@ def project_onto_subscription(
             subscription.grace_candidate_at = moment
         changed.add('status')
 
-    # Лимиты читаются из панели только там, где это осознанное решение: кнопка
-    # «из панели в бота» и событие от самой панели.
+    # Лимиты — тоже истина панели (правка там приезжает в бота); вебхук берёт
+    # только лимит трафика, как и раньше.
     if (
         policy.takes_traffic_limit
         and snapshot.traffic_limit_gb is not None
@@ -387,7 +436,7 @@ def project_onto_subscription(
         changed.add('device_limit')
 
     # Пустой список сквадов значит «панель ещё не знает», а не «отобрать все».
-    if snapshot.squads and set(snapshot.squads) != set(subscription.connected_squads or []):
+    if policy.takes_squads and snapshot.squads and set(snapshot.squads) != set(subscription.connected_squads or []):
         subscription.connected_squads = list(snapshot.squads)
         changed.add('connected_squads')
 
