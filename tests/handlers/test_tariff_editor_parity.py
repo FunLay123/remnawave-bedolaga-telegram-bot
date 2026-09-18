@@ -91,11 +91,15 @@ def test_telegram_editor_writes_only_real_columns() -> None:
 
 
 def test_new_editor_modules_are_registered_from_tariff_router() -> None:
+    """Лимиты по серверам живут прямо в ``tariffs.py`` (свои callback'и, без
+    отдельного модуля и ``register_server_limits_handlers``) — экран богаче
+    альтернативы (лимит, имя, порядок, докупка, потолок докупки), а два экрана
+    на одну настройку хуже одного.
+    """
     source = (ROOT / 'app' / 'handlers' / 'admin' / 'tariffs.py').read_text(encoding='utf-8')
     for register in (
         'register_custom_traffic_handlers(dp)',
         'register_custom_days_handlers(dp)',
         'register_panel_settings_handlers(dp)',
-        'register_server_limits_handlers(dp)',
     ):
         assert register in source, register
