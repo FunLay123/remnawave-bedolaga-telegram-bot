@@ -3986,7 +3986,7 @@
   Функции: `mock_db_user`, `mock_db`, `mock_bot`, `mock_callback`, `memory_state`, `sample_quote`, `sample_purchase_result`
 - `tests/handlers/test_tariff_editor_parity.py` — Python-модуль
   Классы: нет
-  Функции: `test_editor_modules_are_found`, `test_every_cabinet_field_is_editable_from_telegram`, `test_telegram_editor_writes_only_real_columns` — Дни триала писались в атрибут, которого не было в модели — молча терялись., `test_new_editor_modules_are_registered_from_tariff_router`
+  Функции: `test_editor_modules_are_found`, `test_every_cabinet_field_is_editable_from_telegram`, `test_telegram_editor_writes_only_real_columns` — Дни триала писались в атрибут, которого не было в модели — молча терялись., `test_new_editor_modules_are_registered_from_tariff_router` — Лимиты по серверам живут прямо в ``tariffs.py`` (свои callback'и, без
 - `tests/handlers/test_tariff_extend_subscription_id.py` — Python-модуль
   Классы: нет
   Функции: `test_confirm_keyboard_puts_subscription_id_first_period_last`, `test_extend_keyboard_embeds_subscription_id_before_tariff_and_period`
@@ -4443,7 +4443,7 @@
   Классы: `TestOptions` (5 методов), `TestQuote` (9 методов), `TestApply` (6 методов), `TestCeilingUnderConcurrency` (3 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
-  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (20 методов), `TestNewStatePeriod` (6 методов), `TestOrphanedLimits` (10 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (3 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
+  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (20 методов), `TestNewStatePeriod` (6 методов), `TestOrphanedLimits` (9 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (3 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
   Функции: нет
 - `tests/services/test_promocode_rollback_keeps_user_usable.py` — Python-модуль
   Классы: нет
