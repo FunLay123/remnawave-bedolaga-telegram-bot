@@ -1370,7 +1370,9 @@ class SubscriptionService:
                         # сквады (у подписки без connected_squads это не намерение
                         # «отключить», а просто отсутствие данных) — как в dev.
                         if sub.connected_squads:
-                            update_kwargs['active_internal_squads'] = sub.connected_squads
+                            update_kwargs['active_internal_squads'] = await effective_panel_squads(
+                                sub.id, sub.connected_squads, db=db
+                            )
 
                         # Не отправляем null — RemnaWave API не принимает null для externalSquadUuid (A039)
                         if ext_squad_uuid is not None:

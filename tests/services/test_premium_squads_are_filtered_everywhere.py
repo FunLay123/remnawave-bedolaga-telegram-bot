@@ -209,5 +209,13 @@ def test_every_squad_patch_names_its_subscription():
 
 
 def test_squad_patch_scan_finds_the_callers():
-    """Сторож выше не должен проходить вхолостую, если сканер перестал видеть вызовы."""
-    assert len(_squad_patch_calls()) >= 3, 'сканер не нашёл вызовов patch_panel_squads — сторож смотрит не туда'
+    """Сторож выше не должен проходить вхолостую, если сканер перестал видеть вызовы.
+
+    Вызовов два: кабинетный роут смены серверов тарифа (`admin_tariffs.py`) и
+    фоновая синхронизация (`tariff_squad_sync.py`). Премиум-воркер
+    (`premium_traffic_service.py`) сквады тоже переотправляет, но через
+    `_push_subscription_squads`/`update_panel_user_grace_safe` напрямую в уже
+    открытой сессии — `patch_panel_squads` открыл бы вторую сессию и не увидел
+    бы незакоммиченный `is_limited` (см. комментарий у `_push_subscription_squads`).
+    """
+    assert len(_squad_patch_calls()) >= 2, 'сканер не нашёл вызовов patch_panel_squads — сторож смотрит не туда'

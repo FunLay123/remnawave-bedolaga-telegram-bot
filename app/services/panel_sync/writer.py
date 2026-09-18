@@ -364,7 +364,10 @@ async def _without_limited_premium_squads(payload: PanelPayload, subscription, *
     )
     if allowed is None or tuple(allowed) == payload.active_internal_squads:
         return payload
-    return replace(payload, active_internal_squads=tuple(allowed))
+    return replace(
+        payload,
+        active_internal_squads=tuple(allowed),  # уже отфильтровано effective_panel_squads выше
+    )
 
 
 async def patch_panel_squads(
