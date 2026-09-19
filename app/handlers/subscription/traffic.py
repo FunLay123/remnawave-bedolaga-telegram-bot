@@ -1004,6 +1004,15 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
     if subscription is None:
         return
 
+    # Захвачен здесь, а не прочитан из `db_user.language` после возможного
+    # отката savepoint'а ниже: `ROLLBACK TO SAVEPOINT` полностью экспайрит
+    # объект, побывавший в этой вложенной транзакции (не только списанное
+    # поле), и синхронное чтение атрибута после отката падает с
+    # `MissingGreenlet` — async-сессия не даёт лениво дозагрузить его вне
+    # await. Язык не меняется этим хендлером, поэтому значение остаётся
+    # верным и после отката.
+    user_language = db_user.language
+
     final_price, discount_value, discount_percent = PricingEngine.calculate_traffic_discount(
         quote.base_price_kopeks,
         db_user,
@@ -1066,30 +1075,39 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
     description = f'Докупка {gb} ГБ премиум-трафика ({squad_name})'
 
     try:
-        success = await subtract_user_balance(db, db_user, final_price, description, commit=False)
+        # Списание, начисление и запись транзакции — одна точка сохранения:
+        # `db.begin_nested()`, а не голый `db.rollback()`. Сессию сюда подаёт
+        # `AuthMiddleware`, и та же сессия уже могла нести несвязанные
+        # изменения — обновлённые username/имя пользователя (см.
+        # `app/middlewares/auth.py`), закоммиченные только после хендлера.
+        # Голый rollback стёр бы и их вместе со списанием; savepoint откатывает
+        # только то, что случилось внутри него.
+        async with db.begin_nested():
+            success = await subtract_user_balance(db, db_user, final_price, description, commit=False)
 
-        if not success:
-            await callback.answer('⚠️ Ошибка списания средств', show_alert=True)
-            return
+            if not success:
+                await callback.answer('⚠️ Ошибка списания средств', show_alert=True)
+                return
 
-        try:
             # Начисление — под блокировкой строки состояния (Task 5). Это же
             # место окончательно проверяет потолок докупки: гонка могла
             # исчерпать его уже после quote_premium_topup выше.
             new_state, restored = await apply_premium_topup(db, subscription, quote, period_start_at=datetime.now(UTC))
-        except PremiumTopupError as error:
-            # Списание без начисления недопустимо — откатываем оба действия разом.
-            await db.rollback()
-            await callback.answer(f'⚠️ {error.message}', show_alert=True)
-            return
 
-        await create_transaction(
-            db=db,
-            user_id=db_user.id,
-            type=TransactionType.SUBSCRIPTION_PAYMENT,
-            amount_kopeks=final_price,
-            description=description,
-        )
+            # Списание без начисления и записи транзакции недопустимо: любой
+            # отказ отсюда и до конца блока обязан откатить всё вместе, а не
+            # только начисление. Раньше `create_transaction` не была накрыта
+            # savepoint'ом вовсе: её отказ уходил в общий `except Exception`
+            # ниже, который списание не откатывал — деньги списывались без
+            # начисления и без следа в журнале транзакций.
+            await create_transaction(
+                db=db,
+                user_id=db_user.id,
+                type=TransactionType.SUBSCRIPTION_PAYMENT,
+                amount_kopeks=final_price,
+                description=description,
+            )
+
         await db.commit()
 
         # Сквад возвращаем в панель только если он был снят: в остальных
@@ -1126,9 +1144,18 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
             restored=restored,
         )
 
+    except PremiumTopupError as error:
+        # `async with db.begin_nested()` уже откатил savepoint целиком —
+        # списание и (несостоявшееся) начисление отменены одним действием.
+        await callback.answer(f'⚠️ {error.message}', show_alert=True)
+        return
     except Exception as e:
+        # То же самое для любого другого сбоя внутри savepoint (например,
+        # `create_transaction`, упавшая до `await db.commit()`): выход из
+        # `async with` исключением уже откатил списание, здесь только
+        # сообщаем пользователю честный итог — списания не произошло.
         logger.error('Ошибка докупки премиум-трафика', error=e)
-        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(db_user.language))
+        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(user_language))
 
     await callback.answer()
 

@@ -20,6 +20,8 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from sqlalchemy import select
+
 import app.handlers.subscription.traffic as traffic_mod
 from app.config import settings
 from app.database.crud.premium_traffic import get_or_create_state, get_state
@@ -403,6 +405,83 @@ class TestBuySucceeds:
             assert saved_carts[0]['squad_uuid'] == SQUAD
 
             callback.message.edit_text.assert_awaited_once()
+
+
+class TestBuyRollsBackWhenSomethingFailsAfterTheDebit:
+    """Верифицированный money-баг: сбой между списанием и коммитом обязан откатывать всё.
+
+    ``AuthMiddleware`` коммитит сессию хендлера безусловно после его возврата
+    (см. ``app/middlewares/auth.py``), даже если хендлер сам поймал исключение,
+    залогировал его и вернулся без ошибки. Раньше единственный ``db.rollback()``
+    в этой функции стоял только в ветке ``except PremiumTopupError`` — падение
+    ``create_transaction`` (или чего угодно ещё в этом окне) уходило в общий
+    ``except Exception``, который ничего не откатывал: списание, сделанное с
+    ``commit=False``, оставалось висеть в сессии и коммитилось мидлварью как
+    единственное подтверждённое действие покупки.
+
+    Проверка нарочно повторяет оба места, где деньги фактически терялись:
+    сразу после хендлера (сам он уже обязан быть безопасным) и после коммита
+    «как это сделала бы мидлварь» — тест, ограничившийся только первым, был бы
+    зелёным и при старом баге, потому что ущерб наносил именно внешний коммит.
+    """
+
+    @staticmethod
+    async def _balance(db, user_id: int) -> int:
+        """Сырое значение из БД, а не атрибут Python-объекта — savepoint должен откатить именно строку."""
+        result = await db.execute(select(User.balance_kopeks).where(User.id == user_id))
+        return result.scalar_one()
+
+    async def test_failed_transaction_record_does_not_survive_the_middleware_commit(self, monkeypatch):
+        subscription = _subscription()
+        _patch_resolve(monkeypatch, subscription)
+
+        async def _boom_transaction(**kwargs):
+            raise RuntimeError('запись транзакции упала')
+
+        monkeypatch.setattr(traffic_mod, 'create_transaction', _boom_transaction)
+
+        async def _fake_subtract(db, user, amount, description, **kwargs):
+            assert kwargs.get('commit') is False, 'списание обязано оставаться незакоммиченным до конца покупки'
+            user.balance_kopeks -= amount
+            return True
+
+        monkeypatch.setattr(traffic_mod, 'subtract_user_balance', _fake_subtract)
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            user = await _seed_user(db, balance_kopeks=100_000)
+            # Взят до вызова хендлера: `ROLLBACK TO SAVEPOINT` полностью
+            # экспайрит объект, побывавший во вложенной транзакции — включая
+            # `id` — и синхронное чтение атрибута после отката падает с
+            # `MissingGreenlet` вне await-контекста ORM.
+            user_id = user.id
+
+            async def _fake_lock(db, user_id):
+                return user
+
+            monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
+
+            callback = _callback('premium_traffic_buy_0_5')
+
+            await traffic_mod.buy_premium_traffic(callback, user, db)
+
+            # 1) Сам хендлер обязан быть безопасным без чужой помощи.
+            assert await self._balance(db, user_id) == 100_000, (
+                'списание должно откатиться сразу после сбоя внутри хендлера'
+            )
+            callback.message.edit_text.assert_awaited_once()
+            (rendered_text,) = callback.message.edit_text.await_args.args[:1]
+            assert 'докуплен' not in rendered_text, 'сообщение не должно намекать на успех при провале покупки'
+
+            state = await get_state(db, subscription.id, SQUAD)
+            assert state is None or state.extra_bytes == 0, 'трафик не должен начисляться без сохранённой транзакции'
+
+            # 2) То место, где баг фактически причинял ущерб: `AuthMiddleware`
+            # коммитит сессию безусловно после хендлера, что бы тот ни поймал.
+            await db.commit()
+
+            assert await self._balance(db, user_id) == 100_000, (
+                'коммит мидлвари не должен закрепить списание за несостоявшуюся покупку'
+            )
 
 
 # ============================= Текст экрана: состояние сквада =============================
