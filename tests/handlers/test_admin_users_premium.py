@@ -17,14 +17,26 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from sqlalchemy import inspect as sa_inspect
+
 import app.handlers.admin.users as users_mod
 from app.database.crud.premium_traffic import get_or_create_state, get_state
-from app.database.models import SubscriptionPremiumTraffic
+from app.database.models import PromoGroup, Subscription, SubscriptionPremiumTraffic, Tariff, tariff_promo_groups
 from app.utils.premium_traffic import BYTES_IN_GB, PremiumSquadConfig
 from tests.fixtures.sqlite_memory import memory_session
 
 
 TABLES = (SubscriptionPremiumTraffic.__table__,)
+# Tariff.allowed_promo_groups — lazy='selectin', поэтому любая загрузка
+# Tariff (в т.ч. неявная, через FK-связь Subscription.tariff) требует и эти
+# таблицы, иначе память-БД падает с "no such table: tariff_promo_groups"/"promo_groups".
+TABLES_WITH_TARIFF = (
+    SubscriptionPremiumTraffic.__table__,
+    Subscription.__table__,
+    Tariff.__table__,
+    PromoGroup.__table__,
+    tariff_promo_groups,
+)
 
 SQUAD = 'e4f819ca-2cfd-4425-9354-16a262b180c1'
 OTHER = '82a12389-14d6-40c6-b320-4674f6bbb344'
@@ -169,6 +181,46 @@ class TestCollectPremiumTrafficRows:
         monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
         async with memory_session(monkeypatch, TABLES) as db:
             subscription = _subscription(limits={SQUAD: {'traffic_limit_gb': 5}}, connected=[SQUAD])
+
+            rows, unmanaged = await users_mod._collect_premium_traffic_rows(db, subscription)
+
+            assert len(rows) == 1
+            assert rows[0]['squad_uuid'] == SQUAD
+            assert unmanaged == []
+
+    async def test_unloaded_tariff_relation_falls_back_to_tariff_id_lookup(self, monkeypatch):
+        """Живой баг: карточка подписки (`_render_user_subscription_overview`)
+        передаёт сюда `subscription`, у которой связь `tariff` не подгружена —
+        сама карточка чуть выше по коду обходит это явным
+        `get_tariff_by_id(db, subscription.tariff_id)`. Без такого же обхода
+        здесь премиум-блок пропадает с карточки даже при настроенном премиум-
+        скваде, подключённом к подписке.
+        """
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        async with memory_session(monkeypatch, TABLES_WITH_TARIFF) as db:
+            tariff = Tariff(
+                id=1,
+                name='Pro',
+                server_traffic_limits={SQUAD: {'traffic_limit_gb': 5}},
+            )
+            db.add(tariff)
+            await db.flush()
+
+            db.add(
+                Subscription(
+                    id=1,
+                    user_id=1,
+                    tariff_id=tariff.id,
+                    end_date=NOW,
+                    connected_squads=[SQUAD],
+                )
+            )
+            await db.commit()
+
+            # Свежий отдельный запрос без selectinload — связь `tariff` не
+            # подгружена, это и воспроизводит живой баг.
+            subscription = await db.get(Subscription, 1)
+            assert 'tariff' not in sa_inspect(subscription).dict, 'sanity: связь не должна быть загружена'
 
             rows, unmanaged = await users_mod._collect_premium_traffic_rows(db, subscription)
 

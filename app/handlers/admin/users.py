@@ -4328,8 +4328,27 @@ async def _collect_premium_traffic_rows(
     лимита и без истории премиум-состояний: их не за чем показывать построчно
     с кнопками управления, но явно отметить как «не отдельный лимит, а не
     закрыто» — это ровно то смешение, которого требует избежать задача.
+
+    Связь `tariff` подгружена не на всех экранах (например, в карточке
+    подписки, `_render_user_subscription_overview`), а обращение к
+    незагруженной lazy-связи в async SQLAlchemy не возвращает `None`, а может
+    бросить `MissingGreenlet`. Поэтому берём тариф из уже загруженного
+    состояния объекта (`sa_inspect(...).dict`, как в
+    `remnawave_webhook_service.py`) и только если его там нет — догружаем
+    отдельным запросом по `tariff_id`, как это уже делает вызывающий код
+    чуть выше по карточке.
     """
-    tariff = getattr(subscription, 'tariff', None)
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import NoInspectionAvailable
+
+    try:
+        tariff = sa_inspect(subscription).dict.get('tariff')
+    except NoInspectionAvailable:
+        # Не смаппленный ORM-объект (например, тестовый двойник) — обращение
+        # к атрибуту безопасно, обходной путь через inspect тут не нужен.
+        tariff = getattr(subscription, 'tariff', None)
+    if tariff is None and subscription.tariff_id:
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
     configs = get_premium_squads_for_tariff(tariff)
     connected = set(subscription.connected_squads or [])
     states = {state.squad_uuid: state for state in await get_states_for_subscription(db, subscription.id)}
