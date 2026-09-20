@@ -203,7 +203,7 @@ class TestUsageCollection:
 
 class TestDecisions:
     async def _apply(self, service, target, state, used_bytes, monkeypatch, api=None, panel_user=None):
-        async def _get_state(_db, _sub_id, _squad):
+        async def _get_state(_db, _sub_id, _squad, for_update=False):
             return state
 
         monkeypatch.setattr('app.database.crud.premium_traffic.get_state', _get_state)
@@ -638,6 +638,177 @@ class TestDecisions:
         )
 
         assert outcome is None
+
+
+class TestRestoreVisibleToPanelGuard:
+    """`_restore_squad` обязан быть виден стражу устаревшего снимка панели.
+
+    `panel_sync.projection.project_onto_subscription` защищает подписку от
+    применения снимка, снятого до её правки, сравнивая возраст снимка с
+    `Subscription.updated_at`/`last_webhook_update_at`. Восстановление сквада
+    меняет только строку `subscription_premium_traffic` — другую таблицу,
+    которую эта проверка не видит. Без явной отметки снимок, снятый панелью до
+    восстановления (сквада там ещё нет) и применённый уже после, не
+    распознаётся как устаревший и переписывает `connected_squads` на
+    дособытийный набор без сквада — тихо и навсегда, потому что
+    `_reconcile_limited_states` пересматривает только строки с
+    ``is_limited=True``, а после восстановления флаг уже снят.
+    """
+
+    @staticmethod
+    def _restorable_subscription():
+        """Подписка со всеми полями, которые читает `project_onto_subscription`.
+
+        Лёгкий `_target()` для этого не годится — маппер обращается к полям
+        напрямую, без ``getattr``.
+        """
+        return SimpleNamespace(
+            id=1,
+            status='active',
+            end_date=NOW + timedelta(days=30),
+            traffic_used_gb=1.0,
+            traffic_limit_gb=100,
+            device_limit=3,
+            connected_squads=[SQUAD],
+            remnawave_short_uuid='abc',
+            subscription_url='https://old',
+            subscription_crypto_link='old-crypto',
+            grace_candidate_reason=None,
+            grace_candidate_at=None,
+            grace_tail_expire_at=None,
+            grace_session_open=False,
+            grace_overlay_expire_at=None,
+            updated_at=NOW - timedelta(hours=1),
+            last_webhook_update_at=None,
+            user=SimpleNamespace(telegram_id=555, language='ru', remnawave_id=PANEL_USER_ID),
+            start_date=NOW - timedelta(days=10),
+            tariff=SimpleNamespace(traffic_reset_mode='MONTH'),
+            remnawave_id=PANEL_USER_ID,
+        )
+
+    async def test_restore_bumps_updated_at_so_a_stale_snapshot_cannot_undo_it(self, monkeypatch):
+        from app.services.panel_sync import BULK_SNAPSHOT, PanelSnapshot, project_onto_subscription
+
+        service = PremiumTrafficService()
+        subscription = self._restorable_subscription()
+        target = _Target(subscription, PremiumSquadConfig(squad_uuid=SQUAD, limit_gb=5), PANEL_USER_ID, 'LTE')
+        # Докупка объясняет, почему лимит больше не исчерпан — тот же сценарий,
+        # что и в `test_topup_restores_a_limited_squad`.
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)
+        state.extra_bytes = 3 * BYTES_IN_GB
+
+        async def _get_state(_db, _sub_id, _squad, for_update=False):
+            return state
+
+        monkeypatch.setattr('app.database.crud.premium_traffic.get_state', _get_state)
+
+        async def _push(_db, _api, _tgt):
+            return None
+
+        monkeypatch.setattr(service, '_push_squads', _push)
+
+        # Панель отдала этот снимок до восстановления: PATCH с возвратом сквада
+        # она тогда ещё не получила.
+        snapshot_taken_at = NOW - timedelta(seconds=30)
+
+        outcome = await service._apply_usage(
+            _Db(),
+            FakeRemnawaveApi(),
+            target,
+            used_bytes=5 * BYTES_IN_GB,
+            period_start=NOW,
+            now=NOW,
+        )
+        assert outcome == 'restored'
+        assert state.is_limited is False
+
+        # Применяется позже (минута спустя), но временем всё ещё помечен как
+        # снятый до восстановления.
+        changed = project_onto_subscription(
+            subscription,
+            PanelSnapshot(status='ACTIVE', squads=(OTHER_SQUAD,)),
+            now=NOW + timedelta(minutes=1),
+            policy=BULK_SNAPSHOT,
+            snapshot_taken_at=snapshot_taken_at,
+        )
+
+        assert subscription.connected_squads == [SQUAD], (
+            'устаревший снимок панели не должен отбирать только что восстановленный сквад'
+        )
+        assert 'connected_squads' not in changed
+
+
+class TestUsageDecisionRace:
+    """Решение снять сквад обязано читать строку заново прямо перед записью.
+
+    `_apply_usage` читает состояние один раз в начале, а между этим чтением и
+    записью решения могла закоммититься докупка (`apply_premium_topup` тоже
+    пишет под `FOR UPDATE`, в своей отдельной транзакции). Простой повторный
+    `SELECT` этого не увидит: объект уже лежит в identity map сессии, и без
+    `populate_existing` она вернёт его как есть, не подложив новые значения
+    колонок, — тот же`state`, что читали минутами раньше в `_resolve_period`.
+    Без перечитывания под блокировкой прямо перед записью воркер снял бы
+    сквад по устаревшему числу и отменил бы то, за что клиент только что
+    заплатил.
+    """
+
+    async def test_topup_committed_after_the_read_is_not_undone_by_a_stale_decision(self, monkeypatch):
+        from sqlalchemy import update
+
+        async with memory_session(monkeypatch, (SubscriptionPremiumTraffic.__table__,)) as db:
+            seeded = await get_or_create_state(
+                db,
+                1,
+                SQUAD,
+                limit_bytes=5 * BYTES_IN_GB,
+                period_start_at=NOW,
+            )
+            seeded.is_limited = False
+            seeded.baseline_bytes = 0
+            await db.commit()
+
+            # Докупка коммитится в своей отдельной транзакции (см.
+            # `apply_premium_topup`) — `synchronize_session=False` здесь как раз
+            # для того, чтобы не подложить новые значения колонок в объект,
+            # который воркер уже держит в своей identity map, ровно как это
+            # сделала бы настоящая внешняя транзакция.
+            await db.execute(
+                update(SubscriptionPremiumTraffic)
+                .where(
+                    SubscriptionPremiumTraffic.subscription_id == 1,
+                    SubscriptionPremiumTraffic.squad_uuid == SQUAD,
+                )
+                .values(extra_bytes=10 * BYTES_IN_GB, is_limited=False)
+                .execution_options(synchronize_session=False)
+            )
+            await db.commit()
+
+            service = PremiumTrafficService()
+            pushed = []
+
+            async def _push(_db, _api, _tgt):
+                pushed.append(_tgt.subscription.id)
+
+            monkeypatch.setattr(service, '_push_squads', _push)
+
+            # 6 ГБ превышают старый лимит (5 ГБ) — по устаревшей в памяти
+            # строке это исчерпание, — но укладываются в новый (5 + 10
+            # докупленных) после топапа.
+            outcome = await service._apply_usage(
+                db,
+                FakeRemnawaveApi(),
+                _target(),
+                used_bytes=6 * BYTES_IN_GB,
+                period_start=NOW,
+                now=NOW,
+            )
+
+            assert outcome is None, 'докупка уже закрыла исчерпание — снимать нечего'
+            assert pushed == [], 'сквад не должен уйти из панели по устаревшему решению'
+
+            fresh = await get_state(db, 1, SQUAD)
+            assert fresh.is_limited is False, 'докупленный сквад не должен быть снят вдогонку'
+            assert fresh.extra_bytes == 10 * BYTES_IN_GB
 
 
 class TestNewStatePeriod:

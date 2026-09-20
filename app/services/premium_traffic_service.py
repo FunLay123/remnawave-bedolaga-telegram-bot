@@ -740,6 +740,36 @@ class PremiumTrafficService:
 
     # ------------------------------------------------------------ решение
 
+    async def _lock_state_for_decision(self, db: AsyncSession, target: _Target, state: Any) -> Any:
+        """Перечитать состояние под блокировкой строки прямо перед записью решения.
+
+        `state` пришёл из простого чтения в начале `_apply_usage` — а то и вовсе
+        живёт в identity map с прошлого обращения к этой же строке внутри
+        текущего прохода (`_resolve_period` читает её же несколькими минутами
+        раньше, до сетевого похода в панель за расходом). Повторный простой
+        `SELECT` эту память не освежает: сессия возвращает уже загруженный
+        объект как есть, не перекладывая на него новые значения колонок, — так
+        что «перечитать» без `populate_existing` означало бы перечитать то же
+        самое. Докупка (`apply_premium_topup`) в это окно пишет под
+        `FOR UPDATE` в своей транзакции: если её коммит попал между нашим
+        чтением и решением, `is_limited`/`extra_bytes` в памяти устареют, и
+        снятие сквада отменит то, за что клиент только что заплатил.
+
+        Лочим и перечитываем только здесь — в узкую секунду перед самой записью
+        решения (снять или вернуть), а не на весь проход по всем целям: тот
+        рубильник держал бы по строке на подписку хвостом в тысячи FOR UPDATE
+        на пятиминутный цикл ради решения, которое меняется редко.
+
+        Свой ещё не отправленный в базу расход (`record_usage` двумя строками
+        выше) сбрасываем `flush`-ем first — иначе `populate_existing` заменил
+        бы его тем, что уже лежит в базе, и только что учтённый замер потерялся
+        бы молча.
+        """
+        from app.database.crud.premium_traffic import get_state
+
+        await db.flush()
+        return await get_state(db, target.subscription.id, target.config.squad_uuid, for_update=True)
+
     async def _apply_usage(
         self,
         db: AsyncSession,
@@ -760,9 +790,19 @@ class PremiumTrafficService:
         record_usage(state, self._net_usage(state, used_bytes, period_start, now), checked_at=now)
 
         if state.is_exhausted and not state.is_limited:
+            state = await self._lock_state_for_decision(db, target, state)
+            if state is None or state.is_limited or not state.is_exhausted:
+                # Докупка (или другая запись) успела решить исход, пока мы
+                # держали лишь непрочитанный заново снимок, — см.
+                # `_lock_state_for_decision`. Снимать уже нечего, а сверка с
+                # панелью ниже досчитает расхождение, если оно всё-таки есть.
+                return None
             return 'limited' if await self._limit_squad(db, api, target, state) else None
 
         if state.is_limited and not state.is_exhausted:
+            state = await self._lock_state_for_decision(db, target, state)
+            if state is None or not state.is_limited or state.is_exhausted:
+                return None
             return 'restored' if await self._restore_squad(db, api, target, state) else None
 
         if not state.is_limited and not state.notified_80 and self._crossed_warning(state):
@@ -936,6 +976,21 @@ class PremiumTrafficService:
         async def _do() -> None:
             async with db.begin_nested():
                 state.is_limited = False
+                # Возврат — единственный выход из цикла самоисцеления: пока флаг
+                # снят, `_reconcile_limited_states` больше не пересматривает эту
+                # строку (её запрос берёт только `is_limited=True`), а восстановление
+                # само по себе живёт в другой таблице (`subscription_premium_traffic`)
+                # и не задевает `Subscription`. Страж устаревшего снимка панели
+                # (`panel_sync.projection.project_onto_subscription`) сравнивает
+                # время снимка именно с `Subscription.updated_at`/
+                # `last_webhook_update_at` — не тронь мы её, снимок, снятый до
+                # восстановления и применённый после, не распознался бы как
+                # устаревший и мог бы тихо и навсегда переписать `connected_squads`
+                # на дособытийный набор без этого сквада. Лимитация и закрытие
+                # такой правки не требуют: обе оставляют `is_limited=True`, и та
+                # же `_reconcile_limited_states` продолжает возвращать право на
+                # каждом проходе, пока сквад не восстановят по-настоящему.
+                target.subscription.updated_at = datetime.now(UTC)
                 # См. `_limit_squad`: без явного flush фильтр ниже не увидел бы
                 # возврат и продолжил бы исключать сквад из набора.
                 await db.flush()
