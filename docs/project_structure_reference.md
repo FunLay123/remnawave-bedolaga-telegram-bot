@@ -1624,7 +1624,7 @@
   Классы: `PremiumTopupError` (1 методов), `PremiumTopupQuote` (1 методов)
   Функции: `get_premium_topup_options` — Сквады подписки, где докупка премиум-трафика включена и есть пакеты., `quote_premium_topup` — Проверить возможность покупки и посчитать цену до скидок., `apply_premium_topup` — Начислить купленный объём.
 - `app/services/premium_traffic_service.py` — Python-модуль
-  Классы: `PremiumTrafficService` (39 методов)
+  Классы: `PremiumTrafficService` (40 методов)
   Функции: `panel_user_id_for_subscription` — Аккаунт в панели, к которому относятся расход и сквады подписки.
 - `app/services/pricing_engine.py` — Python-модуль
   Классы: `TariffBreakdown`, `ClassicBreakdown`, `RenewalPricing` (1 методов), `TariffSwitchResult` (2 методов), `PricingEngine` (20 методов)
@@ -4444,7 +4444,7 @@
   Классы: `TestOptions` (5 методов), `TestQuote` (9 методов), `TestApply` (6 методов), `TestCeilingUnderConcurrency` (3 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
-  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (20 методов), `TestNewStatePeriod` (6 методов), `TestOrphanedLimits` (9 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (3 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
+  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (20 методов), `TestRestoreVisibleToPanelGuard` (2 методов), `TestUsageDecisionRace` (1 методов), `TestNewStatePeriod` (6 методов), `TestOrphanedLimits` (9 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (3 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
   Функции: нет
 - `tests/services/test_promocode_rollback_keeps_user_usable.py` — Python-модуль
   Классы: нет
