@@ -290,6 +290,10 @@ HMAC-SHA256 подпись, sticky terminal-status guard, защита от amou
 git clone https://github.com/BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot.git
 cd remnawave-bedolaga-telegram-bot
 cp .env.example .env   # заполните переменные
+# ./logs, ./data, ./uploads и ./locales — bind-монтируемые каталоги, владельца
+# им назначает хост, а не образ. Без этого шага контейнер стартует от uid 1000
+# и падает с PermissionError на первом же обращении к ./data
+mkdir -p logs data uploads locales && chown -R 1000:1000 logs data uploads locales
 docker compose up -d
 ```
 
