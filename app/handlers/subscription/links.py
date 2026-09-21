@@ -230,7 +230,7 @@ async def handle_connect_subscription(
         if incy_url:
             import_buttons.append(InlineKeyboardButton(text='🪴 INCY', url=incy_url))
         if happ_url:
-            import_buttons.append(InlineKeyboardButton(text='Happ', url=happ_url, style="primary", icon_custom_emoji_id='5267020576651781323'))
+            import_buttons.append(InlineKeyboardButton(text='Happ', url=happ_url, style="primary", icon_custom_emoji_id='5267274958974789753'))
 
         if import_buttons:
             rows.append(import_buttons)
