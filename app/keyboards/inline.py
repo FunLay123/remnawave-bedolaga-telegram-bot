@@ -655,7 +655,7 @@ def get_main_menu_keyboard(
                 )
             else:
                 keyboard.append([_fallback_connect_button()])
-        elif connect_mode == 'happ_cryptolink':
+        elif connect_mode in ('happ_cryptolink', 'happ_incy_cryptolink'):
             if subscription_link:
                 keyboard.append(
                     [
