@@ -259,7 +259,7 @@ async def handle_connect_subscription(
         await callback.message.edit_text(
             texts.t(
                 'SUBSCRIPTION_CONNECT_CHOICE_MESSAGE',
-                '🚀 <b>Подключение подписки</b>\n\n'
+                '☔ <b>Подключение подписки</b>\n\n'
                 'Выберите ваше приложение для импорта настроек:',
             ),
             reply_markup=keyboard,
