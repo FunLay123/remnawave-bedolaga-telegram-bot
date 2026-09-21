@@ -133,6 +133,7 @@ async def get_connection_link(
     subscription_id: int | None = Query(None, description='Subscription ID for multi-tariff'),
 ) -> dict[str, Any]:
     """Get subscription connection link and instructions."""
+    from app.utils.incy_crypt1 import encrypt_incy_link
     from app.utils.subscription_utils import (
         convert_subscription_link_to_happ_scheme,
         get_display_subscription_link,
@@ -147,7 +148,8 @@ async def get_connection_link(
             detail='No subscription found',
         )
 
-    subscription_url = subscription.subscription_url
+    subscription_url = str(subscription.subscription_url)
+
     if not subscription_url:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -155,9 +157,19 @@ async def get_connection_link(
         )
 
     display_link = get_display_subscription_link(subscription)
+
+    # 1. Генерируем HAPP  crypt-ссылку
     happ_redirect = get_happ_cryptolink_redirect_link(subscription_url) if settings.is_happ_cryptolink_mode() else None
     happ_scheme_link = (
         convert_subscription_link_to_happ_scheme(subscription_url) if settings.is_happ_cryptolink_mode() else None
+    )
+
+    # 2. Генерируем INCY crypt-ссылку 
+    provider_name = getattr(settings, 'INCY_PROVIDER_NAME', 'VPN')
+    incy_crypto_link = (
+        encrypt_incy_link(subscription_url, provider_name)
+        if getattr(settings, 'INCY_CRYPTOLINK_ENABLED', False)
+        else None
     )
 
     connect_mode = settings.CONNECT_BUTTON_MODE
@@ -172,6 +184,7 @@ async def get_connection_link(
         # предпочитает её клиентской генерации crypt4. Не прячем при hide_link:
         # crypt-ссылка и есть способ скрыть исходный subscription_url.
         'happ_crypto_link': subscription.subscription_crypto_link,
+        'incy_crypto_link': incy_crypto_link,
         'connect_mode': connect_mode,
         'hide_link': hide_subscription_link,
         'instructions': {

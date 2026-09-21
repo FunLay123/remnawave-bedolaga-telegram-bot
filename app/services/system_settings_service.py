@@ -592,6 +592,7 @@ class BotConfigurationService:
             ChoiceOption('miniapp_custom', '🧩 Mini App (ссылка)'),
             ChoiceOption('link', '🔗 Прямая ссылка'),
             ChoiceOption('happ_cryptolink', '🪙 Happ CryptoLink'),
+            ChoiceOption('happ_incy_cryptolink', '🪙 Happ-INCY CryptoLink'),
         ],
         'MAIN_MENU_MODE': [
             ChoiceOption('default', '📋 Полное меню'),

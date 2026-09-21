@@ -195,6 +195,76 @@ async def handle_connect_subscription(
             reply_markup=keyboard,
             parse_mode='HTML',
         )
+    elif connect_mode == 'happ_incy_cryptolink':
+        from urllib.parse import quote
+        from app.utils.incy_crypt1 import encrypt_incy_link
+
+        subscription_url = str(subscription.subscription_url) if subscription.subscription_url else ''
+        provider_name = getattr(settings, 'INCY_PROVIDER_NAME', 'VPN')
+
+        raw_happ_link = subscription.subscription_crypto_link
+        raw_incy_link = (
+            encrypt_incy_link(subscription_url, provider_name)
+            if getattr(settings, 'INCY_CRYPTOLINK_ENABLED', False) and subscription_url
+            else None
+        )
+
+        redirect_template = getattr(settings, 'HAPP_CRYPTOLINK_REDIRECT_TEMPLATE', None)
+
+        def _wrap_redirect(deep_link: str | None) -> str | None:
+            if not deep_link:
+                return None
+            if redirect_template:
+                # https://switzerlandcorn.website/redirect-page/?redirect_to=happ%3A%2F%2F...
+                return f'{redirect_template}{quote(deep_link, safe="")}'
+            # Если редирект не настроен, отдаем только если это валидный https
+            return deep_link if deep_link.startswith(('http://', 'https://')) else None
+
+        happ_url = _wrap_redirect(raw_happ_link)
+        incy_url = _wrap_redirect(raw_incy_link)
+
+        rows: list[list[InlineKeyboardButton]] = []
+
+        # Ряд кнопок подключения через веб-редирект
+        import_buttons: list[InlineKeyboardButton] = []
+        if happ_url:
+            import_buttons.append(InlineKeyboardButton(text='🍏/🤖 Happ', url=happ_url))
+        if incy_url:
+            import_buttons.append(InlineKeyboardButton(text='⚡ INCY', url=incy_url))
+
+        if import_buttons:
+            rows.append(import_buttons)
+        else:
+            # Если редирект не настроен или ссылки не готовы
+            rows.append([
+                InlineKeyboardButton(
+                    text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                    callback_data=(
+                        f'open_subscription_link:{sub_id}'
+                        if settings.is_multi_tariff_enabled()
+                        else 'open_subscription_link'
+                    ),
+                )
+            ])
+
+        # Кнопки загрузки приложений (если настроены)
+        happ_row = get_happ_download_button_row(texts)
+        if happ_row:
+            rows.append(happ_row)
+
+        rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
+
+        await callback.message.edit_text(
+            texts.t(
+                'SUBSCRIPTION_CONNECT_CHOICE_MESSAGE',
+                '🚀 <b>Подключение подписки</b>\n\n'
+                'Выберите ваше приложение для импорта настроек:',
+            ),
+            reply_markup=keyboard,
+            parse_mode='HTML',
+        )  
     else:
         # Guide mode: load config and build dynamic platform keyboard
         platforms = None
