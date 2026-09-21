@@ -164,7 +164,7 @@ async def get_connection_link(
         convert_subscription_link_to_happ_scheme(subscription_url) if settings.is_happ_cryptolink_mode() else None
     )
 
-    # 2. Генерируем INCY crypt-ссылку 
+    # 2. Генерируем INCY crypt-ссылку
     provider_name = getattr(settings, 'INCY_PROVIDER_NAME', 'VPN')
     incy_crypto_link = (
         encrypt_incy_link(subscription_url, provider_name)

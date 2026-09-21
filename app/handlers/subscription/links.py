@@ -197,6 +197,7 @@ async def handle_connect_subscription(
         )
     elif connect_mode == 'happ_incy_cryptolink':
         from urllib.parse import quote
+
         from app.utils.incy_crypt1 import encrypt_incy_link
 
         subscription_url = str(subscription.subscription_url) if subscription.subscription_url else ''
@@ -230,22 +231,28 @@ async def handle_connect_subscription(
         if incy_url:
             import_buttons.append(InlineKeyboardButton(text='🪴 INCY', url=incy_url))
         if happ_url:
-            import_buttons.append(InlineKeyboardButton(text='Happ', url=happ_url, style="primary", icon_custom_emoji_id='5267274958974789753'))
+            import_buttons.append(
+                InlineKeyboardButton(
+                    text='Happ', url=happ_url, style='primary', icon_custom_emoji_id='5267274958974789753'
+                )
+            )
 
         if import_buttons:
             rows.append(import_buttons)
         else:
             # Если редирект не настроен или ссылки не готовы
-            rows.append([
-                InlineKeyboardButton(
-                    text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                    callback_data=(
-                        f'open_subscription_link:{sub_id}'
-                        if settings.is_multi_tariff_enabled()
-                        else 'open_subscription_link'
-                    ),
-                )
-            ])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                        callback_data=(
+                            f'open_subscription_link:{sub_id}'
+                            if settings.is_multi_tariff_enabled()
+                            else 'open_subscription_link'
+                        ),
+                    )
+                ]
+            )
 
         # Кнопки загрузки приложений (если настроены)
         happ_row = get_happ_download_button_row(texts)
@@ -263,7 +270,7 @@ async def handle_connect_subscription(
             ),
             reply_markup=keyboard,
             parse_mode='HTML',
-        )  
+        )
     else:
         # Guide mode: load config and build dynamic platform keyboard
         platforms = None
