@@ -571,6 +571,12 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             '📱 Скопируйте ссылку и добавьте в ваше VPN приложение',
         )
 
+    # Доступность премиум-докупки считаем здесь: клавиатура строится без сессии,
+    # а решение требует запроса к состояниям посквадных лимитов.
+    from app.handlers.subscription.traffic import _get_purchasable_premium_squads
+
+    has_premium_topup = bool(await _get_purchasable_premium_squads(db, subscription))
+
     await callback.message.edit_text(
         message,
         reply_markup=get_subscription_keyboard(
@@ -579,6 +585,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             is_trial=subscription.is_trial,
             subscription=subscription,
             gift_enabled=gift_enabled,
+            has_premium_topup=has_premium_topup,
         ),
         parse_mode='HTML',
     )
