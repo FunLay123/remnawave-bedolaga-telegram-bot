@@ -1439,75 +1439,6 @@ async def _get_multi_tariff_status(user, texts, db: AsyncSession) -> tuple[str, 
     return status_text, ''
 
 
-async def _build_premium_traffic_lines(subscription, texts, db: AsyncSession) -> list[str]:
-    """Строки о посквадных премиум-лимитах подписки.
-
-    Показываем только сквады, премиальные в текущем тарифе И подключённые к
-    подписке: настроенный, но неподключённый сквад пользователю не принадлежит,
-    а подключённый без отдельного лимита живёт по общему трафику и отдельной
-    строки не заслуживает.
-    """
-    from app.database.crud.premium_traffic import get_states_for_subscription
-    from app.database.crud.server_squad import get_squad_display_names
-    from app.database.crud.tariff import get_tariff_by_id
-    from app.utils.premium_traffic import BYTES_IN_GB, get_premium_squads_for_tariff
-
-    tariff_id = getattr(subscription, 'tariff_id', None)
-    if not tariff_id:
-        return []
-
-    tariff = await get_tariff_by_id(db, tariff_id)
-    configs = get_premium_squads_for_tariff(tariff)
-    if not configs:
-        return []
-
-    connected = set(subscription.connected_squads or [])
-    uuids = [squad_uuid for squad_uuid in configs if squad_uuid in connected]
-    if not uuids:
-        return []
-
-    states = {state.squad_uuid: state for state in await get_states_for_subscription(db, subscription.id)}
-    names = await get_squad_display_names(db, uuids)
-
-    lines: list[str] = []
-    for squad_uuid in sorted(uuids, key=lambda item: (configs[item].sort_order, item)):
-        config = configs[squad_uuid]
-        state = states.get(squad_uuid)
-        # Докупленное входит в потолок, поэтому показываем сумму, а не лимит тарифа.
-        total_gb = (state.total_limit_bytes / BYTES_IN_GB) if state else float(config.limit_gb)
-        used_gb = (state.used_bytes or 0) / BYTES_IN_GB if state else 0.0
-        lines.append(
-            texts.t('MAIN_MENU_PREMIUM_TRAFFIC_LINE', '💠 {name}: {used} из {total}').format(
-                name=html.escape(config.name or names.get(squad_uuid) or squad_uuid),
-                used=texts.format_traffic(round(used_gb, 2), is_limit=False),
-                total=texts.format_traffic(round(total_gb, 2)),
-            )
-        )
-    return lines
-
-
-async def _build_traffic_block(user, texts, db: AsyncSession) -> str:
-    """Блок главного меню: общий трафик и, если есть, посквадные премиум-лимиты."""
-    subscription = getattr(user, 'subscription', None)
-    if subscription is None:
-        return ''
-
-    # У подписки нет свойства `is_unlimited_traffic` (оно только у тарифа):
-    # безлимит здесь — нулевой лимит, как и в остальных проверках по коду.
-    if (subscription.traffic_limit_gb or 0) == 0:
-        lines = [texts.t('MAIN_MENU_TRAFFIC_UNLIMITED', '📊 Трафик: безлимитный')]
-    else:
-        lines = [
-            texts.t('MAIN_MENU_TRAFFIC_LIMITED', '📊 Трафик: {used} из {limit}').format(
-                used=texts.format_traffic(subscription.traffic_used_gb or 0, is_limit=False),
-                limit=texts.format_traffic(subscription.traffic_limit_gb or 0),
-            )
-        ]
-
-    lines.extend(await _build_premium_traffic_lines(subscription, texts, db))
-    return '\n'.join(lines)
-
-
 async def get_main_menu_text(user, texts, db: AsyncSession):
     from app.config import settings
 
@@ -1555,17 +1486,6 @@ async def get_main_menu_text(user, texts, db: AsyncSession):
     action_prompt = texts.t('MAIN_MENU_ACTION_PROMPT', 'Выберите действие:')
 
     info_sections: list[str] = []
-
-    try:
-        traffic_block = await _build_traffic_block(user, texts, db)
-        if traffic_block:
-            info_sections.append(traffic_block)
-    except Exception as traffic_error:
-        logger.debug(
-            'Не удалось построить блок трафика для главного меню',
-            user_id=getattr(user, 'id', None),
-            traffic_error=traffic_error,
-        )
 
     try:
         promo_hint = await build_promo_offer_hint(db, user, texts)
