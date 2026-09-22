@@ -2673,7 +2673,16 @@ def get_add_traffic_keyboard(
     discount_percent: int = 0,
     sub_id: int | None = None,
     has_premium_topup: bool = False,
+    ordinary_enabled: bool = True,
 ) -> InlineKeyboardMarkup:
+    """
+    Args:
+        ordinary_enabled: Показывать ли обычные пакеты трафика вообще. `False` —
+            общий трафик уже безлимитный или обычная докупка сейчас отключена;
+            экран не должен предлагать пакеты, которые всё равно будут
+            отклонены — это состояние отдельно от премиум-докупки
+            (`has_premium_topup`), которая от него не зависит.
+    """
     from app.config import settings
 
     texts = get_texts(language)
@@ -2697,7 +2706,7 @@ def get_add_traffic_keyboard(
         price_multiplier = 1
         period_text = ''
 
-    packages = settings.get_traffic_topup_packages()
+    packages = settings.get_traffic_topup_packages() if ordinary_enabled else []
     enabled_packages = [pkg for pkg in packages if pkg['enabled'] and pkg['price'] > 0]
 
     if not enabled_packages:
