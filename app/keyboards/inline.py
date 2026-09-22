@@ -1111,6 +1111,7 @@ def get_subscription_keyboard(
     is_trial: bool = False,
     subscription=None,
     gift_enabled: bool = False,
+    has_premium_topup: bool = False,
 ) -> InlineKeyboardMarkup:
     from app.config import settings
 
@@ -1302,6 +1303,12 @@ def get_subscription_keyboard(
                     show_traffic_topup = False
                 elif settings.is_traffic_topup_enabled() and not settings.is_traffic_topup_blocked():
                     show_traffic_topup = True
+
+            # Посквадный премиум-лимит не связан с общим трафиком подписки: тариф
+            # бывает безлимитным в целом и при этом ограничивать отдельный сквад.
+            # Поэтому вход открывается и тогда, когда обычная докупка недоступна.
+            if has_premium_topup:
+                show_traffic_topup = True
 
             if show_traffic_topup:
                 keyboard.append(
