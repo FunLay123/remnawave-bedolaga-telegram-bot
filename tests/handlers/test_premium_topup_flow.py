@@ -316,6 +316,268 @@ async def _seed_user(db, balance_kopeks: int) -> User:
     return user
 
 
+class _TariffFixture:
+    """Строит подписку и тариф для сценариев `handle_add_traffic` ниже.
+
+    Отдельно от ``_subscription`` выше: тем тестам не нужен ``tariff_id`` и
+    методы тарифа (``can_topup_traffic``/``get_traffic_topup_packages``) —
+    здесь они обязательны, чтобы пройти через ветку режима тарифов.
+    """
+
+    TARIFF_ID = 42
+
+    @staticmethod
+    def tariff(*, can_topup: bool) -> MagicMock:
+        tariff = MagicMock()
+        tariff.id = _TariffFixture.TARIFF_ID
+        tariff.can_topup_traffic.return_value = can_topup
+        tariff.get_traffic_topup_packages.return_value = {5: 1000, 10: 1800}
+        return tariff
+
+    @staticmethod
+    def subscription(*, traffic_limit_gb: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=1,
+            connected_squads=[SQUAD],
+            tariff=SimpleNamespace(server_traffic_limits={SQUAD: WITH_TOPUP}),
+            tariff_id=_TariffFixture.TARIFF_ID,
+            traffic_limit_gb=traffic_limit_gb,
+            is_trial=False,
+            end_date=NOW,
+        )
+
+    @staticmethod
+    def patch_tariff(monkeypatch, tariff) -> None:
+        async def _fake(db, tariff_id, **kwargs):
+            return tariff
+
+        monkeypatch.setattr('app.database.crud.tariff.get_tariff_by_id', _fake)
+
+
+# ============================= Баг с боевого деплоя =============================
+
+
+class TestUnlimitedOverallTrafficStillOffersPremium:
+    """Безлимитный общий трафик не должен прятать премиум-докупку.
+
+    Три «ordinary»-гейта в `handle_add_traffic` (нулевой общий лимит,
+    отключённая докупка на тарифе, отключённый глобальный рубильник) не имеют
+    отношения к премиум-сквадам — это независимая сущность (см.
+    `docs/premium-traffic-limits.md`). Раньше все три гейта стояли раньше, чем
+    экран вообще успевал посчитать премиум-предложения, и клиент с безлимитным
+    тарифом никогда не видел кнопку докупки премиум-трафика.
+    """
+
+    async def test_unlimited_overall_traffic_still_reaches_premium_button(self, monkeypatch):
+        """Report repro: общий трафик безлимитный, обычная докупка тарифом разрешена."""
+        subscription = _TariffFixture.subscription(traffic_limit_gb=0)
+        _patch_resolve(monkeypatch, subscription)
+        _TariffFixture.patch_tariff(monkeypatch, _TariffFixture.tariff(can_topup=True))
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            callback = _callback('buy_traffic')
+
+            await traffic_mod.handle_add_traffic(callback, _db_user(), db)
+
+            # Отказа с алертом быть не должно — экран должен открыться.
+            callback.answer.assert_awaited_once()
+            assert callback.answer.await_args.kwargs.get('show_alert') is not True
+            callback.message.edit_text.assert_awaited_once()
+
+            markup = callback.message.edit_text.await_args.kwargs['reply_markup']
+            callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+            assert 'premium_traffic_topup' in callbacks
+            # Пакетов обычного трафика быть не должно — общий лимит уже безлимитный.
+            assert not any(cb.startswith('add_traffic_') for cb in callbacks)
+
+            (rendered_text,) = callback.message.edit_text.await_args.args[:1]
+            assert 'безлимит' in rendered_text.lower()
+
+    async def test_unlimited_overall_traffic_can_complete_premium_purchase(self, monkeypatch):
+        """Тот же клиент реально доводит покупку премиум-трафика до конца."""
+        subscription = _TariffFixture.subscription(traffic_limit_gb=0)
+        _patch_resolve(monkeypatch, subscription)
+        _TariffFixture.patch_tariff(monkeypatch, _TariffFixture.tariff(can_topup=True))
+
+        transactions: list[dict] = []
+
+        async def _fake_transaction(**kwargs):
+            transactions.append(kwargs)
+
+        monkeypatch.setattr(traffic_mod, 'create_transaction', _fake_transaction)
+
+        async def _fake_subtract(db, user, amount, description, **kwargs):
+            user.balance_kopeks -= amount
+            return True
+
+        monkeypatch.setattr(traffic_mod, 'subtract_user_balance', _fake_subtract)
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            user = await _seed_user(db, balance_kopeks=100_000)
+
+            async def _fake_lock(db, user_id):
+                return user
+
+            monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
+
+            # Экран докупки открывается...
+            callback = _callback('buy_traffic')
+            await traffic_mod.handle_add_traffic(callback, user, db)
+            callback.message.edit_text.assert_awaited_once()
+
+            # ...пользователь жмёт «Премиум-трафик»...
+            topup_callback = _callback('premium_traffic_topup')
+            await traffic_mod.handle_premium_traffic_topup(topup_callback, user, db)
+            topup_callback.message.edit_text.assert_awaited_once()
+
+            # ...и покупает пакет 5 ГБ.
+            buy_callback = _callback('premium_traffic_buy_0_5')
+            await traffic_mod.buy_premium_traffic(buy_callback, user, db)
+
+            assert user.balance_kopeks == 100_000 - 2000, 'пакет 5 ГБ стоит 2000 копеек'
+            assert transactions and transactions[0]['amount_kopeks'] == 2000
+
+            state = await get_state(db, subscription.id, SQUAD)
+            assert state is not None
+            assert state.extra_bytes == 5 * BYTES_IN_GB
+
+            buy_callback.message.edit_text.assert_awaited_once()
+            (success_text,) = buy_callback.message.edit_text.await_args.args[:1]
+            assert 'Премиум-трафик докуплен' in success_text
+
+
+class TestTariffTopupDisabledButPremiumAvailable:
+    """Тариф явно отключил обычную докупку (`can_topup_traffic() is False`) —
+    премиум-сквады это не касается, докупка по ним всё равно должна быть
+    доступна.
+    """
+
+    async def test_reaches_premium_button_when_ordinary_topup_disabled(self, monkeypatch):
+        subscription = _TariffFixture.subscription(traffic_limit_gb=100)
+        _patch_resolve(monkeypatch, subscription)
+        _TariffFixture.patch_tariff(monkeypatch, _TariffFixture.tariff(can_topup=False))
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            callback = _callback('buy_traffic')
+
+            await traffic_mod.handle_add_traffic(callback, _db_user(), db)
+
+            callback.answer.assert_awaited_once()
+            assert callback.answer.await_args.kwargs.get('show_alert') is not True
+            callback.message.edit_text.assert_awaited_once()
+
+            markup = callback.message.edit_text.await_args.kwargs['reply_markup']
+            callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+            assert 'premium_traffic_topup' in callbacks
+            assert not any(cb.startswith('add_traffic_') for cb in callbacks)
+
+    async def test_can_complete_premium_purchase_when_ordinary_topup_disabled(self, monkeypatch):
+        subscription = _TariffFixture.subscription(traffic_limit_gb=100)
+        _patch_resolve(monkeypatch, subscription)
+        _TariffFixture.patch_tariff(monkeypatch, _TariffFixture.tariff(can_topup=False))
+
+        async def _fake_subtract(db, user, amount, description, **kwargs):
+            user.balance_kopeks -= amount
+            return True
+
+        monkeypatch.setattr(traffic_mod, 'subtract_user_balance', _fake_subtract)
+
+        transactions: list[dict] = []
+
+        async def _fake_transaction(**kwargs):
+            transactions.append(kwargs)
+
+        monkeypatch.setattr(traffic_mod, 'create_transaction', _fake_transaction)
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            user = await _seed_user(db, balance_kopeks=100_000)
+
+            async def _fake_lock(db, user_id):
+                return user
+
+            monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
+
+            callback = _callback('buy_traffic')
+            await traffic_mod.handle_add_traffic(callback, user, db)
+            callback.message.edit_text.assert_awaited_once()
+
+            buy_callback = _callback('premium_traffic_buy_0_5')
+            await traffic_mod.buy_premium_traffic(buy_callback, user, db)
+
+            assert user.balance_kopeks == 100_000 - 2000
+            assert transactions and transactions[0]['amount_kopeks'] == 2000
+
+            state = await get_state(db, subscription.id, SQUAD)
+            assert state is not None
+            assert state.extra_bytes == 5 * BYTES_IN_GB
+
+
+class TestClassicModeStillOffersPremium:
+    """Та же независимость гейтов в ветке без режима тарифов (`else` внизу
+    `handle_add_traffic`): нулевой общий лимит и выключенный глобальный
+    рубильник докупки не должны прятать премиум-сквады.
+
+    ``tariff_id`` подписки здесь ``None`` — это переводит `handle_add_traffic`
+    в classic-ветку, а `_get_purchasable_premium_squads` при этом всё равно
+    видит премиум-сквады через `subscription.tariff` (описание сквадов не
+    привязано к тому, через какую ветку продаж сейчас идёт обычный трафик).
+    """
+
+    @staticmethod
+    def _subscription(*, traffic_limit_gb: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=1,
+            connected_squads=[SQUAD],
+            tariff=SimpleNamespace(server_traffic_limits={SQUAD: WITH_TOPUP}),
+            tariff_id=None,
+            traffic_limit_gb=traffic_limit_gb,
+            is_trial=False,
+            end_date=NOW,
+        )
+
+    async def test_unlimited_overall_traffic_still_reaches_premium_button(self, monkeypatch):
+        # Классический режим продаж: `is_legacy_subscription` (отдельный,
+        # неприкасаемый гейт) срабатывает только когда включены тарифы — в
+        # classic-режиме отсутствие `tariff_id` само по себе не «старая подписка».
+        monkeypatch.setattr(settings, 'SALES_MODE', 'classic')
+        subscription = self._subscription(traffic_limit_gb=0)
+        _patch_resolve(monkeypatch, subscription)
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            callback = _callback('buy_traffic')
+
+            await traffic_mod.handle_add_traffic(callback, _db_user(), db)
+
+            callback.answer.assert_awaited_once()
+            assert callback.answer.await_args.kwargs.get('show_alert') is not True
+            callback.message.edit_text.assert_awaited_once()
+
+            markup = callback.message.edit_text.await_args.kwargs['reply_markup']
+            callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+            assert 'premium_traffic_topup' in callbacks
+            assert not any(cb.startswith('add_traffic_') for cb in callbacks)
+
+    async def test_reaches_premium_button_when_global_topup_disabled(self, monkeypatch):
+        monkeypatch.setattr(settings, 'SALES_MODE', 'classic')
+        subscription = self._subscription(traffic_limit_gb=100)
+        _patch_resolve(monkeypatch, subscription)
+        monkeypatch.setattr(settings, 'TRAFFIC_TOPUP_ENABLED', False)
+
+        async with memory_session(monkeypatch, TABLES) as db:
+            callback = _callback('buy_traffic')
+
+            await traffic_mod.handle_add_traffic(callback, _db_user(), db)
+
+            callback.answer.assert_awaited_once()
+            assert callback.answer.await_args.kwargs.get('show_alert') is not True
+            callback.message.edit_text.assert_awaited_once()
+
+            markup = callback.message.edit_text.await_args.kwargs['reply_markup']
+            callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+            assert 'premium_traffic_topup' in callbacks
+            assert not any(cb.startswith('add_traffic_') for cb in callbacks)
+
+
 class TestBuySucceeds:
     """Контрольная группа: без обеих гарантий выше тесты отказа были бы бессмысленны."""
 
