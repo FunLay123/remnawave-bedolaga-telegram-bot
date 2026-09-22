@@ -161,6 +161,10 @@ def read_panel_user(panel_user) -> PanelSnapshot:
         nested = _field(panel_user, 'userTraffic')
         if isinstance(nested, dict):
             used_bytes = nested.get('usedTrafficBytes')
+    # Известное ограничение: used_bytes — расход всего аккаунта, включая
+    # премиум-сквады, а limit_bytes — ровно то, что бот отдал в панель
+    # (payload.py). Меняя любую из сторон, меняй и другую. См.
+    # docs/premium-traffic-limits.md, «Известные ограничения: учёт обычного трафика».
     limit_bytes = _field(panel_user, 'trafficLimitBytes', 'traffic_limit_bytes')
     device_limit = _field(panel_user, 'hwidDeviceLimit', 'hwid_device_limit')
     crypto = _field(panel_user, 'subscriptionCryptoLink', 'happ_crypto_link')

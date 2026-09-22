@@ -3224,11 +3224,29 @@ async def show_premium_squads_list(
 
     premium_configs = get_premium_squads_for_tariff(tariff)
 
+    # Известное ограничение (docs/premium-traffic-limits.md): общий трафик
+    # подписки включает трафик премиум-сквадов. На тарифе с конечным общим
+    # лимитом панель ещё и блокирует клиента по сумме — об этом предупреждаем
+    # жёстче; на безлимитном страдает только отображение.
+    limitation_note = ''
+    if premium_configs and (tariff.traffic_limit_gb or 0) > 0:
+        limitation_note = (
+            f'⚠️ <b>Известное ограничение.</b> Общий лимит тарифа ({tariff.traffic_limit_gb} ГБ) '
+            'панель считает по всему трафику, включая премиум-сквады: клиент может упереться '
+            'в него раньше срока. Подробности — docs/premium-traffic-limits.md.\n\n'
+        )
+    elif premium_configs:
+        limitation_note = (
+            'ℹ️ Общий трафик в меню клиента пока включает трафик премиум-сквадов. '
+            'Подробности — docs/premium-traffic-limits.md.\n\n'
+        )
+
     await callback.message.edit_text(
         f'💎 <b>Премиум-лимиты трафика для «{html.escape(tariff.name)}»</b>\n\n'
         f'Настроено: {len(premium_configs)} из {len(squads)}\n\n'
         'Премиум-лимит — отдельная квота трафика внутри одного сервера. '
         'Нулевой лимит означает «отдельного ограничения нет», а не «доступ закрыт».\n\n'
+        f'{limitation_note}'
         'Выберите сервер:',
         reply_markup=get_premium_squads_list_keyboard(tariff_id, squads, premium_configs, db_user.language),
         parse_mode='HTML',

@@ -3929,7 +3929,7 @@
   Классы: нет
   Функции: `test_none_record_means_not_connected`, `test_pending_status`, `test_active_status_with_next_charge_at`, `test_active_status_without_next_charge_at_shows_placeholder` — ACTIVE достижим и без next_charge_at — например, сразу после коллбека, `test_past_due_status`, `test_cancelled_status`, `test_failed_status`, `test_unknown_status_falls_back_to_raw_value` — Защитная ветка: неизвестный статус не должен молча теряться (как и в
 - `tests/handlers/test_premium_topup_flow.py` — Python-модуль
-  Классы: `TestPurchasableSquads` (4 методов), `TestButtonVisibility` (3 методов), `TestTopupEntryPoint` (3 методов), `TestSquadSelection` (1 методов), `TestBuyRefusesWithoutCharging` (3 методов), `TestUnlimitedOverallTrafficStillOffersPremium` (2 методов), `TestTariffTopupDisabledButPremiumAvailable` (2 методов), `TestClassicModeStillOffersPremium` (3 методов), `TestBuySucceeds` (2 методов), `TestBuyRollsBackWhenSomethingFailsAfterTheDebit` (2 методов), `TestStateWording` (2 методов), `TestCeilingIsDisplayOnly` (3 методов)
+  Классы: `TestPurchasableSquads` (4 методов), `TestButtonVisibility` (3 методов), `TestTopupEntryPoint` (3 методов), `TestSquadSelection` (1 методов), `TestBuyRefusesWithoutCharging` (3 методов), `TestUnlimitedOverallTrafficStillOffersPremium` (2 методов), `TestTariffTopupDisabledButPremiumAvailable` (2 методов), `TestClassicModeStillOffersPremium` (3 методов), `TestRealTransactionRecord` (1 методов), `TestBuySucceeds` (2 методов), `TestBuyRollsBackWhenSomethingFailsAfterTheDebit` (2 методов), `TestStateWording` (2 методов), `TestCeilingIsDisplayOnly` (3 методов)
   Функции: нет
 - `tests/handlers/test_promo_segment_counts.py` — Python-модуль
   Классы: нет
