@@ -383,13 +383,13 @@ def _connect_url(subscription) -> str:
         return ''
     return getattr(subscription, 'subscription_url', None) or ''
 
-
-def _connect_link(subscription, texts) -> str:
-    url = _connect_url(subscription)
-    if not url:
-        return ''
-    label = _rich_text(texts.t('MAIN_MENU_RICH_CONNECT', '⚡ Подключить'))
-    return f'<a href="{html.escape(url, quote=True)}"><b>{label}</b></a>'
+# Не нужно в главном меню
+#def _connect_link(subscription, texts) -> str:
+#    url = _connect_url(subscription)
+#    if not url:
+#        return ''
+#    label = _rich_text(texts.t('MAIN_MENU_RICH_CONNECT', '⚡ Подключить'))
+#    return f'<a href="{html.escape(url, quote=True)}"><b>{label}</b></a>'
 
 
 def _trial_offer_link(user: User, texts) -> str:
@@ -466,9 +466,9 @@ def _build_subscriptions_table(subscriptions, texts) -> str:
             if device_limit is not None:
                 # 0 — безлимит (HWID выключен), а не «нет устройств»: строку не прячем
                 usage_parts.append(f'📱 {Texts.format_device_limit(device_limit)}')
-            connect_link = _connect_link(subscription, texts)
-            if connect_link:
-                usage_parts.append(connect_link)
+            #connect_link = _connect_link(subscription, texts)
+            #if connect_link:
+            #    usage_parts.append(connect_link)
             rows.append(f'<tr><td colspan="3">{" · ".join(usage_parts)}</td></tr>')
         elif actual_status == 'expired':
             renew_link = _renew_link(getattr(subscription, 'id', None), texts)
@@ -489,6 +489,7 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
 
     is_daily_tariff = False
     tariff_line = ''
+    tariff = None
     if settings.is_tariffs_mode() and subscription.tariff_id:
         try:
             tariff = await get_tariff_by_id(db, subscription.tariff_id)
@@ -517,7 +518,7 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
             '{days}', str(local_days_until(end_date, current_time))
         )
         relative_line = _rich_text(relative_template).replace('{when}', _tg_time(end_date, 'r', days_left_text))
-        lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
+        #lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
 
     if actual_status in {'active', 'trial', 'limited'}:
         traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '📊 Трафик: {traffic}')
@@ -533,9 +534,9 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         if device_limit is not None:
             devices_template = texts.t('MAIN_MENU_RICH_DEVICES', '📱 Устройства: {devices}')
             lines.append(_rich_text(devices_template).replace('{devices}', Texts.format_device_limit(device_limit)))
-        connect_link = _connect_link(subscription, texts)
-        if connect_link:
-            lines.append(connect_link)
+        #connect_link = _connect_link(subscription, texts)
+        #if connect_link:
+        #    lines.append(connect_link)
 
     if actual_status == 'expired':
         renew_link = _renew_link(getattr(subscription, 'id', None), texts)
