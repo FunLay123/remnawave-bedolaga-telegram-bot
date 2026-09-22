@@ -2951,6 +2951,9 @@ class SubscriptionPremiumTraffic(Base):
     panel_reset_ack_at = Column(AwareDateTime(), nullable=True)
 
     notified_80 = Column(Boolean, nullable=False, default=False, server_default=text('false'))
+    # Второе предупреждение — на 90 %. Отдельный флаг, а не порог в одном поле:
+    # так же устроен notified_80, и сбрасываются они вместе (crud/premium_traffic.py).
+    notified_90 = Column(Boolean, nullable=False, default=False, server_default=text('false'))
     last_checked_at = Column(AwareDateTime(), nullable=True)
 
     created_at = Column(AwareDateTime(), default=func.now())

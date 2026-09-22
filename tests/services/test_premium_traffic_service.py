@@ -68,7 +68,14 @@ class FakeRemnawaveApi:
 
 
 def _state(
-    limit_gb=5, used_bytes=0, extra_bytes=0, is_limited=False, notified_80=False, baseline_bytes=0, closed_at=None
+    limit_gb=5,
+    used_bytes=0,
+    extra_bytes=0,
+    is_limited=False,
+    notified_80=False,
+    notified_90=False,
+    baseline_bytes=0,
+    closed_at=None,
 ):
     """Лёгкий двойник состояния: воркер обращается только к этим полям."""
     limit_bytes = limit_gb * BYTES_IN_GB
@@ -80,6 +87,7 @@ def _state(
             self.used_bytes = used_bytes
             self.is_limited = is_limited
             self.notified_80 = notified_80
+            self.notified_90 = notified_90
             # По умолчанию поправка на первые сутки уже снята: тесты решений
             # про пороги, а не про неё — у неё свой набор.
             self.baseline_bytes = baseline_bytes
@@ -254,6 +262,39 @@ class TestDecisions:
 
         second, _ = await self._apply(service, _target(), state, 4 * BYTES_IN_GB, monkeypatch)
         assert second is None
+
+    async def test_second_warning_is_sent_once_at_ninety_percent(self, monkeypatch):
+        service = PremiumTrafficService()
+        warnings = AsyncMock()
+        monkeypatch.setattr(service, '_notify_warning', warnings)
+        state = _state(limit_gb=10)
+
+        first, _ = await self._apply(service, _target(), state, 8 * BYTES_IN_GB, monkeypatch)
+        assert first == 'warned'
+        assert (state.notified_80, state.notified_90) == (True, False)
+
+        second, _ = await self._apply(service, _target(), state, 9 * BYTES_IN_GB, monkeypatch)
+        assert second == 'warned'
+        assert state.notified_90 is True
+
+        third, _ = await self._apply(service, _target(), state, 9 * BYTES_IN_GB + 1, monkeypatch)
+        assert third is None
+        assert warnings.await_count == 2, 'одно на 80 % и одно на 90 %'
+
+    async def test_jump_past_ninety_percent_sends_one_warning(self, monkeypatch):
+        """Расход за проход перескочил сразу за 90 % — одно сообщение, а не два подряд."""
+        service = PremiumTrafficService()
+        warnings = AsyncMock()
+        monkeypatch.setattr(service, '_notify_warning', warnings)
+        state = _state(limit_gb=10)
+
+        outcome, _ = await self._apply(service, _target(), state, int(9.5 * BYTES_IN_GB), monkeypatch)
+        assert outcome == 'warned'
+        assert (state.notified_80, state.notified_90) == (True, True)
+
+        again, _ = await self._apply(service, _target(), state, int(9.5 * BYTES_IN_GB), monkeypatch)
+        assert again is None
+        warnings.assert_awaited_once()
 
     async def test_topup_restores_a_limited_squad(self, monkeypatch):
         service = PremiumTrafficService()

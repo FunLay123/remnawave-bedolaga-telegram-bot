@@ -148,6 +148,7 @@ def start_new_period(
     # Поправку на первые сутки снимем заново: период новый.
     state.baseline_bytes = None
     state.notified_80 = False
+    state.notified_90 = False
     if state.closed_at is not None:
         state.used_bytes = limit_bytes
         state.is_limited = True
@@ -196,6 +197,7 @@ def add_extra_bytes(state: SubscriptionPremiumTraffic, extra_bytes: int) -> Subs
         state.is_limited = False
         # Порог 80 % считается от нового лимита — предупредить нужно заново.
         state.notified_80 = False
+        state.notified_90 = False
     return state
 
 
