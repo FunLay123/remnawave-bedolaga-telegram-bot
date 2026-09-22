@@ -137,6 +137,7 @@ async def test_exhaustion_and_topup_return_the_squad(monkeypatch):
 
         state.is_limited = True
         state.notified_80 = True
+        state.notified_90 = True
 
         add_extra_bytes(state, 2 * BYTES_IN_GB)
 
@@ -145,6 +146,7 @@ async def test_exhaustion_and_topup_return_the_squad(monkeypatch):
         assert state.is_limited is False
         # Порог 80 % теперь считается от 7 ГБ — предупредить нужно заново.
         assert state.notified_80 is False
+        assert state.notified_90 is False
 
 
 async def test_topup_smaller_than_overspend_keeps_the_squad_limited(monkeypatch):
@@ -178,6 +180,7 @@ async def test_new_period_resets_everything_and_takes_fresh_limit(monkeypatch):
         add_extra_bytes(state, BYTES_IN_GB)
         state.is_limited = True
         state.notified_80 = True
+        state.notified_90 = True
 
         next_period = NOW + timedelta(days=30)
         start_new_period(state, period_start_at=next_period, limit_bytes=10 * BYTES_IN_GB)
@@ -188,6 +191,7 @@ async def test_new_period_resets_everything_and_takes_fresh_limit(monkeypatch):
         assert state.used_bytes == 0
         assert state.extra_bytes == 0
         assert state.notified_80 is False
+        assert state.notified_90 is False
         assert state.is_limited is False
 
 

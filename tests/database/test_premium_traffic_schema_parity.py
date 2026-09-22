@@ -20,12 +20,17 @@ from app.database.models import SubscriptionPremiumTraffic
 
 
 VERSIONS = pathlib.Path(__file__).resolve().parents[2] / 'migrations/alembic/versions'
-MIGRATION = '0126_create_subscription_premium_traffic.py'
+# Обновлённая установка проходит всю цепочку: таблица из 0126, дальше её
+# донастраивают следующие миграции. Модель сверяем с итогом цепочки.
+MIGRATIONS = (
+    '0126_create_subscription_premium_traffic.py',
+    '0127_premium_traffic_notified_90.py',
+)
 TABLE = 'subscription_premium_traffic'
 
 
-def _load_migration():
-    spec = importlib.util.spec_from_file_location('m0126', VERSIONS / MIGRATION)
+def _load_migration(file_name: str):
+    spec = importlib.util.spec_from_file_location(f'm{file_name[:4]}', VERSIONS / file_name)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -34,7 +39,8 @@ def _load_migration():
 def _upgrade(engine: sa.Engine) -> None:
     with engine.begin() as conn:
         with Operations.context(MigrationContext.configure(conn)):
-            _load_migration().upgrade()
+            for file_name in MIGRATIONS:
+                _load_migration(file_name).upgrade()
 
 
 def _upgraded_engine(path: pathlib.Path) -> sa.Engine:

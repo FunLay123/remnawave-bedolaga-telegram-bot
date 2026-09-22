@@ -57,6 +57,8 @@ logger = structlog.get_logger(__name__)
 
 DEFAULT_INTERVAL_SECONDS = 300
 WARNING_THRESHOLD = 0.8
+# Второе, последнее предупреждение перед исчерпанием.
+SECOND_WARNING_THRESHOLD = 0.9
 # Ноды сквада меняются редко, а спрашивают их на каждом проходе по каждому
 # скваду. Кеш живёт дольше интервала воркера, чтобы не дёргать панель впустую.
 NODES_CACHE_TTL_SECONDS = 3600
@@ -805,10 +807,19 @@ class PremiumTrafficService:
                 return None
             return 'restored' if await self._restore_squad(db, api, target, state) else None
 
-        if not state.is_limited and not state.notified_80 and self._crossed_warning(state):
-            state.notified_80 = True
-            await self._notify_warning(target, state)
-            return 'warned'
+        if not state.is_limited:
+            # 90 % проверяем раньше 80 %: если расход за один проход перескочил
+            # сразу за 90 %, клиент получит одно сообщение, а не два подряд, —
+            # поэтому здесь поднимаются оба флага.
+            if not state.notified_90 and self._crossed_warning(state, SECOND_WARNING_THRESHOLD):
+                state.notified_80 = True
+                state.notified_90 = True
+                await self._notify_warning(target, state)
+                return 'warned'
+            if not state.notified_80 and self._crossed_warning(state, WARNING_THRESHOLD):
+                state.notified_80 = True
+                await self._notify_warning(target, state)
+                return 'warned'
 
         # Сверка с панелью. Флаг `is_limited` могли снять не мы: докупка через
         # кабинет обнуляет его сама и сама же возвращает сквад. Если та отправка
@@ -921,11 +932,11 @@ class PremiumTrafficService:
         return max(0, raw_bytes - (state.baseline_bytes or 0))
 
     @staticmethod
-    def _crossed_warning(state: Any) -> bool:
+    def _crossed_warning(state: Any, threshold: float) -> bool:
         total = state.total_limit_bytes
         if total <= 0:
             return False
-        return (state.used_bytes or 0) >= total * WARNING_THRESHOLD
+        return (state.used_bytes or 0) >= total * threshold
 
     async def _limit_squad(self, db: AsyncSession, api: Any, target: _Target, state: Any) -> bool:
         """Снять сквад: изменить базу и отправить в панель одной точкой сохранения.

@@ -2925,6 +2925,9 @@
 - `migrations/alembic/versions/0126_create_subscription_premium_traffic.py` — Python-модуль
   Классы: нет
   Функции: `upgrade`, `downgrade`
+- `migrations/alembic/versions/0127_premium_traffic_notified_90.py` — Python-модуль
+  Классы: нет
+  Функции: `upgrade`, `downgrade`
 
 ## scripts
 
@@ -4444,7 +4447,7 @@
   Классы: `TestOptions` (5 методов), `TestQuote` (9 методов), `TestApply` (6 методов), `TestCeilingUnderConcurrency` (3 методов)
   Функции: нет
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
-  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (20 методов), `TestRestoreVisibleToPanelGuard` (2 методов), `TestUsageDecisionRace` (1 методов), `TestNewStatePeriod` (6 методов), `TestOrphanedLimits` (9 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (3 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
+  Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (22 методов), `TestRestoreVisibleToPanelGuard` (2 методов), `TestUsageDecisionRace` (1 методов), `TestNewStatePeriod` (6 методов), `TestOrphanedLimits` (9 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (6 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (3 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
   Функции: нет
 - `tests/services/test_promocode_rollback_keeps_user_usable.py` — Python-модуль
   Классы: нет
