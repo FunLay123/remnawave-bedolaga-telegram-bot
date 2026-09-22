@@ -321,7 +321,9 @@ def _renew_link(subscription_id: int | None, texts) -> str:
 
 
 def _traffic_usage_text(subscription, texts) -> str:
-    used = texts.format_traffic(float(getattr(subscription, 'traffic_used_gb', 0) or 0), is_limit=False)
+    # Израсходованное — с одним знаком после запятой, как на экране подписки
+    # (purchase.py): format_traffic округляет до целых, и 0.6 ГБ показывалось как 1 ГБ.
+    used = f'{float(getattr(subscription, "traffic_used_gb", 0) or 0):.1f} ГБ'
     limit = texts.format_traffic(float(getattr(subscription, 'traffic_limit_gb', 0) or 0), is_limit=True)
     return f'{used} / {limit}'
 
