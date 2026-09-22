@@ -326,6 +326,47 @@ def _traffic_usage_text(subscription, texts) -> str:
     return f'{used} / {limit}'
 
 
+async def _premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> list[str]:
+    """Строки посквадных премиум-лимитов — рядом с общей строкой трафика.
+
+    Показываем только сквады, премиальные в текущем тарифе И подключённые к
+    подписке: настроенный, но неподключённый сквад пользователю не принадлежит,
+    а подключённый без отдельного лимита живёт по общему трафику и своей строки
+    не заслуживает.
+    """
+    from app.database.crud.premium_traffic import get_states_for_subscription
+    from app.database.crud.server_squad import get_squad_display_names
+    from app.utils.premium_traffic import BYTES_IN_GB, get_premium_squads_for_tariff
+
+    configs = get_premium_squads_for_tariff(tariff)
+    if not configs:
+        return []
+
+    connected = set(getattr(subscription, 'connected_squads', None) or [])
+    uuids = [squad_uuid for squad_uuid in configs if squad_uuid in connected]
+    if not uuids:
+        return []
+
+    states = {state.squad_uuid: state for state in await get_states_for_subscription(db, subscription.id)}
+    names = await get_squad_display_names(db, uuids)
+
+    template = texts.t('MAIN_MENU_RICH_PREMIUM_TRAFFIC', '💠 {name}: {traffic}')
+    lines: list[str] = []
+    for squad_uuid in sorted(uuids, key=lambda item: (configs[item].sort_order, item)):
+        config = configs[squad_uuid]
+        state = states.get(squad_uuid)
+        # Докупленное входит в потолок, поэтому показываем сумму, а не лимит тарифа.
+        total_gb = (state.total_limit_bytes / BYTES_IN_GB) if state else float(config.limit_gb)
+        used_gb = ((state.used_bytes or 0) / BYTES_IN_GB) if state else 0.0
+        usage = (
+            f'{texts.format_traffic(round(used_gb, 2), is_limit=False)} / '
+            f'{texts.format_traffic(round(total_gb, 2), is_limit=True)}'
+        )
+        name = config.name or names.get(squad_uuid) or squad_uuid
+        lines.append(_rich_text(template).replace('{name}', html.escape(name)).replace('{traffic}', html.escape(usage)))
+    return lines
+
+
 def _connect_url(subscription) -> str:
     """URL мгновенного подключения подписки для текстовой ссылки.
 
@@ -483,6 +524,11 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         lines.append(
             _rich_text(traffic_template).replace('{traffic}', html.escape(_traffic_usage_text(subscription, texts)))
         )
+        if tariff is not None:
+            try:
+                lines.extend(await _premium_squad_lines(subscription, tariff, texts, db))
+            except Exception as premium_error:
+                logger.debug('Не удалось собрать премиум-лимиты для rich-меню', error=str(premium_error))
         device_limit = getattr(subscription, 'device_limit', None)
         if device_limit is not None:
             devices_template = texts.t('MAIN_MENU_RICH_DEVICES', '📱 Устройства: {devices}')
