@@ -286,6 +286,22 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             '{used} / {limit} ГБ',
         ).format(used=used_traffic, limit=subscription.traffic_limit_gb)
 
+    # Известное ограничение (docs/premium-traffic-limits.md): панель считает
+    # расход на весь аккаунт, и в общем трафике сидит трафик премиум-сквадов.
+    # Пока учёт не разделён, честно говорим об этом рядом с цифрой — но только
+    # тем, у кого премиум-сквад действительно подключён.
+    if subscription.tariff_id:
+        try:
+            from app.database.crud.tariff import get_tariff_by_id
+            from app.utils.premium_traffic import get_premium_squads_for_tariff
+
+            premium_tariff = await get_tariff_by_id(db, subscription.tariff_id)
+            connected = set(subscription.connected_squads or [])
+            if any(uuid in connected for uuid in get_premium_squads_for_tariff(premium_tariff)):
+                traffic_used_display += texts.t('SUBSCRIPTION_TRAFFIC_INCLUDES_PREMIUM', ' — включая белые списки')
+        except Exception as premium_error:
+            logger.debug('Не удалось проверить премиум-сквады для экрана подписки', error=str(premium_error))
+
     devices_used_str = '—'
     devices_list = []
     devices_count = 0

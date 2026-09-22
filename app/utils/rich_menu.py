@@ -523,15 +523,22 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         #lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
 
     if actual_status in {'active', 'trial', 'limited'}:
-        traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '📊 Трафик: {traffic}')
-        lines.append(
-            _rich_text(traffic_template).replace('{traffic}', html.escape(_traffic_usage_text(subscription, texts)))
-        )
+        premium_lines: list[str] = []
         if tariff is not None:
             try:
-                lines.extend(await _premium_squad_lines(subscription, tariff, texts, db))
+                premium_lines = await _premium_squad_lines(subscription, tariff, texts, db)
             except Exception as premium_error:
                 logger.debug('Не удалось собрать премиум-лимиты для rich-меню', error=str(premium_error))
+
+        traffic_text = _traffic_usage_text(subscription, texts)
+        if premium_lines:
+            # Известное ограничение (docs/premium-traffic-limits.md): панель считает
+            # расход на весь аккаунт, и в общей строке сидит трафик премиум-сквадов.
+            # Пока учёт не разделён, честно говорим об этом рядом с цифрой.
+            traffic_text += texts.t('MAIN_MENU_RICH_TRAFFIC_INCLUDES_PREMIUM', ' — включая белые списки')
+        traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '📊 Трафик: {traffic}')
+        lines.append(_rich_text(traffic_template).replace('{traffic}', html.escape(traffic_text)))
+        lines.extend(premium_lines)
         device_limit = getattr(subscription, 'device_limit', None)
         if device_limit is not None:
             devices_template = texts.t('MAIN_MENU_RICH_DEVICES', '📱 Устройства: {devices}')

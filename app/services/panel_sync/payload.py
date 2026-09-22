@@ -195,6 +195,11 @@ def build_panel_payload(
             user_id=user.id,
         )
 
+    # Известное ограничение: панель применяет этот лимит ко ВСЕМУ трафику
+    # аккаунта, включая премиум-сквады, и на лимитном тарифе блокирует клиента
+    # по сумме. Лимит нельзя просто завысить: он читается обратно в
+    # `traffic_limit_gb` (projection.py). См. docs/premium-traffic-limits.md,
+    # «Известные ограничения: учёт обычного трафика».
     traffic_limit_gb = getattr(subscription, 'traffic_limit_gb', 0) or 0
     return PanelPayload(
         username=username,
