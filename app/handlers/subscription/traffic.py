@@ -11,9 +11,9 @@ from app.database.crud.subscription import (
     add_subscription_traffic,
     reactivate_subscription,
 )
-from app.database.crud.transaction import create_transaction
+from app.database.crud.transaction import create_transaction, emit_transaction_side_effects
 from app.database.crud.user import subtract_user_balance
-from app.database.models import TransactionType, User
+from app.database.models import PaymentMethod, TransactionType, User
 from app.keyboards.inline import (
     get_add_traffic_keyboard,
     get_add_traffic_keyboard_from_tariff,
@@ -1163,15 +1163,33 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
             # savepoint'ом вовсе: её отказ уходил в общий `except Exception`
             # ниже, который списание не откатывал — деньги списывались без
             # начисления и без следа в журнале транзакций.
-            await create_transaction(
+            #
+            # `commit=False` обязателен: внутри savepoint'а коммит закрыл бы сам
+            # блок `begin_nested()`, и следующее же обращение к сессии в
+            # `create_transaction` (`db.refresh`) падало бы на закрытой
+            # транзакции. Коммитим один раз — после блока.
+            transaction = await create_transaction(
                 db=db,
                 user_id=db_user.id,
                 type=TransactionType.SUBSCRIPTION_PAYMENT,
                 amount_kopeks=final_price,
                 description=description,
+                commit=False,
             )
 
         await db.commit()
+
+        # С `commit=False` события, промогруппу, конкурс и Метрику
+        # `create_transaction` не запускает — их запускают после коммита.
+        await emit_transaction_side_effects(
+            db,
+            transaction,
+            amount_kopeks=final_price,
+            user_id=db_user.id,
+            type=TransactionType.SUBSCRIPTION_PAYMENT,
+            payment_method=PaymentMethod.BALANCE,
+            description=description,
+        )
 
         # Сквад возвращаем в панель только если он был снят: в остальных
         # случаях набор сквадов не менялся, и лишний PATCH панели ни к чему.

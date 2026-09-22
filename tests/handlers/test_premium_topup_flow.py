@@ -25,7 +25,7 @@ from sqlalchemy import select
 import app.handlers.subscription.traffic as traffic_mod
 from app.config import settings
 from app.database.crud.premium_traffic import get_or_create_state, get_state
-from app.database.models import ServerSquad, SubscriptionPremiumTraffic, User
+from app.database.models import ServerSquad, SubscriptionPremiumTraffic, Transaction, User
 from app.keyboards.inline import get_add_traffic_keyboard, get_add_traffic_keyboard_from_tariff
 from app.utils.premium_traffic import BYTES_IN_GB, PremiumSquadConfig
 from tests.fixtures.sqlite_memory import memory_session
@@ -405,6 +405,7 @@ class TestUnlimitedOverallTrafficStillOffersPremium:
             transactions.append(kwargs)
 
         monkeypatch.setattr(traffic_mod, 'create_transaction', _fake_transaction)
+        monkeypatch.setattr(traffic_mod, 'emit_transaction_side_effects', AsyncMock())
 
         async def _fake_subtract(db, user, amount, description, **kwargs):
             user.balance_kopeks -= amount
@@ -488,6 +489,7 @@ class TestTariffTopupDisabledButPremiumAvailable:
             transactions.append(kwargs)
 
         monkeypatch.setattr(traffic_mod, 'create_transaction', _fake_transaction)
+        monkeypatch.setattr(traffic_mod, 'emit_transaction_side_effects', AsyncMock())
 
         async with memory_session(monkeypatch, TABLES) as db:
             user = await _seed_user(db, balance_kopeks=100_000)
@@ -578,6 +580,51 @@ class TestClassicModeStillOffersPremium:
             assert not any(cb.startswith('add_traffic_') for cb in callbacks)
 
 
+class TestRealTransactionRecord:
+    """Запись транзакции — настоящим `create_transaction`, без заглушки.
+
+    Прочие тесты этого файла подменяют `create_transaction`, и поэтому не
+    заметили, что внутри savepoint'а он по умолчанию делает `db.commit()`:
+    коммит закрывал блок `begin_nested()`, следующий же `db.refresh` в
+    `create_transaction` падал, и пользователь видел «Произошла ошибка» при
+    успешной покупке, а события транзакции не отправлялись.
+    """
+
+    async def test_purchase_writes_transaction_and_reports_success(self, monkeypatch):
+        subscription = _subscription()
+        _patch_resolve(monkeypatch, subscription)
+
+        async def _fake_subtract(db, user, amount, description, **kwargs):
+            user.balance_kopeks -= amount
+            return True
+
+        monkeypatch.setattr(traffic_mod, 'subtract_user_balance', _fake_subtract)
+        side_effects = AsyncMock()
+        monkeypatch.setattr(traffic_mod, 'emit_transaction_side_effects', side_effects)
+
+        async with memory_session(monkeypatch, (*TABLES, Transaction.__table__)) as db:
+            user = await _seed_user(db, balance_kopeks=100_000)
+
+            async def _fake_lock(db, user_id):
+                return user
+
+            monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
+
+            callback = _callback('premium_traffic_buy_0_5')
+            await traffic_mod.buy_premium_traffic(callback, user, db)
+
+            (shown_text,) = callback.message.edit_text.await_args.args[:1]
+            assert 'Премиум-трафик докуплен' in shown_text, 'успешная покупка не должна выглядеть ошибкой'
+
+            rows = (await db.execute(select(Transaction))).scalars().all()
+            assert len(rows) == 1
+            assert rows[0].amount_kopeks == -2000, 'оплата подписки хранится со знаком минус'
+
+            # Побочные действия — ровно один раз и с настоящей записью транзакции.
+            side_effects.assert_awaited_once()
+            assert side_effects.await_args.args[1].id == rows[0].id
+
+
 class TestBuySucceeds:
     """Контрольная группа: без обеих гарантий выше тесты отказа были бы бессмысленны."""
 
@@ -598,6 +645,7 @@ class TestBuySucceeds:
             transactions.append(kwargs)
 
         monkeypatch.setattr(traffic_mod, 'create_transaction', _fake_transaction)
+        monkeypatch.setattr(traffic_mod, 'emit_transaction_side_effects', AsyncMock())
 
         subtract_kwargs: list[dict] = []
 
