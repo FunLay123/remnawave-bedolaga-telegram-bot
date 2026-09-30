@@ -336,6 +336,11 @@ class Settings(BaseSettings):
     PREMIUM_TRAFFIC_ENABLED: bool = True
     # Чаще минуты смысла нет: панель агрегирует статистику с задержкой.
     PREMIUM_TRAFFIC_CHECK_INTERVAL_SECONDS: int = 300
+    # Прокси страницы подписок (app/webserver/subscription_proxy.py): полоска
+    # расхода в приложениях — по премиум-сквадам. Включается, когда заданы оба
+    # поля. Домены — через запятую, адрес — страница подписок, как её видит бот.
+    SUBSCRIPTION_PROXY_HOSTS: str = ''
+    SUBSCRIPTION_PROXY_UPSTREAM: str = ''
     RESET_DEVICES_ON_RENEWAL: bool = False
     TARIFF_SWITCH_UPGRADE_ENABLED: bool = True
     TARIFF_SWITCH_DOWNGRADE_ENABLED: bool = True
@@ -2203,6 +2208,12 @@ class Settings(BaseSettings):
 
     def get_remnawave_auto_sync_times(self) -> list[time]:
         return self.parse_daily_time_list(self.REMNAWAVE_AUTO_SYNC_TIMES)
+
+    def get_subscription_proxy_hosts(self) -> set[str]:
+        return {host.strip().lower() for host in self.SUBSCRIPTION_PROXY_HOSTS.split(',') if host.strip()}
+
+    def is_subscription_proxy_enabled(self) -> bool:
+        return bool(self.get_subscription_proxy_hosts()) and bool(self.SUBSCRIPTION_PROXY_UPSTREAM.strip())
 
     def is_remnawave_webhook_enabled(self) -> bool:
         return (

@@ -635,6 +635,7 @@ async def main():
                 or telegram_webhook_enabled
                 or payment_webhooks_enabled
                 or settings.get_miniapp_static_path().exists()
+                or settings.is_subscription_proxy_enabled()
             )
 
             if should_start_web_app:
@@ -660,6 +661,8 @@ async def main():
                     features.append('Telegram webhook')
                 if settings.get_miniapp_static_path().exists():
                     features.append('статические файлы миниаппа')
+                if settings.is_subscription_proxy_enabled():
+                    features.append('прокси страницы подписок')
 
                 if features:
                     stage.log('Активные сервисы: ' + ', '.join(features))

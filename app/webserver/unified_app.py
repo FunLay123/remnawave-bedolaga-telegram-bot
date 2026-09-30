@@ -322,4 +322,19 @@ def create_unified_app(
             }
         )
 
+    # Последним: добавленный позже middleware оборачивает остальные, и запросы на
+    # домен подписок не проходят через CORS и логирование веб-API.
+    if settings.is_subscription_proxy_enabled():
+        from app.webserver.subscription_proxy import SubscriptionProxyMiddleware, create_proxy_client
+
+        proxy_client = create_proxy_client()
+        app.add_middleware(
+            SubscriptionProxyMiddleware,
+            hosts=settings.get_subscription_proxy_hosts(),
+            upstream=settings.SUBSCRIPTION_PROXY_UPSTREAM.strip(),
+            client=proxy_client,
+        )
+        shutdown_handlers.append(proxy_client.aclose)
+        logger.info('Прокси страницы подписок включён', hosts=sorted(settings.get_subscription_proxy_hosts()))
+
     return app

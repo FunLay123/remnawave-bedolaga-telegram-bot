@@ -89,7 +89,7 @@
   Функции: `create_bot` — Create a Bot instance with SOCKS5 proxy and/or custom Telegram API server.
 - `app/cabinet/`
 - `app/config.py` — Python-модуль
-  Классы: `Settings` (414 методов)
+  Классы: `Settings` (416 методов)
   Функции: `transliterate_cyrillic` — Заменяет кириллические буквы латинскими, сохраняя регистр («Шмель» → «Shmel»)., `set_period_prices_from_db` — Устанавливает периоды/цены из БД., `get_db_period_prices` — Возвращает периоды/цены из БД если они загружены., `clear_db_period_prices` — Очищает кеш цен из тарифов (при переключении в classic mode)., `refresh_period_prices` — Rebuild cached period price mapping., `refresh_classic_period_prices` — Rebuild CLASSIC_PERIOD_PRICES from current settings., `get_traffic_prices`, `refresh_traffic_prices`
 - `app/database/`
 - `app/external/`
@@ -2651,6 +2651,9 @@
 - `app/webserver/remnawave_webhook.py` — Python-модуль
   Классы: нет
   Функции: `create_remnawave_webhook_router` — Build the FastAPI router for RemnaWave webhooks.
+- `app/webserver/subscription_proxy.py` — Python-модуль
+  Классы: `SubscriptionProxyMiddleware` (5 методов)
+  Функции: `short_uuid_candidates`, `rewrite_userinfo` — Меняет upload/download/total, остальные поля (``expire``) оставляет., `premium_usage` — (израсходовано, лимит с докупленным) по премиум-сквадам подписки, в байтах., `lookup_premium_usage`, `create_proxy_client`
 - `app/webserver/telegram.py` — Python-модуль
   Классы: `TelegramWebhookProcessorError`, `TelegramWebhookProcessorNotRunningError`, `TelegramWebhookOverloadedError`, `TelegramWebhookProcessor` (7 методов)
   Функции: `create_telegram_router`
@@ -5427,6 +5430,9 @@
 - `tests/webserver/test_remnawave_webhook.py` — Python-модуль
   Классы: нет
   Функции: `reset_remnawave_webhook_settings`, `test_remnawave_webhook_accepts_event_without_scope`, `test_remnawave_webhook_rejects_payload_without_event`, `test_intentional_panel_deletion_guard_marks_and_detects` — Verify that mark + is_intentional round-trip works correctly., `test_intentional_panel_deletion_guard_respects_hard_cap` — Verify that the guard stops accepting entries after hitting the cap.
+- `tests/webserver/test_subscription_proxy.py` — Python-модуль
+  Классы: нет
+  Функции: `test_rewrite_userinfo_keeps_expire_and_unknown_fields`, `test_short_uuid_candidates_skip_prefixes_that_do_not_look_like_ids`, `test_userinfo_is_replaced_with_premium_usage`, `test_userinfo_untouched_without_premium_or_on_error`, `test_html_page_is_not_rewritten`, `test_request_is_forwarded_as_is`, `test_compressed_body_passes_through_undecoded`, `test_unreachable_subscription_page_gives_502`, `test_other_hosts_reach_bot_routes`, `premium_env`, `test_premium_usage_sums_connected_premium_squads`, `test_premium_usage_none_without_connected_premium_squads`, `test_premium_usage_none_when_path_is_ambiguous`, `test_premium_usage_none_when_premium_disabled`
 - `tests/webserver/test_tabpay_webhook.py` — Python-модуль
   Классы: `DummyBot`
   Функции: `tabpay_settings`, `test_valid_signature_acks_200_and_processes`, `test_response_does_not_wait_for_slow_processing` — Обработка уходит в фон: 200 отдаётся, не дожидаясь зачисления., `test_invalid_signature_is_rejected_without_processing` — Товар не выдаётся: обработчик не вызывается вовсе., `test_stale_timestamp_is_rejected` — Перехваченный вебхук нельзя переиграть позже: метка вне окна., `test_reserialized_body_breaks_signature` — Подпись обязана считаться по сырым байтам: пробелы меняют результат., `test_legacy_v1_signature_is_not_accepted` — Принимаем только v2: подпись от одного тела не проходит., `test_broken_json_with_valid_signature_is_rejected`, `test_route_absent_without_credentials` — Ненастроенный провайдер не должен держать открытый эндпоинт.
