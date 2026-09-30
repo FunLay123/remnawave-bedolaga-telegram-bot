@@ -378,8 +378,41 @@ async def _premium_squad_lines(subscription, tariff, texts, db: AsyncSession) ->
 LIVE_MENU_TTL = 30 * 24 * 3600  # ponytail: меню, которое не открывали месяц, не оживляем; открыл меню — отсчёт заново
 
 
-def live_menu_fingerprint(user: User, texts) -> str:
-    """Только то, что видно в меню. HTML сравнивать нельзя: случайное сообщение админа и таймеры."""
+async def live_menu_premium_state(db: AsyncSession, user: User) -> tuple:
+    """Расход премиум-сквадов для отпечатка живого меню.
+
+    Его обновляет не панель, а воркер премиум-трафика, поэтому в полях подписки
+    его нет, и без этой части меню не заметило бы, что изменилась только строка
+    премиум-сквада.
+    """
+    from sqlalchemy import select
+
+    from app.database.models import SubscriptionPremiumTraffic
+    from app.utils.premium_traffic import BYTES_IN_GB
+
+    subscription_ids = [s.id for s in user.subscriptions or []]
+    if not subscription_ids:
+        return ()
+    rows = (
+        await db.execute(
+            select(SubscriptionPremiumTraffic).where(SubscriptionPremiumTraffic.subscription_id.in_(subscription_ids))
+        )
+    ).scalars()
+    return tuple(
+        sorted(
+            # С точностью до гигабайта — как общий трафик в live_menu_fingerprint.
+            (row.subscription_id, row.squad_uuid, (row.used_bytes or 0) // BYTES_IN_GB, row.total_limit_bytes)
+            for row in rows
+        )
+    )
+
+
+def live_menu_fingerprint(user: User, texts, premium: tuple = ()) -> str:
+    """Только то, что видно в меню. HTML сравнивать нельзя: случайное сообщение админа и таймеры.
+
+    ``premium`` — результат live_menu_premium_state: отпечаток синхронный, а
+    состояние премиум-сквадов лежит в отдельной таблице.
+    """
     now = datetime.now(UTC)
     subscriptions = [
         (
@@ -397,15 +430,16 @@ def live_menu_fingerprint(user: User, texts) -> str:
         )
         for s in user.subscriptions or []
     ]
-    return repr((user.language, user.balance_kopeks, subscriptions))
+    return repr((user.language, user.balance_kopeks, subscriptions, premium))
 
 
-async def remember_live_menu(chat_id: int, message_id: int | None, user: User, texts) -> None:
+async def remember_live_menu(chat_id: int, message_id: int | None, user: User, texts, db: AsyncSession) -> None:
     """Запоминает последнее rich-меню чата для фоновой перерисовки. Никогда не бросает."""
     if not settings.MAIN_MENU_LIVE_ENABLED or not message_id:
         return
     try:
-        state = {'m': message_id, 'fp': live_menu_fingerprint(user, texts)}
+        premium = await live_menu_premium_state(db, user)
+        state = {'m': message_id, 'fp': live_menu_fingerprint(user, texts, premium)}
         await cache.set(f'live_menu:{chat_id}', state, expire=LIVE_MENU_TTL)
     except Exception as error:  # меню уже показано — живость не повод уводить его в классику
         logger.warning('Живое меню: не удалось запомнить меню', chat_id=chat_id, error=str(error))
@@ -441,8 +475,9 @@ def _connect_url(subscription) -> str:
         return ''
     return getattr(subscription, 'subscription_url', None) or ''
 
+
 # Не нужно в главном меню
-#def _connect_link(subscription, texts) -> str:
+# def _connect_link(subscription, texts) -> str:
 #    url = _connect_url(subscription)
 #    if not url:
 #        return ''
@@ -524,8 +559,8 @@ def _build_subscriptions_table(subscriptions, texts) -> str:
             if device_limit is not None:
                 # 0 — безлимит (HWID выключен), а не «нет устройств»: строку не прячем
                 usage_parts.append(f'📱 {Texts.format_device_limit(device_limit)}')
-            #connect_link = _connect_link(subscription, texts)
-            #if connect_link:
+            # connect_link = _connect_link(subscription, texts)
+            # if connect_link:
             #    usage_parts.append(connect_link)
             rows.append(f'<tr><td colspan="3">{" · ".join(usage_parts)}</td></tr>')
         elif actual_status == 'expired':
@@ -564,19 +599,20 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
     if tariff_line:
         lines.append(tariff_line)
 
-    current_time = datetime.now(UTC)
-    end_date = getattr(subscription, 'end_date', None)
-    start_date = getattr(subscription, 'start_date', None)
     actual_status = (subscription.actual_status or '').lower()
-    if not is_daily_tariff and end_date and end_date > current_time and actual_status in {'active', 'trial'}:
-        seconds_left = (end_date - current_time).total_seconds()
-        total_seconds = (end_date - start_date).total_seconds() if start_date else 0
-        relative_template = texts.t('MAIN_MENU_RICH_EXPIRES_RELATIVE', '⏳ истекает {when}')
-        days_left_text = texts.t('MAIN_MENU_RICH_DAYS_LEFT', 'осталось {days} дн.').replace(
-            '{days}', str(local_days_until(end_date, current_time))
-        )
-        relative_line = _rich_text(relative_template).replace('{when}', _tg_time(end_date, 'r', days_left_text))
-        #lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
+    # Полоска срока подписки отключена. Чтобы вернуть — раскомментировать блок.
+    # current_time = datetime.now(UTC)
+    # end_date = getattr(subscription, 'end_date', None)
+    # start_date = getattr(subscription, 'start_date', None)
+    # if not is_daily_tariff and end_date and end_date > current_time and actual_status in {'active', 'trial'}:
+    #    seconds_left = (end_date - current_time).total_seconds()
+    #    total_seconds = (end_date - start_date).total_seconds() if start_date else 0
+    #    relative_template = texts.t('MAIN_MENU_RICH_EXPIRES_RELATIVE', '⏳ истекает {when}')
+    #    days_left_text = texts.t('MAIN_MENU_RICH_DAYS_LEFT', 'осталось {days} дн.').replace(
+    #        '{days}', str(local_days_until(end_date, current_time))
+    #    )
+    #    relative_line = _rich_text(relative_template).replace('{when}', _tg_time(end_date, 'r', days_left_text))
+    #    lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
 
     if actual_status in {'active', 'trial', 'limited'}:
         premium_lines: list[str] = []
@@ -599,8 +635,8 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         if device_limit is not None:
             devices_template = texts.t('MAIN_MENU_RICH_DEVICES', '📱 Устройства: {devices}')
             lines.append(_rich_text(devices_template).replace('{devices}', Texts.format_device_limit(device_limit)))
-        #connect_link = _connect_link(subscription, texts)
-        #if connect_link:
+        # connect_link = _connect_link(subscription, texts)
+        # if connect_link:
         #    lines.append(connect_link)
 
     if actual_status == 'expired':
@@ -817,7 +853,7 @@ async def try_send_rich_main_menu(
 
     try:
         sent = await _send_rich_menu(bot, chat_id, rich_html, keyboard, db_user.language)
-        await remember_live_menu(chat_id, getattr(sent, 'message_id', None), db_user, texts)
+        await remember_live_menu(chat_id, getattr(sent, 'message_id', None), db_user, texts, db)
         return True
     except TelegramForbiddenError:
         # Пользователь заблокировал бота — классический рендер упадёт так же, не ретраим.
@@ -921,14 +957,14 @@ async def try_edit_rich_main_menu(
                     return False
             sent = await _send_rich_menu(bot, chat_id, rich_html, keyboard, language)
             menu_message_id = getattr(sent, 'message_id', None)
-        await remember_live_menu(chat_id, menu_message_id, db_user, texts)
+        await remember_live_menu(chat_id, menu_message_id, db_user, texts, db)
         return True
     except TelegramForbiddenError:
         logger.warning('Не удалось показать rich-меню: бот заблокирован пользователем', chat_id=chat_id)
         return True
     except (TelegramNotFound, TelegramBadRequest) as error:
         if 'message is not modified' in str(error).lower():
-            await remember_live_menu(chat_id, message.message_id, db_user, texts)
+            await remember_live_menu(chat_id, message.message_id, db_user, texts, db)
             return True
         if _is_rich_date_error(error) and is_editable_as_rich:
             # Та же страховка, что и в _send_rich_menu: дата вне диапазона роняет
@@ -944,7 +980,7 @@ async def try_edit_rich_main_menu(
                         parse_mode=None,
                     )
                 )
-                await remember_live_menu(chat_id, message.message_id, db_user, texts)
+                await remember_live_menu(chat_id, message.message_id, db_user, texts, db)
                 return True
             except TelegramBadRequest as retry_error:
                 logger.warning('Повтор rich-меню без tg-time не удался', error=str(retry_error))

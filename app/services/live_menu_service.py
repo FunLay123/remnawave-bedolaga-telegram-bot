@@ -47,6 +47,7 @@ from app.utils.rich_menu import (
     build_main_menu_rich_html,
     is_rich_menu_enabled,
     live_menu_fingerprint,
+    live_menu_premium_state,
 )
 from app.webserver.telegram import TelegramWebhookProcessor
 
@@ -207,7 +208,7 @@ async def _refresh_one(bot, key: str, used_bytes: dict[int, int], fetched_at: da
         if changed:
             await db.commit()
         texts = get_texts(user.language)
-        fp = live_menu_fingerprint(user, texts)
+        fp = live_menu_fingerprint(user, texts, await live_menu_premium_state(db, user))
         if fp == state.get('fp'):
             return None
         from app.handlers.menu import build_main_menu_keyboard  # menu.py сам импортирует rich_menu

@@ -107,11 +107,14 @@ def env(monkeypatch):
     monkeypatch.setattr(live, 'build_main_menu_rich_html', AsyncMock(return_value='<p>menu</p>'))
     monkeypatch.setattr(live, 'set_committed_value', setattr)  # SimpleNamespace — не ORM-объект
     monkeypatch.setattr(live, '_pool_counters', lambda pool: None)
+    # Премиум-сквады — свой запрос к базе; здесь db.execute ждёт только запись трафика.
+    premium = AsyncMock(return_value=())
+    monkeypatch.setattr(live, 'live_menu_premium_state', premium)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     monkeypatch.setattr(menu_mod, 'build_main_menu_keyboard', AsyncMock(return_value=keyboard))
     monkeypatch.setattr(RemnaWaveAPI, '_throttled_until', 0.0)
     monkeypatch.setattr(asyncio, 'sleep', no_sleep)
-    yield SimpleNamespace(cache=cache, db=db, user=user, bot=AsyncMock())
+    yield SimpleNamespace(cache=cache, db=db, user=user, bot=AsyncMock(), premium=premium)
     rich_menu._reset_rich_menu_availability()
 
 
@@ -229,6 +232,40 @@ def test_live_menu_fingerprint_tracks_only_visible_changes():
     assert fingerprint(device_limit=5) != fingerprint()
     assert fingerprint(tariff_id=2) != fingerprint()
     assert fingerprint(is_trial=True) != fingerprint()
+
+
+def test_live_menu_fingerprint_tracks_premium_squads_by_whole_gigabytes():
+    texts = SimpleNamespace(format_traffic=Texts.format_traffic)
+    user = _make_user(_make_subscription(datetime.now(UTC), days_left=12))
+
+    def fingerprint(used_gb=3.2, total_gb=10):
+        return rich_menu.live_menu_fingerprint(user, texts, ((1, 'wl', int(used_gb), total_gb * GIB),))
+
+    assert fingerprint() != rich_menu.live_menu_fingerprint(user, texts)
+    assert fingerprint(used_gb=4) != fingerprint()
+    assert fingerprint(total_gb=15) != fingerprint()  # докупка
+
+
+async def test_live_menu_premium_state_rounds_usage_to_whole_gigabytes():
+    rows = [
+        SimpleNamespace(subscription_id=7, squad_uuid='wl-b', used_bytes=int(3.9 * GIB), total_limit_bytes=10 * GIB),
+        SimpleNamespace(subscription_id=7, squad_uuid='wl-a', used_bytes=None, total_limit_bytes=5 * GIB),
+    ]
+    db = AsyncMock()
+    db.execute.return_value = MagicMock(scalars=MagicMock(return_value=rows))
+    user = SimpleNamespace(subscriptions=[SimpleNamespace(id=7)])
+
+    assert await rich_menu.live_menu_premium_state(db, user) == ((7, 'wl-a', 0, 5 * GIB), (7, 'wl-b', 3, 10 * GIB))
+    assert await rich_menu.live_menu_premium_state(db, SimpleNamespace(subscriptions=[])) == ()
+
+
+async def test_premium_only_change_redraws_menu(env):
+    """Воркер премиум-трафика обновил расход, а общий трафик тот же — меню всё равно перерисовывается."""
+    await _track(env)
+    env.premium.return_value = ((7, 'wl', 4, 10 * GIB),)
+
+    assert await live._refresh_one(env.bot, KEY, {501: int(31.2 * GIB)}, datetime.now(UTC)) == 'edited'
+    env.bot.assert_awaited_once()
 
 
 async def test_sub_gigabyte_change_goes_to_db_without_edit(env):
