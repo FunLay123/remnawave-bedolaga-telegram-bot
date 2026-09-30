@@ -1,7 +1,7 @@
 """второе предупреждение о премиум-трафике — на 90 %
 
-Revision ID: 0127
-Revises: 0126
+Revision ID: 0133
+Revises: 0132
 Create Date: 2026-09-23
 
 Кроме предупреждения на 80 % (notified_80) воркер шлёт второе, на 90 %.
@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 
 
-revision: str = '0127'
-down_revision: Union[str, None] = '0126'
+revision: str = '0133'
+down_revision: Union[str, None] = '0132'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
