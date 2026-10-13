@@ -3,7 +3,7 @@
 mini-app/cabinet behaviour.
 
 Covers all three render/grant surfaces:
-  1. get_main_menu_keyboard (default sync keyboard)
+  1. is_trial_offered (default bot subscription screen)
   2. MenuLayoutService._evaluate_conditions (custom-menu constructor path)
   3. show_trial_offer / activate_trial handlers
 """
@@ -22,36 +22,55 @@ def _menu_has_trial(markup) -> bool:
     return any(getattr(btn, 'callback_data', None) == 'menu_trial' for row in markup.inline_keyboard for btn in row)
 
 
-# --- Surface 1: default sync keyboard -------------------------------------
+# --- Surface 1: default bot screen ----------------------------------------
+# Кнопка «Пробный период» переехала с главного экрана на экран «Подписка»:
+# решает is_trial_offered, клавиатура лишь рисует флаг.
 
 
-def test_keyboard_hides_trial_when_duration_zero():
-    from app.keyboards.inline import get_main_menu_keyboard
+def _fresh_user():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(auth_type='telegram', is_trial_already_used=lambda: False)
+
+
+def test_trial_not_offered_when_duration_zero():
+    from app.handlers.subscription.purchase import is_trial_offered
 
     orig = settings.TRIAL_DURATION_DAYS
     try:
         settings.TRIAL_DURATION_DAYS = 0
-        kb = get_main_menu_keyboard(has_had_paid_subscription=False, has_active_subscription=False)
-        assert not _menu_has_trial(kb)
+        assert not is_trial_offered(_fresh_user())
 
         settings.TRIAL_DURATION_DAYS = 3
-        kb = get_main_menu_keyboard(has_had_paid_subscription=False, has_active_subscription=False)
-        assert _menu_has_trial(kb)
+        assert is_trial_offered(_fresh_user())
     finally:
         settings.TRIAL_DURATION_DAYS = orig
 
 
-def test_keyboard_hides_trial_when_disabled_for_all():
-    from app.keyboards.inline import get_main_menu_keyboard
+def test_trial_not_offered_when_disabled_for_all():
+    from app.handlers.subscription.purchase import is_trial_offered
 
     orig_days, orig_disabled = settings.TRIAL_DURATION_DAYS, settings.TRIAL_DISABLED_FOR
     try:
         settings.TRIAL_DURATION_DAYS = 3
         settings.TRIAL_DISABLED_FOR = 'all'
-        kb = get_main_menu_keyboard(has_had_paid_subscription=False, has_active_subscription=False)
-        assert not _menu_has_trial(kb)
+        assert not is_trial_offered(_fresh_user())
     finally:
         settings.TRIAL_DURATION_DAYS, settings.TRIAL_DISABLED_FOR = orig_days, orig_disabled
+
+
+def test_trial_not_offered_when_already_used():
+    from types import SimpleNamespace
+
+    from app.handlers.subscription.purchase import is_trial_offered
+
+    used = SimpleNamespace(auth_type='telegram', is_trial_already_used=lambda: True)
+    orig = settings.TRIAL_DURATION_DAYS
+    try:
+        settings.TRIAL_DURATION_DAYS = 3
+        assert not is_trial_offered(used)
+    finally:
+        settings.TRIAL_DURATION_DAYS = orig
 
 
 # --- Surface 2: custom-menu constructor path ------------------------------

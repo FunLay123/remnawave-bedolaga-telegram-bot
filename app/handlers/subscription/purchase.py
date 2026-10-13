@@ -192,6 +192,16 @@ from .traffic import (
 )
 
 
+def is_trial_offered(db_user: User) -> bool:
+    """Показывать ли кнопку «Пробный период» (раньше это решало главное меню)."""
+    return bool(
+        settings.TRIAL_DURATION_DAYS > 0
+        and settings.TRIAL_DISABLED_FOR != 'all'
+        and not settings.is_trial_disabled_for_user(getattr(db_user, 'auth_type', None))
+        and not db_user.is_trial_already_used()
+    )
+
+
 async def show_subscription_info(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
     # Multi-tariff: redirect to "My subscriptions" list
     if settings.is_multi_tariff_enabled():
@@ -217,7 +227,12 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     if not subscription:
         await callback.message.edit_text(
             texts.SUBSCRIPTION_NONE,
-            reply_markup=get_subscription_keyboard(db_user.language, has_subscription=False, gift_enabled=gift_enabled),
+            reply_markup=get_subscription_keyboard(
+                db_user.language,
+                has_subscription=False,
+                gift_enabled=gift_enabled,
+                show_trial=is_trial_offered(db_user),
+            ),
         )
         await callback.answer()
         return

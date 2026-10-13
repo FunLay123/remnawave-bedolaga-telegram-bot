@@ -605,166 +605,28 @@ def get_main_menu_keyboard(
             balance=balance_kopeks,
         )
 
-    safe_balance = balance_kopeks or 0
-    if hasattr(texts, 'BALANCE_BUTTON') and safe_balance > 0:
-        balance_button_text = texts.BALANCE_BUTTON.format(balance=texts.format_price(safe_balance))
-    else:
-        balance_button_text = texts.t(
-            'BALANCE_BUTTON_DEFAULT',
-            '💰 Баланс: {balance}',
-        ).format(balance=texts.format_price(safe_balance))
-
-    keyboard: list[list[InlineKeyboardButton]] = []
-    paired_buttons: list[InlineKeyboardButton] = []
-
-    if has_active_subscription and subscription_is_active:
-        connect_mode = settings.CONNECT_BUTTON_MODE
-        subscription_link = get_display_subscription_link(subscription)
-
-        def _fallback_connect_button() -> InlineKeyboardButton:
-            return InlineKeyboardButton(
-                text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                callback_data='subscription_connect',
-            )
-
-        if connect_mode == 'miniapp_subscription':
-            if subscription_link:
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                            web_app=types.WebAppInfo(url=subscription_link),
-                        )
-                    ]
-                )
-            else:
-                keyboard.append([_fallback_connect_button()])
-        elif connect_mode == 'miniapp_custom':
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                        web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
-                    )
-                ]
-            )
-        elif connect_mode == 'link':
-            if subscription_link:
-                keyboard.append(
-                    [InlineKeyboardButton(text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'), url=subscription_link)]
-                )
-            else:
-                keyboard.append([_fallback_connect_button()])
-        elif connect_mode in ('happ_cryptolink', 'happ_incy_cryptolink'):
-            if subscription_link:
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                            callback_data=(
-                                'subscription_connect'
-                                if settings.is_multi_tariff_enabled()
-                                else 'open_subscription_link'
-                            ),
-                        )
-                    ]
-                )
-            else:
-                keyboard.append([_fallback_connect_button()])
-        else:
-            keyboard.append([_fallback_connect_button()])
-
-        happ_row = get_happ_download_button_row(texts)
-        if happ_row:
-            keyboard.append(happ_row)
-        sub_btn_text = (
-            texts.t('MY_SUBSCRIPTIONS_BUTTON', '📱 Мои подписки')
-            if settings.is_multi_tariff_enabled()
-            else texts.MENU_SUBSCRIPTION
-        )
-        paired_buttons.append(InlineKeyboardButton(text=sub_btn_text, callback_data='menu_subscription'))
-
-        # Добавляем кнопку докупки трафика для лимитированных подписок
-        # В режиме тарифов проверяем tariff_id (детальная проверка в хендлере)
-        # В классическом режиме проверяем глобальные настройки
-        show_traffic_topup = False
-        if subscription and not subscription.is_trial and (subscription.traffic_limit_gb or 0) > 0:
-            if settings.is_tariffs_mode() and getattr(subscription, 'tariff_id', None):
-                # Режим тарифов - показываем кнопку, проверка настроек тарифа в хендлере
-                show_traffic_topup = settings.BUY_TRAFFIC_BUTTON_VISIBLE
-            elif settings.is_traffic_topup_enabled() and not settings.is_traffic_topup_blocked():
-                # Классический режим - проверяем глобальные настройки
-                show_traffic_topup = settings.BUY_TRAFFIC_BUTTON_VISIBLE
-
-        if show_traffic_topup:
-            paired_buttons.append(
-                InlineKeyboardButton(
-                    text=texts.t('BUY_TRAFFIC_BUTTON', '📈 Докупить трафик'), callback_data='buy_traffic'
-                )
-            )
-
-    keyboard.append([InlineKeyboardButton(text=balance_button_text, callback_data='menu_balance')])
-
-    show_trial = (
-        not has_had_paid_subscription
-        and not has_active_subscription
-        and settings.TRIAL_DURATION_DAYS > 0
-        and settings.TRIAL_DISABLED_FOR != 'all'
-    )
-
-    show_buy = not has_active_subscription or not subscription_is_active
-    current_subscription = subscription
-    bool(
-        current_subscription
-        and not getattr(current_subscription, 'is_trial', False)
-        and getattr(current_subscription, 'is_active', False)
-    )
-    simple_purchase_button = None
-    if settings.SIMPLE_SUBSCRIPTION_ENABLED:
-        simple_purchase_button = InlineKeyboardButton(
-            text=texts.MENU_SIMPLE_SUBSCRIPTION,
-            callback_data='simple_subscription_purchase',
-        )
-
-    subscription_buttons: list[InlineKeyboardButton] = []
-
-    if show_trial:
-        subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_TRIAL, callback_data='menu_trial'))
-
-    if show_buy:
-        subscription_buttons.append(InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy'))
-
-    if subscription_buttons:
-        paired_buttons.extend(subscription_buttons)
-    if simple_purchase_button:
-        paired_buttons.append(simple_purchase_button)
-
-    if show_resume_checkout or has_saved_cart:
-        resume_callback = 'return_to_saved_cart' if has_saved_cart else 'subscription_resume_checkout'
-        paired_buttons.append(
+    keyboard: list[list[InlineKeyboardButton]] = [
+        [
             InlineKeyboardButton(
-                text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
-                callback_data=resume_callback,
+                text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                callback_data='menu_subscription',
             )
-        )
-
-    if custom_buttons:
-        for button in custom_buttons:
-            if isinstance(button, InlineKeyboardButton):
-                paired_buttons.append(button)
-
-    # Добавляем кнопки промокода и рефералов, учитывая настройки
-    paired_buttons.append(InlineKeyboardButton(text=texts.MENU_PROMOCODE, callback_data='menu_promocode'))
-
-    # Добавляем кнопку рефералов, только если программа включена
-    if settings.is_referral_program_enabled():
-        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_REFERRALS, callback_data='menu_referrals'))
-
-    # Добавляем кнопку конкурсов
-    if settings.CONTESTS_ENABLED and settings.CONTESTS_BUTTON_VISIBLE:
-        paired_buttons.append(
-            InlineKeyboardButton(text=texts.t('CONTESTS_BUTTON', '🎲 Конкурсы'), callback_data='contests_menu')
-        )
+        ],
+        [
+            InlineKeyboardButton(
+                text=(
+                    texts.t('MY_SUBSCRIPTIONS_BUTTON', '📱 Мои подписки')
+                    if settings.is_multi_tariff_enabled()
+                    else texts.MENU_SUBSCRIPTION
+                ),
+                callback_data='menu_subscription',
+            ),
+            InlineKeyboardButton(
+                text=texts.t('BALANCE_TOP_UP', '💳 Пополнить'),
+                callback_data='balance_topup',
+            ),
+        ],
+    ]
 
     try:
         from app.services.support_settings_service import SupportSettingsService
@@ -774,37 +636,23 @@ def get_main_menu_keyboard(
         support_enabled = settings.SUPPORT_MENU_ENABLED
 
     if support_enabled:
-        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_SUPPORT, callback_data='menu_support'))
+        keyboard.append([InlineKeyboardButton(text=texts.MENU_SUPPORT, callback_data='menu_support')])
 
-    # Добавляем кнопку активации
-    if settings.ACTIVATE_BUTTON_VISIBLE:
-        paired_buttons.append(InlineKeyboardButton(text=settings.ACTIVATE_BUTTON_TEXT, callback_data='activate_button'))
-
-    paired_buttons.append(
-        InlineKeyboardButton(
-            text=texts.t('MENU_INFO', 'ℹ️ Инфо'),
-            callback_data='menu_info',
+    # Не удаляем черновик checkout: оставляем условный пункт восстановления вне основной навигации.
+    if show_resume_checkout or has_saved_cart:
+        resume_callback = 'return_to_saved_cart' if has_saved_cart else 'subscription_resume_checkout'
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
+                    callback_data=resume_callback,
+                )
+            ]
         )
-    )
-
-    if settings.is_language_selection_enabled():
-        paired_buttons.append(InlineKeyboardButton(text=texts.MENU_LANGUAGE, callback_data='menu_language'))
-
-    for i in range(0, len(paired_buttons), 2):
-        row = paired_buttons[i : i + 2]
-        keyboard.append(row)
-
-    if settings.DEBUG:
-        logger.debug('DEBUG KEYBOARD: админ кнопка', is_admin=is_admin)
 
     if is_admin:
-        if settings.DEBUG:
-            logger.debug('DEBUG KEYBOARD: Админ кнопка ДОБАВЛЕНА')
         keyboard.append([InlineKeyboardButton(text=texts.MENU_ADMIN, callback_data='admin_panel')])
-    elif settings.DEBUG:
-        logger.debug('DEBUG KEYBOARD: Админ кнопка НЕ добавлена')
-    # Moderator access (limited support panel)
-    if (not is_admin) and is_moderator:
+    elif is_moderator:
         keyboard.append([InlineKeyboardButton(text='🧑‍⚖️ Модерация', callback_data='moderator_panel')])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -1112,11 +960,19 @@ def get_subscription_keyboard(
     subscription=None,
     gift_enabled: bool = False,
     has_premium_topup: bool = False,
+    show_trial: bool = False,
 ) -> InlineKeyboardMarkup:
     from app.config import settings
 
     texts = get_texts(language)
     keyboard = []
+
+    # Покупка и пробный период живут не на главном экране, а здесь: человеку
+    # без подписки больше некуда нажать, кроме как «Подключиться» → «Подписка».
+    if not has_subscription:
+        if show_trial:
+            keyboard.append([InlineKeyboardButton(text=texts.MENU_TRIAL, callback_data='menu_trial')])
+        keyboard.append([InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy')])
 
     # Sub ID suffix for multi-tariff callback routing
     _sub_suffix = (
