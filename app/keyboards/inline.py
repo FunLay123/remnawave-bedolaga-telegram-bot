@@ -18,7 +18,6 @@ from app.utils.pricing_utils import (
     format_period_description,
 )
 from app.utils.subscription_utils import (
-    get_display_subscription_link,
     get_happ_cryptolink_redirect_link,
 )
 
@@ -953,6 +952,10 @@ def get_insufficient_balance_keyboard(
     return keyboard
 
 
+# «Подарить подписку» скрыта по редизайну; хендлеры остались, кнопку можно вернуть.
+_GIFT_BUTTON_VISIBLE = False
+
+
 def get_subscription_keyboard(
     language: str = DEFAULT_LANGUAGE,
     has_subscription: bool = False,
@@ -982,79 +985,6 @@ def get_subscription_keyboard(
     )
 
     if has_subscription:
-        subscription_link = get_display_subscription_link(subscription) if subscription else None
-        if subscription_link:
-            connect_mode = settings.CONNECT_BUTTON_MODE
-
-            if connect_mode == 'miniapp_subscription':
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                            web_app=types.WebAppInfo(url=subscription_link),
-                        )
-                    ]
-                )
-            elif connect_mode == 'miniapp_custom':
-                if settings.MINIAPP_CUSTOM_URL:
-                    keyboard.append(
-                        [
-                            InlineKeyboardButton(
-                                text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                                web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
-                            )
-                        ]
-                    )
-                else:
-                    keyboard.append(
-                        [
-                            InlineKeyboardButton(
-                                text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                                callback_data=f'subscription_connect{_sub_suffix}',
-                            )
-                        ]
-                    )
-            elif connect_mode == 'link':
-                keyboard.append(
-                    [InlineKeyboardButton(text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'), url=subscription_link)]
-                )
-            elif connect_mode == 'happ_cryptolink':
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                            callback_data=f'open_subscription_link{_sub_suffix}',
-                        )
-                    ]
-                )
-            else:
-                keyboard.append(
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                            callback_data=f'subscription_connect{_sub_suffix}',
-                        )
-                    ]
-                )
-        elif settings.CONNECT_BUTTON_MODE == 'miniapp_custom':
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                        web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
-                    )
-                ]
-            )
-        else:
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                        callback_data=f'subscription_connect{_sub_suffix}',
-                    )
-                ]
-            )
-
         happ_row = get_happ_download_button_row(texts)
         if happ_row:
             keyboard.append(happ_row)
@@ -1115,38 +1045,39 @@ def get_subscription_keyboard(
                     ]
                 )
 
-            # Ряд: [Настройки] [Тариф] (если режим тарифов)
-            settings_row = [
-                InlineKeyboardButton(
-                    text=texts.t('SUBSCRIPTION_SETTINGS_BUTTON', '⚙️ Настройки'),
-                    callback_data='subscription_settings',
+            # «Настройки» показываем, только если в них есть что-то кроме «Назад»
+            # (управление устройствами и перевыпуск вынесены отдельными пунктами ниже).
+            settings_markup = get_updated_subscription_settings_keyboard(
+                language,
+                True,
+                tariff=tariff,
+                subscription=subscription,
+                is_legacy_subscription=is_legacy_subscription,
+            )
+            if len(settings_markup.inline_keyboard) > 1:
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            text=texts.t('SUBSCRIPTION_SETTINGS_BUTTON', '⚙️ Настройки'),
+                            callback_data='subscription_settings',
+                        )
+                    ]
                 )
-            ]
-            if settings.is_tariffs_mode() and subscription and not is_legacy_subscription:
-                # На истёкшей/отключённой подписке смена тарифа недоступна (хендлер её
-                # блокирует) — раньше кнопка «Тариф» всё равно показывалась и вела в тупик.
-                # Теперь для таких подписок показываем «Купить тариф» (покупку с нуля).
-                if getattr(subscription, 'actual_status', None) in ('expired', 'disabled'):
-                    settings_row.append(
+            # Вкладка «Тариф» скрыта. Для истёкшей/отключённой подписки оставляем
+            # «Купить тариф» — иначе из экрана некуда вернуться к покупке.
+            if (
+                settings.is_tariffs_mode()
+                and subscription
+                and not is_legacy_subscription
+                and getattr(subscription, 'actual_status', None) in ('expired', 'disabled')
+            ):
+                keyboard.append(
+                    [
                         InlineKeyboardButton(
                             text=texts.t('BUY_TARIFF_BUTTON', '📦 Купить тариф'), callback_data='menu_buy'
                         )
-                    )
-                else:
-                    # Для суточных тарифов переходим на список тарифов, для обычных - мгновенное переключение.
-                    # Бесплатный (0₽) тариф — тоже через список с выбором периода: prorated
-                    # instant-switch посчитал бы доплату за весь остаток бесплатных дней
-                    # и перенёс бы их на платный тариф вопреки TARIFF_SWITCH_RESET_FREE_DAYS.
-                    is_free_tariff = bool(
-                        tariff and getattr(tariff, 'is_free', False) and settings.TARIFF_SWITCH_RESET_FREE_DAYS
-                    )
-                    tariff_callback = 'tariff_switch' if (is_daily_tariff or is_free_tariff) else 'instant_switch'
-                    settings_row.append(
-                        InlineKeyboardButton(
-                            text=texts.t('CHANGE_TARIFF_BUTTON', '📦 Тариф'), callback_data=tariff_callback
-                        )
-                    )
-            keyboard.append(settings_row)
+                    ]
+                )
 
             # Кнопка докупки трафика для платных подписок
             # В режиме тарифов проверяем can_topup_traffic() у тарифа, в классическом - глобальные настройки
@@ -1175,7 +1106,30 @@ def get_subscription_keyboard(
                     ]
                 )
 
-    if gift_enabled:
+    if has_subscription:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.t('MANAGE_DEVICES_BUTTON', '🔧 Управление устройствами'),
+                    callback_data='subscription_manage_devices',
+                )
+            ]
+        )
+        if settings.is_subscription_revoke_enabled():
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text=texts.t('SUBSCRIPTION_REVOKE_BTN', '🔄 Перевыпустить подписку'),
+                        callback_data='subscription_revoke',
+                    )
+                ]
+            )
+
+    keyboard.append(
+        [InlineKeyboardButton(text=texts.t('MENU_PROMOCODE', '🎫 Промокод'), callback_data='menu_promocode')]
+    )
+
+    if gift_enabled and _GIFT_BUTTON_VISIBLE:
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -3503,25 +3457,6 @@ def get_updated_subscription_settings_keyboard(
                 InlineKeyboardButton(
                     text=texts.t('CHANGE_DEVICES_BUTTON', '📱 Изменить устройства'),
                     callback_data='subscription_change_devices',
-                )
-            ]
-        )
-
-    keyboard.append(
-        [
-            InlineKeyboardButton(
-                text=texts.t('MANAGE_DEVICES_BUTTON', '🔧 Управление устройствами'),
-                callback_data='subscription_manage_devices',
-            )
-        ]
-    )
-
-    if settings.is_subscription_revoke_enabled():
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text=texts.t('SUBSCRIPTION_REVOKE_BTN', '🔄 Перевыпустить подписку'),
-                    callback_data='subscription_revoke',
                 )
             ]
         )

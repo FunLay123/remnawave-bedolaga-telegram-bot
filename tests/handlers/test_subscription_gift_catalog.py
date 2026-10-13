@@ -556,3 +556,11 @@ class TestGiftHandlerRegistrationAndCollision:
         registered_filters = [h.filters for h in callback_handlers]
         assert len(registered_filters) >= 10
         assert len(dp.message.handlers) >= 1
+
+
+@pytest.fixture(autouse=True)
+def _gift_button_visible(monkeypatch):
+    """Кнопка «Подарить подписку» скрыта редизайном; здесь проверяем саму логику показа."""
+    import app.keyboards.inline as inline_module
+
+    monkeypatch.setattr(inline_module, '_GIFT_BUTTON_VISIBLE', True)

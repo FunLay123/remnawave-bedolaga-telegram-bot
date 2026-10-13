@@ -36,7 +36,6 @@ def _patch_tariffs_mode(monkeypatch):
     # class — patch them on the class (the singleton instance can't take new attrs).
     monkeypatch.setattr(Settings, 'is_tariffs_mode', lambda self: True)
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: True)
-    monkeypatch.setattr(kb, 'get_display_subscription_link', lambda sub: None)
 
 
 def test_expired_sub_offers_buy_not_switch(monkeypatch):
@@ -60,21 +59,21 @@ def test_disabled_sub_offers_buy_not_switch(monkeypatch):
     assert 'instant_switch' not in cbs
 
 
-def test_active_sub_keeps_change_tariff(monkeypatch):
+def test_active_sub_hides_change_tariff(monkeypatch):
     _patch_tariffs_mode(monkeypatch)
     markup = kb.get_subscription_keyboard(
         'ru', has_subscription=True, is_trial=False, subscription=_fake_sub('active', 'active')
     )
     cbs = _callbacks(markup)
-    assert 'instant_switch' in cbs  # normal switch flow untouched
+    assert 'instant_switch' not in cbs  # вкладка «Тариф» скрыта редизайном
     assert 'menu_buy' not in cbs
 
 
-def test_limited_sub_keeps_change_tariff(monkeypatch):
+def test_limited_sub_hides_change_tariff(monkeypatch):
     """'limited' = traffic exhausted but time remaining (end_date>now) — switch still valid."""
     _patch_tariffs_mode(monkeypatch)
     markup = kb.get_subscription_keyboard(
         'ru', has_subscription=True, is_trial=False, subscription=_fake_sub('limited', 'limited')
     )
     cbs = _callbacks(markup)
-    assert 'instant_switch' in cbs
+    assert 'instant_switch' not in cbs

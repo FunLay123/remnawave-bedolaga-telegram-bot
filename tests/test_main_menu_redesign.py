@@ -99,3 +99,30 @@ def test_topup_entry_is_a_callback_not_a_balance_screen(monkeypatch):
     assert isinstance(topup, InlineKeyboardButton)
     assert topup.url is None
     assert topup.web_app is None
+
+
+def test_subscription_screen_hides_gift_and_tariff_tab_and_exposes_extracted_items(monkeypatch):
+    """Подарок и «Тариф» скрыты; устройства, перевыпуск и промокод — отдельные пункты."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(settings, 'SUBSCRIPTION_REVOKE_ENABLED', True, raising=False)
+    monkeypatch.setattr(type(settings), 'is_subscription_revoke_enabled', lambda self: True)
+    sub = SimpleNamespace(
+        id=1,
+        tariff=None,
+        tariff_id=None,
+        status='active',
+        actual_status='active',
+        traffic_limit_gb=0,
+        end_date=None,
+        is_daily_paused=False,
+    )
+
+    keyboard = get_subscription_keyboard('ru', has_subscription=True, subscription=sub, gift_enabled=True)
+    callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
+
+    assert 'subscription_gift' not in callbacks
+    assert 'instant_switch' not in callbacks
+    assert 'subscription_connect' not in callbacks
+    for expected in ('subscription_manage_devices', 'subscription_revoke', 'menu_promocode'):
+        assert expected in callbacks

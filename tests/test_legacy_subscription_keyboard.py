@@ -46,7 +46,6 @@ def _patch_mode(monkeypatch, *, tariffs: bool) -> None:
 
     monkeypatch.setattr(Settings, 'is_tariffs_mode', lambda self: tariffs)
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: tariffs)
-    monkeypatch.setattr(kb, 'get_display_subscription_link', lambda sub: None)
 
 
 def _keyboard(sub) -> list[str]:
@@ -82,7 +81,7 @@ def test_subscription_with_tariff_keeps_renew_and_autopay(monkeypatch):
 
     assert 'subscription_extend' in cbs
     assert 'subscription_autopay' in cbs
-    assert 'instant_switch' in cbs
+    assert 'instant_switch' not in cbs, 'вкладка «Тариф» скрыта'
 
 
 def test_classic_mode_subscription_keeps_renew(monkeypatch):
@@ -128,7 +127,7 @@ def test_legacy_subscription_settings_offer_no_classic_addons(monkeypatch):
     assert 'subscription_switch_traffic' not in cbs
     assert 'subscription_reset_traffic' not in cbs
     assert 'subscription_change_devices' not in cbs
-    assert 'subscription_manage_devices' in cbs, 'управление устройствами — не докупка, остаётся'
+    assert 'subscription_manage_devices' not in cbs, 'управление устройствами вынесено на экран подписки'
 
 
 def test_classic_subscription_settings_keep_classic_addons(monkeypatch):

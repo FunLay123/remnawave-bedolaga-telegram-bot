@@ -185,3 +185,11 @@ class TestGiftButtonFallbacks:
         assert texts.t('GIFT_RETURN_TO_CART_BUTTON', '🎁 Вернуться к подарку') == '🎁 Вернуться к подарку'
         assert texts.t('GIFT_ENTER_CODE_BUTTON', '🎁 Активировать код') == '🎁 Активировать код'
         assert texts.t('GIFT_ACTIVATION_CANCEL_BUTTON', '❌ Отмена') == '❌ Отмена'
+
+
+@pytest.fixture(autouse=True)
+def _gift_button_visible(monkeypatch):
+    """Кнопка «Подарить подписку» скрыта редизайном; здесь проверяем саму логику показа."""
+    import app.keyboards.inline as inline_module
+
+    monkeypatch.setattr(inline_module, '_GIFT_BUTTON_VISIBLE', True)

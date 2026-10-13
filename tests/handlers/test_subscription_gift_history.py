@@ -495,3 +495,11 @@ class TestSourceNeutralPresentation:
 
         # Must contain back button
         assert _callbacks(kb) == ['gift_my_back']
+
+
+@pytest.fixture(autouse=True)
+def _gift_button_visible(monkeypatch):
+    """Кнопка «Подарить подписку» скрыта редизайном; здесь проверяем саму логику показа."""
+    import app.keyboards.inline as inline_module
+
+    monkeypatch.setattr(inline_module, '_GIFT_BUTTON_VISIBLE', True)

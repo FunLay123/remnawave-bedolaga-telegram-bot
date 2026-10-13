@@ -74,40 +74,18 @@ def _patch_tariffs_mode(monkeypatch):
 
     monkeypatch.setattr(Settings, 'is_tariffs_mode', lambda self: True)
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: True)
-    monkeypatch.setattr(kb, 'get_display_subscription_link', lambda sub: None)
 
 
-def test_keyboard_free_tariff_routes_to_period_switch(monkeypatch):
+def test_keyboard_has_no_tariff_tab(monkeypatch):
+    """Вкладка «Тариф» скрыта редизайном: ни бесплатный, ни платный тариф не дают ей входа."""
     _patch_tariffs_mode(monkeypatch)
-    monkeypatch.setattr(kb.settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', True)
-    markup = kb.get_subscription_keyboard(
-        'ru', has_subscription=True, is_trial=False, subscription=_fake_sub(FREE_TARIFF)
-    )
-    cbs = _callbacks(markup)
-    assert 'tariff_switch' in cbs  # флоу с выбором периода (полная цена, сброс дней)
-    assert 'instant_switch' not in cbs
-
-
-def test_keyboard_free_tariff_keeps_instant_when_reset_disabled(monkeypatch):
-    """TARIFF_SWITCH_RESET_FREE_DAYS=false — админ явно разрешил перенос бесплатных
-    дней, prorated instant-switch остаётся доступен (старое поведение)."""
-    _patch_tariffs_mode(monkeypatch)
-    monkeypatch.setattr(kb.settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', False)
-    markup = kb.get_subscription_keyboard(
-        'ru', has_subscription=True, is_trial=False, subscription=_fake_sub(FREE_TARIFF)
-    )
-    assert 'instant_switch' in _callbacks(markup)
-
-
-def test_keyboard_paid_tariff_keeps_instant_switch(monkeypatch):
-    _patch_tariffs_mode(monkeypatch)
-    monkeypatch.setattr(kb.settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', True)
-    markup = kb.get_subscription_keyboard(
-        'ru', has_subscription=True, is_trial=False, subscription=_fake_sub(PAID_TARIFF)
-    )
-    cbs = _callbacks(markup)
-    assert 'instant_switch' in cbs  # платный источник — prorated-флоу не тронут
-    assert 'tariff_switch' not in cbs
+    for tariff in (FREE_TARIFF, PAID_TARIFF):
+        markup = kb.get_subscription_keyboard(
+            'ru', has_subscription=True, is_trial=False, subscription=_fake_sub(tariff)
+        )
+        cbs = _callbacks(markup)
+        assert 'instant_switch' not in cbs
+        assert 'tariff_switch' not in cbs
 
 
 # ── Хендлеры instant-switch: редирект бесплатного источника ──
