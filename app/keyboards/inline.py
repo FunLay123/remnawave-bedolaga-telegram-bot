@@ -608,7 +608,9 @@ def get_main_menu_keyboard(
         [
             InlineKeyboardButton(
                 text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
-                callback_data='menu_subscription',
+                # С подпиской — сразу выбор приложения; без неё подключаться не к чему,
+                # ведём на экран подписки, где есть покупка и пробный период.
+                callback_data='subscription_connect' if has_active_subscription else 'menu_subscription',
             )
         ],
         [
@@ -2194,7 +2196,7 @@ def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LAN
             ],
         )
 
-    keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_balance')])
+    keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
     _apply_payment_name_overrides(keyboard)
 

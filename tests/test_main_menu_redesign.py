@@ -36,7 +36,7 @@ def test_main_menu_has_connect_subscription_topup_and_support_rows(monkeypatch):
     keyboard = get_main_menu_keyboard(language='ru', has_active_subscription=True, subscription_is_active=True)
 
     assert _callbacks(keyboard)[:3] == [
-        ['menu_subscription'],
+        ['subscription_connect'],
         ['menu_subscription', 'balance_topup'],
         ['menu_support'],
     ]
@@ -126,3 +126,12 @@ def test_subscription_screen_hides_gift_and_tariff_tab_and_exposes_extracted_ite
     assert 'subscription_connect' not in callbacks
     for expected in ('subscription_manage_devices', 'subscription_revoke', 'menu_promocode'):
         assert expected in callbacks
+
+
+def test_connect_without_subscription_leads_to_subscription_screen(monkeypatch):
+    """Без подписки подключаться не к чему: кнопка ведёт туда, где можно купить или взять пробный период."""
+    _prepare_menu(monkeypatch)
+
+    keyboard = get_main_menu_keyboard(language='ru', has_active_subscription=False)
+
+    assert _callbacks(keyboard)[0] == ['menu_subscription']

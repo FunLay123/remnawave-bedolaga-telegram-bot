@@ -337,7 +337,7 @@ async def show_balance_history(callback: types.CallbackQuery, db_user: User, db:
         pagination_row = get_pagination_keyboard(page, total_pages, 'balance_history', db_user.language)
         keyboard.extend(pagination_row)
 
-    keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='menu_balance')])
+    keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
     await callback.message.edit_text(
         text, reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard), parse_mode='HTML'
@@ -365,7 +365,7 @@ async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db:
         keyboard = []
         if support_url:
             keyboard.append([types.InlineKeyboardButton(text='🆘 Обжаловать', url=support_url)])
-        keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='menu_balance')])
+        keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
         await callback.message.edit_text(
             f'🚫 <b>Пополнение ограничено</b>\n\n{reason}\n\n'
