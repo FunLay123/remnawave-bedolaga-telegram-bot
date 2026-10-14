@@ -3067,7 +3067,7 @@ def get_connection_guide_keyboard(
     sub_id: int | None = None,
 ) -> InlineKeyboardMarkup:
     texts = get_texts(language)
-    back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'menu_subscription'
+    back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'back_to_menu'
 
     keyboard: list[list[InlineKeyboardButton]] = []
 

@@ -76,7 +76,7 @@ async def handle_connect_subscription(
         return
     subscription_link = get_display_subscription_link(subscription)
     hide_subscription_link = settings.should_hide_subscription_link()
-    back_cb = f'sm:{sub_id}' if settings.is_multi_tariff_enabled() else 'menu_subscription'
+    back_cb = f'sm:{sub_id}' if settings.is_multi_tariff_enabled() else 'back_to_menu'
 
     if not subscription_link:
         await callback.answer(
@@ -336,7 +336,7 @@ async def handle_open_subscription_link(
     if subscription is None:
         return
     subscription_link = get_display_subscription_link(subscription)
-    back_cb = f'sm:{sub_id}' if settings.is_multi_tariff_enabled() else 'menu_subscription'
+    back_cb = f'sm:{sub_id}' if settings.is_multi_tariff_enabled() else 'back_to_menu'
 
     if not subscription_link:
         await callback.answer(
