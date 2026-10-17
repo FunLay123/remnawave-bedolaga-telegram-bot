@@ -47,7 +47,6 @@ from app.database.crud.user_message import get_random_active_message
 from app.database.models import User
 from app.localization.texts import Texts
 from app.utils.cache import cache
-from app.utils.formatters import format_username_link
 from app.utils.logo_fingerprint import logo_version
 from app.utils.miniapp_buttons import build_miniapp_startapp_url
 from app.utils.promo_offer import build_promo_offer_hint, build_test_access_hint
@@ -571,49 +570,60 @@ def _build_subscriptions_table(subscriptions, texts) -> str:
     return f'<table bordered striped>{"".join(rows)}</table>'
 
 
-async def _build_single_subscription_block(user: User, texts, db: AsyncSession) -> str:
-    # Статусные строки берём из того же builder-а, что и классическое меню, —
-    # единый источник правды для формулировок (см. tests/test_start_menu_text_consistency.py).
-    from app.handlers.menu import _get_subscription_status
-
-    subscription = getattr(user, 'subscription', None)
+def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
+    """Одна строка статуса: «✅ Активна · осталось 12 дн. (до 14.11.2026)»."""
     if not subscription:
-        return f'<p>{_rich_text(texts.t("SUB_STATUS_NONE", "❌ Отсутствует"))}</p>'
+        return texts.t('MAIN_MENU_MIN_NONE', 'Нет активной подписки')
 
-    is_daily_tariff = False
-    tariff_line = ''
+    actual_status = (subscription.actual_status or '').lower()
+    end_date = getattr(subscription, 'end_date', None)
+    end_text = format_local_datetime(end_date, '%d.%m.%Y') if end_date else ''
+
+    if actual_status == 'pending':
+        return texts.t('MAIN_MENU_MIN_NONE', 'Нет активной подписки')
+    if actual_status == 'disabled':
+        return texts.t('MAIN_MENU_MIN_DISABLED', '⚫ Отключена')
+    if actual_status == 'expired':
+        return texts.t('MAIN_MENU_MIN_EXPIRED', '⛔ Закончилась {date}').replace('{date}', end_text or '—')
+
+    if actual_status == 'limited':
+        label = texts.t('MAIN_MENU_MIN_LIMITED', '⚠️ Трафик исчерпан')
+    elif getattr(subscription, 'is_trial', False) or actual_status == 'trial':
+        label = texts.t('MAIN_MENU_MIN_TRIAL', '🎁 Тестовая')
+    elif actual_status == 'active':
+        label = texts.t('MAIN_MENU_MIN_ACTIVE', '✅ Активна')
+    else:
+        return texts.t('SUB_STATUS_UNKNOWN', '❓ Неизвестно')
+
+    if is_daily_tariff or not end_date:
+        return label
+
+    days_left = local_days_until(end_date, datetime.now(UTC))
+    if days_left > 1:
+        left = texts.t('MAIN_MENU_MIN_DAYS_LEFT', 'осталось {days} дн.').replace('{days}', str(days_left))
+    elif days_left == 1:
+        left = texts.t('MAIN_MENU_MIN_TOMORROW', 'истекает завтра')
+    else:
+        left = texts.t('MAIN_MENU_MIN_TODAY', 'истекает сегодня')
+    return f'{label} · {left} ({end_text})'
+
+
+async def _build_single_subscription_block(user: User, texts, db: AsyncSession) -> str:
+    """Минималистичный блок: статус, расход трафика, белые списки, баланс."""
+    subscription = getattr(user, 'subscription', None)
+
     tariff = None
-    if settings.is_tariffs_mode() and subscription.tariff_id:
+    is_daily_tariff = False
+    if subscription and settings.is_tariffs_mode() and subscription.tariff_id:
         try:
             tariff = await get_tariff_by_id(db, subscription.tariff_id)
         except Exception as error:
-            tariff = None
             logger.debug('Не удалось загрузить тариф для rich-меню', error=str(error))
-        if tariff:
-            is_daily_tariff = bool(getattr(tariff, 'is_daily', False))
-            tariff_template = texts.t('MAIN_MENU_RICH_TARIFF', '📦 Тариф: {tariff}')
-            tariff_line = _rich_text(tariff_template).replace('{tariff}', f'<b>{html.escape(tariff.name)}</b>')
+        is_daily_tariff = bool(tariff and getattr(tariff, 'is_daily', False))
 
-    status_text = _get_subscription_status(user, texts, is_daily_tariff)
-    lines = [_rich_text(line) for line in status_text.split('\n') if line.strip()]
-    if tariff_line:
-        lines.append(tariff_line)
+    lines = [_rich_text(_minimal_status_line(subscription, texts, is_daily_tariff))]
 
-    actual_status = (subscription.actual_status or '').lower()
-    # Полоска срока подписки отключена. Чтобы вернуть — раскомментировать блок.
-    # current_time = datetime.now(UTC)
-    # end_date = getattr(subscription, 'end_date', None)
-    # start_date = getattr(subscription, 'start_date', None)
-    # if not is_daily_tariff and end_date and end_date > current_time and actual_status in {'active', 'trial'}:
-    #    seconds_left = (end_date - current_time).total_seconds()
-    #    total_seconds = (end_date - start_date).total_seconds() if start_date else 0
-    #    relative_template = texts.t('MAIN_MENU_RICH_EXPIRES_RELATIVE', '⏳ истекает {when}')
-    #    days_left_text = texts.t('MAIN_MENU_RICH_DAYS_LEFT', 'осталось {days} дн.').replace(
-    #        '{days}', str(local_days_until(end_date, current_time))
-    #    )
-    #    relative_line = _rich_text(relative_template).replace('{when}', _tg_time(end_date, 'r', days_left_text))
-    #    lines.append(f'<code>{_progress_bar(seconds_left, total_seconds)}</code> {relative_line}')
-
+    actual_status = ((subscription.actual_status if subscription else '') or '').lower()
     if actual_status in {'active', 'trial', 'limited'}:
         premium_lines: list[str] = []
         if tariff is not None:
@@ -626,23 +636,14 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         if premium_lines:
             # Известное ограничение (docs/premium-traffic-limits.md): панель считает
             # расход на весь аккаунт, и в общей строке сидит трафик премиум-сквадов.
-            # Пока учёт не разделён, честно говорим об этом рядом с цифрой.
             traffic_text += texts.t('MAIN_MENU_RICH_TRAFFIC_INCLUDES_PREMIUM', ' — включая белые списки')
         traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '📊 Трафик: {traffic}')
         lines.append(_rich_text(traffic_template).replace('{traffic}', html.escape(traffic_text)))
         lines.extend(premium_lines)
-        device_limit = getattr(subscription, 'device_limit', None)
-        if device_limit is not None:
-            devices_template = texts.t('MAIN_MENU_RICH_DEVICES', '📱 Устройства: {devices}')
-            lines.append(_rich_text(devices_template).replace('{devices}', Texts.format_device_limit(device_limit)))
-        # connect_link = _connect_link(subscription, texts)
-        # if connect_link:
-        #    lines.append(connect_link)
 
-    if actual_status == 'expired':
-        renew_link = _renew_link(getattr(subscription, 'id', None), texts)
-        if renew_link:
-            lines.append(renew_link)
+    balance_template = texts.t('MAIN_MENU_RICH_BALANCE', '💰 Баланс: {balance}')
+    balance_value = f'<b>{html.escape(settings.format_price(user.balance_kopeks))}</b>'
+    lines.append(_rich_text(balance_template).replace('{balance}', balance_value))
 
     return '<blockquote>' + '<br>'.join(lines) + '</blockquote>'
 
@@ -654,14 +655,6 @@ async def build_main_menu_rich_html(user: User, texts, db: AsyncSession) -> str:
     logo_url = _resolve_rich_logo_url()
     if logo_url:
         blocks.append(f'<img src="{html.escape(logo_url, quote=True)}"/>')
-
-    # full_name подставляет username, когда имени нет (см. User.full_name), — только
-    # в этом случае показываем логин ссылкой на профиль, а не голым текстом.
-    username = getattr(user, 'username', None)
-    has_name = bool(getattr(user, 'first_name', None) or getattr(user, 'last_name', None))
-    user_name = format_username_link(username) if username and not has_name else html.escape(user.full_name or '')
-    blocks.append(f'<h4>👤 {user_name}</h4>')
-    blocks.append('<hr/>')
 
     if settings.is_multi_tariff_enabled():
         heading = texts.t('MAIN_MENU_RICH_SUBSCRIPTIONS_HEADING', '📱 Подписки')
@@ -678,17 +671,12 @@ async def build_main_menu_rich_html(user: User, texts, db: AsyncSession) -> str:
             blocks.append(f'<h6>{_rich_text(heading)}</h6>')
             blocks.append(subscription_block)
     else:
-        heading = texts.t('MAIN_MENU_RICH_SUBSCRIPTION_HEADING', '📱 Подписка')
-        blocks.append(f'<h6>{_rich_text(heading)}</h6>')
         blocks.append(await _build_single_subscription_block(user, texts, db))
 
-    trial_link = _trial_offer_link(user, texts)
-    if trial_link:
-        blocks.append(f'<p>{trial_link}</p>')
-
-    balance_template = texts.t('MAIN_MENU_RICH_BALANCE', '💰 Баланс: {balance}')
-    balance_value = f'<b>{html.escape(settings.format_price(user.balance_kopeks))}</b>'
-    blocks.append(f'<p>{_rich_text(balance_template).replace("{balance}", balance_value)}</p>')
+    if settings.is_multi_tariff_enabled():
+        balance_template = texts.t('MAIN_MENU_RICH_BALANCE', '💰 Баланс: {balance}')
+        balance_value = f'<b>{html.escape(settings.format_price(user.balance_kopeks))}</b>'
+        blocks.append(f'<p>{_rich_text(balance_template).replace("{balance}", balance_value)}</p>')
 
     hint_sections: list[str] = []
     try:
@@ -720,10 +708,6 @@ async def build_main_menu_rich_html(user: User, texts, db: AsyncSession) -> str:
         # Rich-HTML живёт по правилам HTML: перенос строки — только через <br>.
         random_message_html = _sanitize_rich_inline(random_message).replace('\n', '<br>')
         blocks.append(f'<blockquote>{random_message_html}</blockquote>')
-
-    blocks.append('<hr/>')
-    action_prompt = texts.t('MAIN_MENU_ACTION_PROMPT', 'Выберите действие:')
-    blocks.append(f'<footer>{_rich_text(action_prompt)}</footer>')
 
     return ''.join(blocks)
 

@@ -107,7 +107,7 @@ class HostileTexts(DummyTexts):
     """Тексты из админки — доверенный, но не безграничный источник разметки."""
 
     def t(self, key, default=None):
-        if key == 'MAIN_MENU_ACTION_PROMPT':
+        if key == 'MAIN_MENU_RICH_BALANCE':
             return (
                 '<script>alert(1)</script>'
                 '<tg-emoji emoji-id="1" onload="steal()">💥</tg-emoji>'
@@ -135,16 +135,11 @@ async def test_builder_keeps_premium_emoji_from_operator_texts(monkeypatch):
     html_out = await rich_menu.build_main_menu_rich_html(user, PremiumEmojiTexts(), AsyncMock())
 
     assert '&lt;tg-emoji' not in html_out, 'тег премиум-эмодзи ушёл клиенту экранированным'
-    # заголовок, статус, устройства, баланс, футер
-    assert html_out.count(f'<tg-emoji emoji-id="{PremiumEmojiTexts.EMOJI_ID}">') == 5
-    for fragment in ('Подписка', 'Активна', 'Устройства:', 'Баланс:', 'Выберите действие:'):
-        assert fragment in html_out
-    # плейсхолдеры шаблонов по-прежнему подставляются
+    # в минималистичном меню из оформляемых текстов остался только баланс
+    assert html_out.count(f'<tg-emoji emoji-id="{PremiumEmojiTexts.EMOJI_ID}">') == 1
+    assert 'Баланс:' in html_out
+    # плейсхолдер шаблона по-прежнему подставляется
     assert '{balance}' not in html_out
-    assert '{devices}' not in html_out
-    # ...а данные пользователя остаются экранированными
-    assert 'Егор &lt;script&gt;' in html_out
-    assert '<script>' not in html_out
 
 
 async def test_builder_strips_disallowed_markup_from_operator_texts(monkeypatch):
@@ -162,24 +157,6 @@ async def test_builder_strips_disallowed_markup_from_operator_texts(monkeypatch)
     assert 'javascript:' not in html_out
     # разрешённый тег остаётся — но без постороннего атрибута
     assert '<tg-emoji emoji-id="1">💥</tg-emoji>' in html_out
-
-
-async def test_unlimited_devices_shown_as_infinity_not_hidden(monkeypatch):
-    """device_limit = 0 (HWID выключен) — безлимит, а не «нет устройств».
-
-    Регресс: строка про устройства пряталась целиком (`if device_limit:`),
-    поэтому у юзера с выключенным HWID её просто не было в меню.
-    """
-    _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
-    subscription = _make_subscription(datetime.now(UTC))
-    subscription.device_limit = 0
-
-    html_out = await rich_menu.build_main_menu_rich_html(_make_user(subscription), DummyTexts(), AsyncMock())
-
-    assert 'Устройства: ∞' in html_out
-    assert 'Устройства: 0' not in html_out
 
 
 async def test_unlimited_devices_in_multi_tariff_table(monkeypatch):
@@ -201,86 +178,57 @@ async def test_unlimited_devices_in_multi_tariff_table(monkeypatch):
 
 
 async def test_builder_single_subscription_structure(monkeypatch):
+    """Минималистичное меню: одна цитата — статус со сроком, трафик, баланс; без шапки и подвала."""
     _patch_content_sources(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
     monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
 
     now = datetime.now(UTC)
-    subscription = _make_subscription(now)
-    user = _make_user(subscription)
+    subscription = _make_subscription(now, days_left=12)
+    html_out = await rich_menu.build_main_menu_rich_html(_make_user(subscription), DummyTexts(), AsyncMock())
 
-    html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
-
-    # Имя экранировано, сырых тегов пользователя нет
-    assert 'Егор &lt;script&gt;' in html_out
-    assert '<script>' not in html_out
-    # Структура: заголовок, блок подписки, баланс, футер
-    assert html_out.startswith('<h4>')
-    assert '<blockquote>' in html_out
-    assert '<footer>' in html_out
-    # Дата окончания — через tg-time с relative-форматом и unix конца подписки
-    assert f'unix="{int(subscription.end_date.timestamp())}"' in html_out
-    assert 'format="r"' in html_out
-    # Прогресс-бар остатка дней
-    assert '<code>[' in html_out
-    # Баланс из format_price
+    assert html_out.startswith('<blockquote>✅ Активна · осталось 1')
+    assert '<h4>' not in html_out
+    assert '<footer>' not in html_out
+    assert '<hr/>' not in html_out
+    assert 'Егор' not in html_out
+    assert '📊 Трафик: 12.5 ГБ / 100 ГБ' in html_out
     assert '1250' in html_out
+    assert 'Устройства' not in html_out
+    assert html_out.count('(') == 1  # дата окончания в скобках
 
 
-async def test_builder_links_username_used_instead_of_name(monkeypatch):
-    """Без имени full_name подставляет логин — показываем его ссылкой на профиль.
-
-    skip_entity_detection=True гасит автоопределение @упоминаний, поэтому голый
-    логин в шапке был бы мёртвым текстом.
-    """
+@pytest.mark.parametrize(
+    ('status', 'days_left', 'expected'),
+    [
+        ('active', 12, '✅ Активна · осталось 12 дн.'),
+        ('active', 1, '✅ Активна · истекает завтра'),
+        ('expired', -3, '⛔ Закончилась'),
+        ('disabled', 5, '⚫ Отключена'),
+        ('limited', 5, '⚠️ Трафик исчерпан · осталось 5 дн.'),
+    ],
+)
+async def test_minimal_status_line_per_state(monkeypatch, status, days_left, expected):
     _patch_content_sources(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
     monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
+    subscription = _make_subscription(datetime.now(UTC) + timedelta(hours=1), status=status, days_left=days_left)
 
-    user = _make_user(None)
-    user.first_name = None
-    user.last_name = None
-    user.username = 'durov'
-    user.full_name = 'durov'
+    html_out = await rich_menu.build_main_menu_rich_html(_make_user(subscription), DummyTexts(), AsyncMock())
 
-    html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
-
-    assert html_out.startswith('<h4>👤 <a href="https://t.me/durov">@durov</a></h4>')
+    assert expected in html_out
 
 
-async def test_builder_keeps_plain_name_when_user_has_one(monkeypatch):
-    """Имя есть — шапка остаётся обычным текстом, ссылка на логин не подставляется."""
+async def test_minimal_menu_without_subscription_has_no_trial_link(monkeypatch):
+    """Пробный период переехал на экран подписки — в главном сообщении ссылки на него нет."""
     _patch_content_sources(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
+    monkeypatch.setattr(settings, 'TRIAL_DURATION_DAYS', 3, raising=False)
 
-    user = _make_user(None)
-    user.first_name = 'Егор'
-    user.last_name = None
-    user.username = 'durov'
+    html_out = await rich_menu.build_main_menu_rich_html(_make_user(None, trial_used=False), DummyTexts(), AsyncMock())
 
-    html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
-
-    assert html_out.startswith('<h4>👤 Егор &lt;script&gt;</h4>')
-    assert 't.me/durov' not in html_out
-
-
-async def test_builder_survives_user_without_username_attribute(monkeypatch):
-    """Шапка не должна падать на объекте без username — иначе меню молча уедет в классику.
-
-    try_send_rich_main_menu ловит любое исключение сборки и возвращает False, так что
-    AttributeError здесь стоил бы rich-меню без единой записи в логе о причине.
-    """
-    _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
-
-    user = _make_user(None)
-    assert not hasattr(user, 'username')
-
-    html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
-
-    assert html_out.startswith('<h4>👤 Егор &lt;script&gt;</h4>')
+    assert html_out.startswith('<blockquote>Нет активной подписки<br>')
+    assert 'trial' not in html_out
 
 
 async def test_builder_multi_tariff_table(monkeypatch):
@@ -314,8 +262,7 @@ async def test_builder_without_subscription(monkeypatch):
     user = _make_user(None)
     html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
 
-    assert '❌ Отсутствует' in html_out
-    assert '<footer>' in html_out
+    assert 'Нет активной подписки' in html_out
 
 
 async def test_builder_hints_in_details_and_random_message_sanitized(monkeypatch):
@@ -525,8 +472,7 @@ async def test_try_send_happy_path_sends_rich_message(monkeypatch):
     kwargs = bot.send_rich_message.await_args.kwargs
     assert kwargs['chat_id'] == 100
     assert kwargs['reply_markup'] is keyboard
-    assert '<h4>' in kwargs['rich_message'].html
-    assert '<footer>' in kwargs['rich_message'].html
+    assert 'Нет активной подписки' in kwargs['rich_message'].html
     assert kwargs['rich_message'].skip_entity_detection is True
 
 
@@ -745,40 +691,6 @@ async def test_expired_subscription_no_renew_link_outside_cabinet_mode(monkeypat
     assert 'Продлить' not in html_out
 
 
-async def test_single_mode_expired_renew_link(monkeypatch):
-    _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_cabinet_mode', lambda self: True)
-    monkeypatch.setattr(
-        rich_menu,
-        'build_miniapp_startapp_url',
-        lambda start_param: f'https://t.me/bot/cab?startapp={start_param}',
-    )
-
-    now = datetime.now(UTC)
-    expired = _make_subscription(now, status='expired', days_left=-3)
-
-    html_out = await rich_menu.build_main_menu_rich_html(_make_user(expired), DummyTexts(), AsyncMock())
-
-    assert 'startapp=renew_7' in html_out
-
-
-async def test_usage_traffic_and_devices_displayed(monkeypatch):
-    """Активная подписка показывает текущий трафик и лимит устройств."""
-    _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
-
-    now = datetime.now(UTC)
-    user = _make_user(_make_subscription(now))
-
-    html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
-
-    assert '📊 Трафик: 12.5 ГБ / 100 ГБ' in html_out
-    assert '📱 Устройства: 3' in html_out
-
-
 async def test_usage_row_in_multi_tariff_table(monkeypatch):
     _patch_content_sources(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: True)
@@ -920,7 +832,7 @@ async def test_logo_can_be_disabled_explicitly(monkeypatch, tmp_path, value):
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(None), DummyTexts(), AsyncMock())
 
     assert '<img' not in html_out
-    assert html_out.startswith('<h4>')  # меню собралось, просто без шапки
+    assert html_out.startswith('<blockquote>')  # меню собралось, просто без логотипа
 
 
 async def test_non_http_logo_value_disables_logo_instead_of_breaking_menu(monkeypatch, tmp_path):
@@ -1021,63 +933,6 @@ async def test_connect_link_hidden_when_subscription_link_hidden(monkeypatch):
 
     assert 'Подключить' not in html_out
     assert 'sub.example.com' not in html_out
-
-
-async def test_connect_link_uses_happ_redirect_in_happ_mode(monkeypatch):
-    """В happ-режиме подключение идёт через https-обёртку редиректа, не через сырую happ://."""
-    _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_happ_cryptolink_mode', lambda self: True)
-    monkeypatch.setattr(
-        rich_menu,
-        'get_happ_cryptolink_redirect_link',
-        lambda link: f'https://redirect.example.com/?l={link}' if link else None,
-    )
-
-    now = datetime.now(UTC)
-    sub = _make_subscription(now)
-    sub.subscription_crypto_link = 'happ://crypt4/xyz'
-
-    html_out = await rich_menu.build_main_menu_rich_html(_make_user(sub), DummyTexts(), AsyncMock())
-
-    assert 'https://redirect.example.com/?l=happ://crypt4/xyz' in html_out
-    assert 'href="happ://' not in html_out
-
-
-async def test_trial_offer_free_deeplink(monkeypatch):
-    """Новый юзер без триала: ссылка t.me/<bot>?start=trial (бесплатный триал)."""
-    _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_trial_paid_activation_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'get_bot_username', lambda self: 'testbot')
-    monkeypatch.setattr(settings, 'TRIAL_DURATION_DAYS', 3, raising=False)
-    monkeypatch.setattr(settings, 'TRIAL_DISABLED_FOR', 'none', raising=False)
-
-    user = _make_user(None, trial_used=False)
-    html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
-
-    assert '<a href="https://t.me/testbot?start=trial"><b>🚀 Активировать триал</b></a>' in html_out
-
-
-async def test_trial_offer_paid_opens_miniapp(monkeypatch):
-    """Платный триал: ссылка ведёт на оплату в миниапп (startapp=trial), не на диплинк."""
-    _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_trial_paid_activation_enabled', lambda self: True)
-    monkeypatch.setattr(settings, 'TRIAL_DURATION_DAYS', 3, raising=False)
-    monkeypatch.setattr(settings, 'TRIAL_DISABLED_FOR', 'none', raising=False)
-    monkeypatch.setattr(
-        rich_menu,
-        'build_miniapp_startapp_url',
-        lambda start_param: f'https://t.me/bot/cab?startapp={start_param}',
-    )
-
-    user = _make_user(None, trial_used=False)
-    html_out = await rich_menu.build_main_menu_rich_html(user, DummyTexts(), AsyncMock())
-
-    assert 'https://t.me/bot/cab?startapp=trial' in html_out
-    assert 'start=trial' not in html_out.replace('startapp=trial', '')
 
 
 async def test_trial_offer_absent_when_trial_used(monkeypatch):
@@ -1300,7 +1155,6 @@ async def test_far_future_end_date_in_single_block_renders_without_tg_time(monke
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(eternal), DummyTexts(), AsyncMock())
 
     assert '<tg-time' not in html_out
-    # Строка «истекает …» осталась — с текстом остатка дней вместо tg-time
     assert 'осталось' in html_out
 
 

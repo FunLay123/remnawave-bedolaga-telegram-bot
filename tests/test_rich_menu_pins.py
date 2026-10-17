@@ -5,16 +5,12 @@
    edit_or_answer_photo, а классический текст строится только в фоллбеке.
 2. Все точки показа главного меню в start.py защищены rich-хелперами
    (try_answer_rich_main_menu / try_send_rich_main_menu).
-3. Rich-билдер одиночного режима переиспользует _get_subscription_status из
-   menu.py — формулировки статусов не форкаются (см.
-   tests/test_start_menu_text_consistency.py про единый источник правды).
 """
 
 import inspect
 from pathlib import Path
 
 import app.handlers.menu as menu_mod
-import app.utils.rich_menu as rich_menu_mod
 
 
 _START_PATH = Path(__file__).resolve().parents[1] / 'app' / 'handlers' / 'start.py'
@@ -64,12 +60,6 @@ def test_start_menu_sites_guarded_by_rich_helpers():
             continue
         prev_lines = '\n'.join(lines[max(0, index - 6) : index])
         assert 'rich_main_menu' in prev_lines, f'start.py:{index + 1}: построение menu_text не защищено rich-гвардом'
-
-
-def test_single_subscription_block_reuses_menu_status_builder():
-    source = inspect.getsource(rich_menu_mod._build_single_subscription_block)
-    assert 'from app.handlers.menu import _get_subscription_status' in source
-    assert '_get_subscription_status(user, texts' in source
 
 
 def test_trial_deeplink_wired_in_start():
