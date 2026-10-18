@@ -635,15 +635,21 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
             except Exception as premium_error:
                 logger.debug('Не удалось собрать премиум-лимиты для rich-меню', error=str(premium_error))
 
-        traffic_text = _traffic_usage_text(subscription, texts)
-        if premium_lines:
-            # Известное ограничение (docs/premium-traffic-limits.md): панель считает
-            # расход на весь аккаунт, и в общей строке сидит трафик премиум-сквадов.
-            traffic_text += ' — включая белые списки'
-        traffic_template = '<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Трафик: {traffic}'
-        groups.append(
-            [_rich_text(traffic_template).replace('{traffic}', html.escape(traffic_text)), *premium_lines]
-        )
+        is_unlimited = not float(getattr(subscription, 'traffic_limit_gb', 0) or 0)
+        traffic_group: list[str] = []
+        # Безлимитный общий трафик при белых списках — строку общего трафика не показываем,
+        # остаются только строки сквадов.
+        if not (is_unlimited and premium_lines):
+            traffic_text = _traffic_usage_text(subscription, texts)
+            if premium_lines:
+                # Известное ограничение (docs/premium-traffic-limits.md): панель считает
+                # расход на весь аккаунт, и в общей строке сидит трафик премиум-сквадов.
+                traffic_text += ' — включая белые списки'
+            traffic_template = '<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Трафик: {traffic}'
+            traffic_group.append(_rich_text(traffic_template).replace('{traffic}', html.escape(traffic_text)))
+        traffic_group.extend(premium_lines)
+        if traffic_group:
+            groups.append(traffic_group)
 
     balance_template = '<tg-emoji emoji-id="5104960787579929462">💰</tg-emoji> Баланс: {balance}'
     balance_value = f'<b>{html.escape(settings.format_price(user.balance_kopeks))}</b>'
