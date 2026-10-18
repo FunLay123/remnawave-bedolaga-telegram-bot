@@ -1610,7 +1610,7 @@
   "SUBSCRIPTION_CONNECTED_DEVICES_FOOTER": "</blockquote>",
   "SUBSCRIPTION_CONNECTED_DEVICES_TITLE": "<blockquote>📱 <b>Подключенные устройства:</b>\n",
   "SUBSCRIPTION_CONNECT_CUSTOM_MESSAGE": "🚀 <b>Подключить подписку</b>\n\n📱 Нажмите кнопку ниже, чтобы открыть приложение:",
-  "SUBSCRIPTION_CONNECT_CHOICE_MESSAGE": "☔ <b>Выберите ваше приложение для импорта настроек:</b>",
+  "SUBSCRIPTION_CONNECT_CHOICE_MESSAGE": "<tg-emoji emoji-id=\"5206508932742269444\">☔</tg-emoji> <b>Выберите приложение</b>\n<blockquote>Настройки импортируются автоматически</blockquote>",
   "SUBSCRIPTION_CONNECT_DEVICE_MESSAGE": "📱 <b>Подключить подписку</b>\n\n🔗 <b>Ссылка подписки:</b>\n<code>{subscription_url}</code>\n\n💡 <b>Выберите ваше устройство</b> для получения подробной инструкции по настройке:",
   "SUBSCRIPTION_CONNECT_DEVICE_MESSAGE_HIDDEN": "📱 <b>Подключить подписку</b>\n\nℹ️ Ссылка подписки доступна по кнопкам ниже или в разделе «Моя подписка».\n\n💡 <b>Выберите ваше устройство</b> для получения подробной инструкции по настройке:",
   "SUBSCRIPTION_CONNECT_LINK_MESSAGE": "🚀 <b>Подключить подписку</b>\n\n🔗 Нажмите кнопку ниже, чтобы открыть ссылку подписки:",

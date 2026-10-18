@@ -228,19 +228,20 @@ async def handle_connect_subscription(
 
         # Ряд кнопок подключения через веб-редирект
         import_buttons: list[InlineKeyboardButton] = []
+        if happ_url:
+                    import_buttons.append(
+                        InlineKeyboardButton(
+                            text='Happ', url=happ_url, style='primary', icon_custom_emoji_id='5267369899226866146'
+                        )
+                    )
+        
         if incy_url:
             import_buttons.append(
                 InlineKeyboardButton(
                     text='INCY', url=incy_url, style='primary', icon_custom_emoji_id='5267274958974789753'
                     )
                 )
-        if happ_url:
-            import_buttons.append(
-                InlineKeyboardButton(
-                    text='Happ', url=happ_url, style='primary', icon_custom_emoji_id='5267369899226866146'
-                )
-            )
-
+        
         if import_buttons:
             rows.append(import_buttons)
         else:
