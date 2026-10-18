@@ -607,28 +607,24 @@ def get_main_menu_keyboard(
     keyboard: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text=texts.t('Подключиться'),
+                text='Подключиться',
                 # С подпиской — сразу выбор приложения; без неё подключаться не к чему,
                 # ведём на экран подписки, где есть покупка и пробный период.
                 callback_data='subscription_connect' if has_active_subscription else 'menu_subscription',
                 icon_custom_emoji_id='5084923566848213749',
-                style="primary"
+                style='primary',
             )
         ],
         [
             InlineKeyboardButton(
-                text=(
-                    texts.t('Подписка')
-                    if settings.is_multi_tariff_enabled()
-                    else texts.MENU_SUBSCRIPTION
-                ),
+                text='Подписка',
                 callback_data='menu_subscription',
-                icon_custom_emoji_id='5431374840332302296'
+                icon_custom_emoji_id='5431374840332302296',
             ),
             InlineKeyboardButton(
-                text=texts.t('Пополнить'),
+                text='Пополнить',
                 callback_data='balance_topup',
-                icon_custom_emoji_id='5201756087572772502'
+                icon_custom_emoji_id='5201756087572772502',
             ),
         ],
     ]
@@ -641,7 +637,15 @@ def get_main_menu_keyboard(
         support_enabled = settings.SUPPORT_MENU_ENABLED
 
     if support_enabled:
-        keyboard.append([InlineKeyboardButton(text=texts.MENU_SUPPORT, callback_data='menu_support')])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text='Техподдержка',
+                    callback_data='menu_support',
+                    icon_custom_emoji_id='5988023995125993550',
+                )
+            ]
+        )
 
     # Не удаляем черновик checkout: оставляем условный пункт восстановления вне основной навигации.
     if show_resume_checkout or has_saved_cart:
