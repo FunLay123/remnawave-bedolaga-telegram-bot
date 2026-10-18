@@ -64,6 +64,19 @@ async def _resolve_subscription(callback, db_user, db, state=None):
     return await resolve_subscription_from_context(callback, db_user, db, state)
 
 
+def _devices_back_callback(sub_id: int | None) -> str:
+    """Куда возвращает «Назад» из любого экрана устройств.
+
+    Дефолт ``get_back_keyboard`` — ``back_to_menu`` (главное меню), а из устройств
+    возвращаться туда неправильно: пользователь пришёл из меню подписки. Поэтому
+    цель задаётся явно на каждом экране флоу. В мульти-тарифе — карточка своей
+    подписки, иначе — меню подписки.
+    """
+    if settings.is_multi_tariff_enabled() and sub_id:
+        return f'sm:{sub_id}'
+    return 'menu_subscription'
+
+
 def _get_panel_user_id(subscription, db_user):
     """Get the numeric Remnawave user id for device operations.
 
@@ -805,7 +818,10 @@ async def execute_change_devices(
                 'ℹ️ Возврат средств не производится',
             )
 
-        await callback.message.edit_text(success_text, reply_markup=get_back_keyboard(db_user.language))
+        await callback.message.edit_text(
+            success_text,
+            reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(subscription.id)),
+        )
 
         logger.info(
             '✅ Пользователь изменил количество устройств с на доплата: ₽',
@@ -817,7 +833,10 @@ async def execute_change_devices(
 
     except Exception as e:
         logger.error('Ошибка изменения количества устройств', error=e)
-        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(db_user.language))
+        await callback.message.edit_text(
+            texts.ERROR,
+            reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(subscription.id)),
+        )
 
     await callback.answer()
 
@@ -860,7 +879,7 @@ async def handle_device_management(
                 if total_devices == 0:
                     await callback.message.edit_text(
                         texts.t('DEVICE_NONE_CONNECTED', 'ℹ️ У вас нет подключенных устройств'),
-                        reply_markup=get_back_keyboard(db_user.language),
+                        reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(sub_id)),
                     )
                     await callback.answer()
                     return
@@ -1222,7 +1241,7 @@ async def cancel_device_rename(
     # Fallback: список не достали — хотя бы внятно сообщаем и не оставляем пустоту.
     await callback.message.edit_text(
         texts.t('DEVICE_RENAME_CANCELLED', '✖️ Переименование отменено'),
-        reply_markup=get_back_keyboard(db_user.language),
+        reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(sub_id)),
     )
     await callback.answer()
 
@@ -1313,7 +1332,9 @@ async def handle_single_device_reset(
                                         'DEVICE_RESET_ALL_DONE',
                                         'ℹ️ Все устройства сброшены',
                                     ),
-                                    reply_markup=get_back_keyboard(db_user.language),
+                                    reply_markup=get_back_keyboard(
+                                        db_user.language, callback_data=_devices_back_callback(sub_id)
+                                    ),
                                 )
 
                         logger.info(
@@ -1420,7 +1441,9 @@ async def handle_all_devices_reset_from_management(
                                 "💡 Используйте ссылку из раздела 'Моя подписка' для повторного подключения"
                             ),
                         ).format(count=success_count),
-                        reply_markup=get_back_keyboard(db_user.language),
+                        reply_markup=get_back_keyboard(
+                            db_user.language, callback_data=_devices_back_callback(sub_id)
+                        ),
                         parse_mode='HTML',
                     )
                     logger.info(
@@ -1439,7 +1462,9 @@ async def handle_all_devices_reset_from_management(
                                 'Попробуйте еще раз или обратитесь в поддержку.'
                             ),
                         ).format(success=success_count, failed=failed_count),
-                        reply_markup=get_back_keyboard(db_user.language),
+                        reply_markup=get_back_keyboard(
+                            db_user.language, callback_data=_devices_back_callback(sub_id)
+                        ),
                         parse_mode='HTML',
                     )
                     logger.warning(
@@ -1458,7 +1483,9 @@ async def handle_all_devices_reset_from_management(
                             'Всего устройств: {total}'
                         ),
                     ).format(total=len(devices_list)),
-                    reply_markup=get_back_keyboard(db_user.language),
+                    reply_markup=get_back_keyboard(
+                        db_user.language, callback_data=_devices_back_callback(sub_id)
+                    ),
                     parse_mode='HTML',
                 )
                 logger.error(
@@ -1467,7 +1494,9 @@ async def handle_all_devices_reset_from_management(
 
     except Exception as e:
         logger.error('Ошибка сброса всех устройств', error=e)
-        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(db_user.language))
+        await callback.message.edit_text(
+            texts.ERROR, reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(sub_id))
+        )
 
     await callback.answer()
 
@@ -1729,7 +1758,10 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
         if total_discount > 0:
             success_text += f' (скидка {devices_discount_percent}%: -{texts.format_price(total_discount)})'
 
-        await callback.message.edit_text(success_text, reply_markup=get_back_keyboard(db_user.language))
+        await callback.message.edit_text(
+            success_text,
+            reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(subscription.id)),
+        )
 
         logger.info(
             '✅ Пользователь добавил устройств за ₽',
@@ -1740,7 +1772,10 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
 
     except Exception as e:
         logger.error('Ошибка добавления устройств', error=e)
-        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(db_user.language))
+        await callback.message.edit_text(
+            texts.ERROR,
+            reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(subscription.id)),
+        )
 
     await callback.answer()
 
