@@ -651,7 +651,7 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         if traffic_group:
             groups.append(traffic_group)
 
-    balance_template = '<tg-emoji emoji-id="5332280053503905585">💰</tg-emoji> Баланс: {balance}'
+    balance_template = '<tg-emoji emoji-id="5116648080787112958">💰</tg-emoji> Баланс: {balance}'
     balance_value = f'<b>{html.escape(settings.format_price(user.balance_kopeks))}</b>'
     groups.append([_rich_text(balance_template).replace('{balance}', balance_value)])
 
