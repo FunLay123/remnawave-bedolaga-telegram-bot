@@ -624,7 +624,7 @@ def get_main_menu_keyboard(
             InlineKeyboardButton(
                 text='Пополнить',
                 callback_data='balance_topup',
-                icon_custom_emoji_id='5201756087572772502',
+                icon_custom_emoji_id='5258500422393415126',
             ),
         ],
     ]
