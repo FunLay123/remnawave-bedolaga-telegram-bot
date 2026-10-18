@@ -979,6 +979,7 @@ def get_subscription_keyboard(
 
     texts = get_texts(language)
     keyboard = []
+    autopay_button: InlineKeyboardButton | None = None
 
     # Покупка и пробный период живут не на главном экране, а здесь: человеку
     # без подписки больше некуда нажать, кроме как «Подключиться» → «Подписка».
@@ -1044,16 +1045,19 @@ def get_subscription_keyboard(
                     ]
                 )
             else:
-                # Для обычного тарифа: [Продлить] [Автоплатеж]
+                # Для обычного тарифа: [Продлить подписку], а «Автоплатёж» встаёт в ряд к «Устройства»
                 keyboard.append(
-                    [
-                        InlineKeyboardButton(text=texts.MENU_EXTEND_SUBSCRIPTION, callback_data='subscription_extend'),
-                        InlineKeyboardButton(
-                            text=texts.t('AUTOPAY_BUTTON', '💳 Автоплатеж'),
-                            callback_data='subscription_autopay',
-                        ),
-                    ]
+                    [InlineKeyboardButton(text='Продлить подписку', callback_data='subscription_extend')]
                 )
+                autopay_button = InlineKeyboardButton(text='Автоплатёж', callback_data='subscription_autopay')
+
+            # [Устройства] [Автоплатёж] — автоплатёж есть только у обычного тарифа
+            devices_row = [
+                InlineKeyboardButton(text='Устройства', callback_data='subscription_manage_devices')
+            ]
+            if autopay_button is not None:
+                devices_row.append(autopay_button)
+            keyboard.append(devices_row)
 
             # «Настройки» показываем, только если в них есть что-то кроме «Назад»
             # (управление устройствами и перевыпуск вынесены отдельными пунктами ниже).
@@ -1116,28 +1120,15 @@ def get_subscription_keyboard(
                     ]
                 )
 
-    if has_subscription:
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text=texts.t('MANAGE_DEVICES_BUTTON', '🔧 Управление устройствами'),
-                    callback_data='subscription_manage_devices',
-                )
-            ]
-        )
-        if settings.is_subscription_revoke_enabled():
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('SUBSCRIPTION_REVOKE_BTN', '🔄 Перевыпустить подписку'),
-                        callback_data='subscription_revoke',
-                    )
-                ]
-            )
+    if has_subscription and is_trial:
+        keyboard.append([InlineKeyboardButton(text='Устройства', callback_data='subscription_manage_devices')])
 
-    keyboard.append(
-        [InlineKeyboardButton(text=texts.t('MENU_PROMOCODE', '🎫 Промокод'), callback_data='menu_promocode')]
-    )
+    # [Перевыпустить] [Промокод]
+    revoke_promo_row: list[InlineKeyboardButton] = []
+    if has_subscription and settings.is_subscription_revoke_enabled():
+        revoke_promo_row.append(InlineKeyboardButton(text='Перевыпустить', callback_data='subscription_revoke'))
+    revoke_promo_row.append(InlineKeyboardButton(text='Промокод', callback_data='menu_promocode'))
+    keyboard.append(revoke_promo_row)
 
     if gift_enabled and _GIFT_BUTTON_VISIBLE:
         keyboard.append(

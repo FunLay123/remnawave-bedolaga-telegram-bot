@@ -41,9 +41,9 @@ def test_main_menu_has_connect_subscription_topup_and_support_rows(monkeypatch):
         ['menu_support'],
     ]
     assert [[button.text for button in row] for row in keyboard.inline_keyboard[:3]] == [
-        ['🔗 Подключиться'],
-        ['📱 Подписка', '💳 Пополнить'],
-        ['🛠️ Техподдержка'],
+        ['Подключиться'],
+        ['Подписка', 'Пополнить'],
+        ['Техподдержка'],
     ]
     assert all('menu_balance' not in row for row in _callbacks(keyboard))
 
@@ -135,3 +135,30 @@ def test_connect_without_subscription_leads_to_subscription_screen(monkeypatch):
     keyboard = get_main_menu_keyboard(language='ru', has_active_subscription=False)
 
     assert _callbacks(keyboard)[0] == ['menu_subscription']
+
+
+def test_subscription_screen_uses_short_labels_and_row_layout(monkeypatch):
+    """Минималистичная клавиатура: Продлить / Устройства+Автоплатёж / Перевыпустить+Промокод / Назад."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(type(settings), 'is_subscription_revoke_enabled', lambda self: True)
+    # Без режима тарифов подписка без тарифа не считается «старой» и получает «Продлить».
+    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
+    sub = SimpleNamespace(
+        id=1,
+        tariff=None,
+        tariff_id=None,
+        status='active',
+        actual_status='active',
+        traffic_limit_gb=0,
+        end_date=None,
+        is_daily_paused=False,
+    )
+
+    keyboard = get_subscription_keyboard('ru', has_subscription=True, subscription=sub)
+    rows = [[(button.text, button.callback_data) for button in row] for row in keyboard.inline_keyboard]
+
+    assert rows[0] == [('Продлить подписку', 'subscription_extend')]
+    assert rows[1] == [('Устройства', 'subscription_manage_devices'), ('Автоплатёж', 'subscription_autopay')]
+    assert rows[-2] == [('Перевыпустить', 'subscription_revoke'), ('Промокод', 'menu_promocode')]
+    assert rows[-1][0][1] == 'back_to_menu'

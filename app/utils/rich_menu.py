@@ -593,7 +593,7 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
     elif getattr(subscription, 'is_trial', False) or actual_status == 'trial':
         label = texts.t('MAIN_MENU_MIN_TRIAL', '<tg-emoji emoji-id="5359415772844152891">🎁</tg-emoji> Тестовая')
     elif actual_status == 'active':
-        label = texts.t('MAIN_MENU_MIN_ACTIVE', '<tg-emoji emoji-id="5267515829330679742">✅</tg-emoji> Активна')
+        label = texts.t('MAIN_MENU_MIN_ACTIVE', '<tg-emoji emoji-id="5359415772844152891">✅</tg-emoji> Активна')
     else:
         return texts.t('SUB_STATUS_UNKNOWN', '<tg-emoji emoji-id="5206653943723082466">❓</tg-emoji> Неизвестно')
 

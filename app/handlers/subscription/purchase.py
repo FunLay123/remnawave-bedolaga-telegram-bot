@@ -459,34 +459,21 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     # Определяем, суточный ли тариф для выбора шаблона
     is_daily_tariff = tariff and getattr(tariff, 'is_daily', False)
 
+    # Минималистичный экран: заголовок, срок, устройства, трафик. Шаблон зашит в коде —
+    # ключи SUBSCRIPTION_*_OVERVIEW_TEMPLATE из локалей его больше не перекрывают.
     if is_daily_tariff:
-        # Для суточных тарифов другой шаблон без "Действует до" и "Осталось"
-        message_template = texts.t(
-            'SUBSCRIPTION_DAILY_OVERVIEW_TEMPLATE',
-            """👤 {full_name}
-💰 Баланс: {balance}
-📱 Подписка: {status_emoji} {status_display}{warning}{tariff_info_block}
-
-📱 Информация о подписке
-🎭 Тип: {subscription_type}
-📈 Трафик: {traffic}
-🌍 Серверы: {servers}
-📱 Устройства: {devices_used} / {device_limit}""",
+        # Для суточных тарифов без "Действует до" и срока
+        message_template = (
+            '<b>Информация о подписке</b>\n\n'
+            '📈 Трафик: {traffic}\n'
+            '📱 Устройства: {devices_used} / {device_limit}'
         )
     else:
-        message_template = texts.t(
-            'SUBSCRIPTION_OVERVIEW_TEMPLATE',
-            """👤 {full_name}
-💰 Баланс: {balance}
-📱 Подписка: {status_emoji} {status_display}{warning}{tariff_info_block}
-
-📱 Информация о подписке
-🎭 Тип: {subscription_type}
-📅 Действует до: {end_date}
-⏰ Осталось: {time_left}
-📈 Трафик: {traffic}
-🌍 Серверы: {servers}
-📱 Устройства: {devices_used} / {device_limit}""",
+        message_template = (
+            '<b>Информация о подписке</b>\n\n'
+            '📅 Действует до: {end_date} ({time_left})\n'
+            '📈 Трафик: {traffic}\n'
+            '📱 Устройства: {devices_used} / {device_limit}'
         )
 
     if not show_devices:
@@ -588,21 +575,9 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     hide_subscription_link = settings.should_hide_subscription_link()
 
     if subscription_link and actual_status in ['trial_active', 'paid_active'] and not hide_subscription_link:
-        subscription_link_display = subscription_link
-
-        if settings.is_happ_cryptolink_mode():
-            subscription_link_display = f'<blockquote expandable><code>{subscription_link}</code></blockquote>'
-        else:
-            subscription_link_display = f'<code>{subscription_link}</code>'
-
-        message += '\n\n' + texts.t(
-            'SUBSCRIPTION_CONNECT_LINK_SECTION',
-            '🔗 <b>Ссылка для подключения:</b>\n{subscription_url}',
-        ).format(subscription_url=subscription_link_display)
-        message += '\n\n' + texts.t(
-            'SUBSCRIPTION_CONNECT_LINK_PROMPT',
-            '📱 Скопируйте ссылку и добавьте в ваше VPN приложение',
-        )
+        # Ссылка в <code> (копируется нажатием), блок — в цитате; у длинной cryptolink цитата сворачивается.
+        quote_tag = 'blockquote expandable' if settings.is_happ_cryptolink_mode() else 'blockquote'
+        message += f'\n\n<{quote_tag}><code>{subscription_link}</code></blockquote>'
 
     # Доступность премиум-докупки считаем здесь: клавиатура строится без сессии,
     # а решение требует запроса к состояниям посквадных лимитов.
