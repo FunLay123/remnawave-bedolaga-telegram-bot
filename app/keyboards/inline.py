@@ -1121,7 +1121,9 @@ def get_subscription_keyboard(
                 keyboard.append(
                     [
                         InlineKeyboardButton(
-                            text=texts.t('BUY_TRAFFIC_BUTTON', '📈 Докупить трафик'), callback_data='buy_traffic'
+                            text=texts.t('BUY_TRAFFIC_BUTTON', 'Докупить трафик'),
+                            callback_data='buy_traffic',
+                            icon_custom_emoji_id='5332280053503905585',
                         )
                     ]
                 )
@@ -1137,7 +1139,7 @@ def get_subscription_keyboard(
                                                      icon_custom_emoji_id='5276252888027377856'))
     revoke_promo_row.append(InlineKeyboardButton(text='Промокод',
                                                  callback_data='menu_promocode',
-                                                 icon_custom_emoji_id='5255882519567418060'))
+                                                 icon_custom_emoji_id='5235695112419303615'))
     keyboard.append(revoke_promo_row)
 
     if gift_enabled and _GIFT_BUTTON_VISIBLE:

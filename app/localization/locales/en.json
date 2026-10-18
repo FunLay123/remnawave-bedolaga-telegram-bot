@@ -6,7 +6,7 @@
   "ADD_TRAFFIC_PROMPT_UNLIMITED_WITH_PREMIUM": "📈 <b>Traffic</b>\n\n♾️ Your overall traffic is already unlimited — no need to top up regular traffic.\n💠 But your tariff has separate per-server limits — you can top them up below:",
   "ADD_TRAFFIC_PROMPT_TARIFF_DISABLED_WITH_PREMIUM": "📈 <b>Traffic</b>\n\n⚠️ Topping up regular traffic is not available on your tariff.\n💠 But there are separate per-server limits — you can top them up below:",
   "ADD_TRAFFIC_PROMPT_TOPUP_DISABLED_WITH_PREMIUM": "📈 <b>Traffic</b>\n\n⚠️ Topping up regular traffic is currently disabled.\n💠 But premium traffic top-up for individual servers is still available below:",
-  "BUY_TRAFFIC_BUTTON": "📈 Buy more traffic",
+  "BUY_TRAFFIC_BUTTON": "Buy more traffic",
   "ADMIN_BACK_TO_ADMIN": "⬅️ Back to admin",
   "ADMIN_BACK_TO_LIST": "⬅️ Back to list",
   "ADMIN_BACK_TO_MAIN": "🏠 Back to main menu",
