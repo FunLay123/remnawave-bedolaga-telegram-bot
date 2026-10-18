@@ -607,24 +607,28 @@ def get_main_menu_keyboard(
     keyboard: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text=texts.t('CONNECT_BUTTON', '🔗 Подключиться'),
+                text=texts.t('Подключиться'),
                 # С подпиской — сразу выбор приложения; без неё подключаться не к чему,
                 # ведём на экран подписки, где есть покупка и пробный период.
                 callback_data='subscription_connect' if has_active_subscription else 'menu_subscription',
+                icon_custom_emoji_id='5084923566848213749',
+                style="primary"
             )
         ],
         [
             InlineKeyboardButton(
                 text=(
-                    texts.t('MY_SUBSCRIPTIONS_BUTTON', '📱 Мои подписки')
+                    texts.t('Подписка')
                     if settings.is_multi_tariff_enabled()
                     else texts.MENU_SUBSCRIPTION
                 ),
                 callback_data='menu_subscription',
+                icon_custom_emoji_id='5431374840332302296'
             ),
             InlineKeyboardButton(
-                text=texts.t('BALANCE_TOP_UP', '💳 Пополнить'),
+                text=texts.t('Пополнить'),
                 callback_data='balance_topup',
+                icon_custom_emoji_id='5201756087572772502'
             ),
         ],
     ]
