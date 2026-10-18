@@ -584,7 +584,7 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
     if actual_status == 'pending':
         return texts.t('MAIN_MENU_MIN_NONE', 'Нет активной подписки')
     if actual_status == 'disabled':
-        return texts.t('MAIN_MENU_MIN_DISABLED', '<tg-emoji emoji-id="5206653943723082466">⚫</tg-emoji> Отключена')
+        return texts.t('MAIN_MENU_MIN_DISABLED', '<tg-emoji emoji-id="5359689181872282374">⚫</tg-emoji> Отключена')
     if actual_status == 'expired':
         return texts.t('MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5206635084521687196">⛔</tg-emoji> Закончилась {date}').replace('{date}', end_text or '—')
 
