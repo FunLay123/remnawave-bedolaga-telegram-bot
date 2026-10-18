@@ -582,18 +582,18 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
     if actual_status == 'pending':
         return texts.t('MAIN_MENU_MIN_NONE', 'Нет активной подписки')
     if actual_status == 'disabled':
-        return texts.t('MAIN_MENU_MIN_DISABLED', '⚫ Отключена')
+        return texts.t('MAIN_MENU_MIN_DISABLED', '<tg-emoji emoji-id="5206653943723082466">⚫</tg-emoji> Отключена')
     if actual_status == 'expired':
-        return texts.t('MAIN_MENU_MIN_EXPIRED', '⛔ Закончилась {date}').replace('{date}', end_text or '—')
+        return texts.t('MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5206635084521687196">⛔</tg-emoji> Закончилась {date}').replace('{date}', end_text or '—')
 
     if actual_status == 'limited':
-        label = texts.t('MAIN_MENU_MIN_LIMITED', '⚠️ Трафик исчерпан')
+        label = texts.t('MAIN_MENU_MIN_LIMITED', '<tg-emoji emoji-id="5210854838350403906">⚠️</tg-emoji> Трафик исчерпан')
     elif getattr(subscription, 'is_trial', False) or actual_status == 'trial':
-        label = texts.t('MAIN_MENU_MIN_TRIAL', '🎁 Тестовая')
+        label = texts.t('MAIN_MENU_MIN_TRIAL', '<tg-emoji emoji-id="5206705461855799627">🎁</tg-emoji> Тестовая')
     elif actual_status == 'active':
-        label = texts.t('MAIN_MENU_MIN_ACTIVE', '✅ Активна')
+        label = texts.t('MAIN_MENU_MIN_ACTIVE', '<tg-emoji emoji-id="5206430498049511471">✅</tg-emoji> Активна')
     else:
-        return texts.t('SUB_STATUS_UNKNOWN', '❓ Неизвестно')
+        return texts.t('SUB_STATUS_UNKNOWN', '<tg-emoji emoji-id="5206653943723082466">❓</tg-emoji> Неизвестно')
 
     if is_daily_tariff or not end_date:
         return label
@@ -637,15 +637,15 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
             # Известное ограничение (docs/premium-traffic-limits.md): панель считает
             # расход на весь аккаунт, и в общей строке сидит трафик премиум-сквадов.
             traffic_text += texts.t('MAIN_MENU_RICH_TRAFFIC_INCLUDES_PREMIUM', ' — включая белые списки')
-        traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '📊 Трафик: {traffic}')
+        traffic_template = texts.t('MAIN_MENU_RICH_TRAFFIC', '<tg-emoji emoji-id="5267515829330679742">📊</tg-emoji> Трафик: {traffic}')
         lines.append(_rich_text(traffic_template).replace('{traffic}', html.escape(traffic_text)))
         lines.extend(premium_lines)
 
-    balance_template = texts.t('MAIN_MENU_RICH_BALANCE', '💰 Баланс: {balance}')
+    balance_template = texts.t('MAIN_MENU_RICH_BALANCE', '<tg-emoji emoji-id="5104960787579929462">💰</tg-emoji> Баланс: {balance}')
     balance_value = f'<b>{html.escape(settings.format_price(user.balance_kopeks))}</b>'
     lines.append(_rich_text(balance_template).replace('{balance}', balance_value))
 
-    return '<blockquote>' + '<br>'.join(lines) + '</blockquote>'
+    return '<p>' + '<br>'.join(lines) + '</p>'
 
 
 async def build_main_menu_rich_html(user: User, texts, db: AsyncSession) -> str:
