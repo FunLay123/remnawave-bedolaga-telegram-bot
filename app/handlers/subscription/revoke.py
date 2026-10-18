@@ -38,7 +38,7 @@ def _build_revoke_confirm_keyboard(
 ) -> InlineKeyboardMarkup:
     """Build confirmation keyboard for revoke action."""
     texts = get_texts(language)
-    back_callback = 'my_subscriptions' if multi_tariff else 'subscription_settings'
+    back_callback = 'my_subscriptions' if multi_tariff else 'menu_subscription'
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
