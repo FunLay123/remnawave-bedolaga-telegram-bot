@@ -467,7 +467,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     # Юникод-эмодзи внутри <tg-emoji> — фолбэк для клиентов без премиума.
     heading = '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Информация о подписке</b>'
     total_line = '📈 Трафик: {traffic}'
-    devices_line = '<tg-emoji emoji-id="5292226786229236118">📱</tg-emoji> Устройства: {devices_used} / {device_limit}'
+    devices_line = '<tg-emoji emoji-id="5409277349558497475">📱</tg-emoji> Устройства: {devices_used} / {device_limit}'
     # Белые списки идут в одной группе со строкой трафика — они её и объясняют, —
     # а от устройств отбиваются пустой строкой: иначе строки сквадов липнут к
     # «Устройствам» и всё читается одним блоком.
