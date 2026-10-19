@@ -1123,7 +1123,7 @@ def get_subscription_keyboard(
                         InlineKeyboardButton(
                             text=texts.t('BUY_TRAFFIC_BUTTON', 'Докупить трафик'),
                             callback_data='buy_traffic',
-                            icon_custom_emoji_id='5332280053503905585',
+                            icon_custom_emoji_id='5332588449335628124',
                         )
                     ]
                 )

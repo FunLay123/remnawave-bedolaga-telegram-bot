@@ -303,22 +303,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             '{used} / {limit} ГБ',
         ).format(used=used_traffic, limit=subscription.traffic_limit_gb)
 
-    # Известное ограничение (docs/premium-traffic-limits.md): панель считает
-    # расход на весь аккаунт, и в общем трафике сидит трафик премиум-сквадов.
-    # Пока учёт не разделён, честно говорим об этом рядом с цифрой — но только
-    # тем, у кого премиум-сквад действительно подключён.
-    if subscription.tariff_id:
-        try:
-            from app.database.crud.tariff import get_tariff_by_id
-            from app.utils.premium_traffic import get_premium_squads_for_tariff
-
-            premium_tariff = await get_tariff_by_id(db, subscription.tariff_id)
-            connected = set(subscription.connected_squads or [])
-            if any(uuid in connected for uuid in get_premium_squads_for_tariff(premium_tariff)):
-                traffic_used_display += texts.t('SUBSCRIPTION_TRAFFIC_INCLUDES_PREMIUM', ' — включая белые списки')
-        except Exception as premium_error:
-            logger.debug('Не удалось проверить премиум-сквады для экрана подписки', error=str(premium_error))
-
     devices_used_str = '—'
     devices_list = []
     devices_count = 0
@@ -459,6 +443,25 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     # Определяем, суточный ли тариф для выбора шаблона
     is_daily_tariff = tariff and getattr(tariff, 'is_daily', False)
 
+    # Белые списки: расход по каждому подключённому премиум-скваду отдельной
+    # строкой под общим трафиком. Сборщик общий с главным меню, чтобы форматы
+    # не разъезжались.
+    premium_lines: list[str] = []
+    if tariff is not None and subscription.tariff_id:
+        try:
+            from app.utils.rich_menu import premium_squad_lines
+
+            premium_lines = await premium_squad_lines(subscription, tariff, texts, db)
+        except Exception as premium_error:
+            logger.debug('Не удалось собрать белые списки для экрана подписки', error=str(premium_error))
+
+    # Известное ограничение (docs/premium-traffic-limits.md): панель считает
+    # расход на весь аккаунт, и в общем трафике сидит трафик премиум-сквадов.
+    # Пока учёт не разделён, честно говорим об этом рядом с цифрой — строки
+    # сквадов ниже показывают, из чего она складывается.
+    if premium_lines:
+        traffic_used_display += texts.t('SUBSCRIPTION_TRAFFIC_INCLUDES_PREMIUM', ' — включая белые списки')
+
     # Минималистичный экран: заголовок, срок, устройства, трафик. Шаблон зашит в коде —
     # ключи SUBSCRIPTION_*_OVERVIEW_TEMPLATE из локалей его больше не перекрывают.
     if is_daily_tariff:
@@ -471,10 +474,17 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     else:
         message_template = (
             '<b>Информация о подписке</b>\n\n'
-            '📅 Действует до: {end_date} ({time_left})\n'
+            '<tg-emoji emoji-id="5296482716567495148">📅</tg-emoji> Действует до: {end_date} ({time_left})\n'
             '📈 Трафик: {traffic}\n'
-            '📱 Устройства: {devices_used} / {device_limit}'
+            '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> Устройства: {devices_used} / {device_limit}'
         )
+
+    # Безлимитный общий трафик при белых списках — строку общего трафика не
+    # показываем (как в главном меню): общего лимита нет, а у сквадов он есть,
+    # и цифра «безлимит» над конкретными квотами только путает.
+    total_line = '📈 Трафик: {traffic}\n'
+    if premium_lines and not subscription.traffic_limit_gb:
+        message_template = message_template.replace(total_line, '')
 
     if not show_devices:
         message_template = message_template.replace(
@@ -499,6 +509,16 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         devices_used=devices_used_str,
         device_limit=device_limit_display,
     )
+
+    # Строки белых списков идут в одной группе со строкой трафика — они её и
+    # объясняют, — а пустой строкой отбиваются уже устройства.
+    if premium_lines:
+        block = '\n'.join(premium_lines)
+        anchor = '📱 Устройства:'
+        if anchor in message:
+            message = message.replace(anchor, block + '\n' + anchor, 1)
+        else:
+            message += '\n' + block
 
     if show_devices and devices_list:
         message += '\n\n' + texts.t(

@@ -85,7 +85,7 @@ def rewrite_userinfo(original: str, used_bytes: int, total_bytes: int) -> str:
 async def premium_usage(db: AsyncSession, short_uuids: list[str]) -> tuple[int, int] | None:
     """(израсходовано, лимит с докупленным) по премиум-сквадам подписки, в байтах.
 
-    Сквады те же, что в строках премиума главного меню (``_premium_squad_lines``):
+    Сквады те же, что в строках премиума главного меню (``premium_squad_lines``):
     премиальные в тарифе и подключённые к подписке. Несколько сквадов
     складываются в одну полоску. ``None`` — премиум-сквадов нет, подменять нечего.
     """

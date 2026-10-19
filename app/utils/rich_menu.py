@@ -333,7 +333,7 @@ def _traffic_usage_text(subscription, texts) -> str:
     return f'{used} / {limit}'
 
 
-async def _premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> list[str]:
+async def premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> list[str]:
     """Строки посквадных премиум-лимитов — рядом с общей строкой трафика.
 
     Показываем только сквады, премиальные в текущем тарифе И подключённые к
@@ -631,7 +631,7 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
         premium_lines: list[str] = []
         if tariff is not None:
             try:
-                premium_lines = await _premium_squad_lines(subscription, tariff, texts, db)
+                premium_lines = await premium_squad_lines(subscription, tariff, texts, db)
             except Exception as premium_error:
                 logger.debug('Не удалось собрать премиум-лимиты для rich-меню', error=str(premium_error))
 
