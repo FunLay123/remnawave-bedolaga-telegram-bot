@@ -478,7 +478,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     else:
         message_template = (
             f'{heading}\n\n'
-            '<tg-emoji emoji-id="5296482716567495148">📅</tg-emoji> Действует до: {end_date} ({time_left})\n'
+            '<tg-emoji emoji-id="5222148368955877900">📅</tg-emoji> Действует до: {end_date} ({time_left})\n'
             f'{total_line}{premium_block}\n{devices_line}'
         )
 

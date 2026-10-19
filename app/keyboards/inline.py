@@ -1060,7 +1060,7 @@ def get_subscription_keyboard(
             devices_row = [
                 InlineKeyboardButton(text='Устройства',
                                      callback_data='subscription_manage_devices',
-                                     icon_custom_emoji_id='5325912700063084747')
+                                     icon_custom_emoji_id='5118590136149345664')
             ]
             if autopay_button is not None:
                 devices_row.append(autopay_button)
@@ -1137,10 +1137,10 @@ def get_subscription_keyboard(
     if has_subscription and settings.is_subscription_revoke_enabled():
         revoke_promo_row.append(InlineKeyboardButton(text='Перевыпустить',
                                                      callback_data='subscription_revoke',
-                                                     icon_custom_emoji_id='5276252888027377856'))
+                                                     icon_custom_emoji_id='4911241630633165627'))
     revoke_promo_row.append(InlineKeyboardButton(text='Промокод',
                                                  callback_data='menu_promocode',
-                                                 icon_custom_emoji_id='5235695112419303615'))
+                                                 icon_custom_emoji_id='5172640658892002083'))
     keyboard.append(revoke_promo_row)
 
     if gift_enabled and _GIFT_BUTTON_VISIBLE:
