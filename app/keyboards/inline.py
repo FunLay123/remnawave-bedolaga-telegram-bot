@@ -1140,7 +1140,7 @@ def get_subscription_keyboard(
                                                      icon_custom_emoji_id='4911241630633165627'))
     revoke_promo_row.append(InlineKeyboardButton(text='Промокод',
                                                  callback_data='menu_promocode',
-                                                 icon_custom_emoji_id='5172640658892002083'))
+                                                 icon_custom_emoji_id='5283232570660634549'))
     keyboard.append(revoke_promo_row)
 
     if gift_enabled and _GIFT_BUTTON_VISIBLE:
