@@ -464,33 +464,32 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
 
     # Минималистичный экран: заголовок, срок, устройства, трафик. Шаблон зашит в коде —
     # ключи SUBSCRIPTION_*_OVERVIEW_TEMPLATE из локалей его больше не перекрывают.
+    # Юникод-эмодзи внутри <tg-emoji> — фолбэк для клиентов без премиума.
+    heading = '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Информация о подписке</b>'
+    total_line = '📈 Трафик: {traffic}'
+    devices_line = '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> Устройства: {devices_used} / {device_limit}'
+    # Белые списки идут в одной группе со строкой трафика — они её и объясняют,
+    # — а пустой строкой отбиваются уже устройства.
+    premium_block = ('\n' + '\n'.join(premium_lines)) if premium_lines else ''
+
     if is_daily_tariff:
         # Для суточных тарифов без "Действует до" и срока
-        message_template = (
-            '<b>Информация о подписке</b>\n\n'
-            '📈 Трафик: {traffic}\n'
-            '📱 Устройства: {devices_used} / {device_limit}'
-        )
+        message_template = f'{heading}\n\n{total_line}{premium_block}\n{devices_line}'
     else:
         message_template = (
-            '<b>Информация о подписке</b>\n\n'
+            f'{heading}\n\n'
             '<tg-emoji emoji-id="5296482716567495148">📅</tg-emoji> Действует до: {end_date} ({time_left})\n'
-            '📈 Трафик: {traffic}\n'
-            '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> Устройства: {devices_used} / {device_limit}'
+            f'{total_line}{premium_block}\n{devices_line}'
         )
 
     # Безлимитный общий трафик при белых списках — строку общего трафика не
     # показываем (как в главном меню): общего лимита нет, а у сквадов он есть,
     # и цифра «безлимит» над конкретными квотами только путает.
-    total_line = '📈 Трафик: {traffic}\n'
     if premium_lines and not subscription.traffic_limit_gb:
-        message_template = message_template.replace(total_line, '')
+        message_template = message_template.replace(total_line + '\n', '')
 
     if not show_devices:
-        message_template = message_template.replace(
-            '\n📱 Устройства: {devices_used} / {device_limit}',
-            '',
-        )
+        message_template = message_template.replace('\n' + devices_line, '')
 
     device_limit_display = Texts.format_device_limit(subscription.device_limit)
 
@@ -509,16 +508,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         devices_used=devices_used_str,
         device_limit=device_limit_display,
     )
-
-    # Строки белых списков идут в одной группе со строкой трафика — они её и
-    # объясняют, — а пустой строкой отбиваются уже устройства.
-    if premium_lines:
-        block = '\n'.join(premium_lines)
-        anchor = '📱 Устройства:'
-        if anchor in message:
-            message = message.replace(anchor, block + '\n' + anchor, 1)
-        else:
-            message += '\n' + block
 
     if show_devices and devices_list:
         message += '\n\n' + texts.t(

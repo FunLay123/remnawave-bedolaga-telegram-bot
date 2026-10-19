@@ -1049,7 +1049,8 @@ def get_subscription_keyboard(
                 keyboard.append(
                     [InlineKeyboardButton(text='Продлить подписку',
                         callback_data='subscription_extend',
-                        icon_custom_emoji_id='5461145135561594079')]
+                        style='primary',
+                        icon_custom_emoji_id='5334552404736104314')]
                 )
                 autopay_button = InlineKeyboardButton(text='Автоплатёж',
                                                       callback_data='subscription_autopay',
@@ -1123,7 +1124,7 @@ def get_subscription_keyboard(
                         InlineKeyboardButton(
                             text=texts.t('BUY_TRAFFIC_BUTTON', 'Докупить трафик'),
                             callback_data='buy_traffic',
-                            icon_custom_emoji_id='5332588449335628124',
+                            icon_custom_emoji_id='5303396278179210513',
                         )
                     ]
                 )
