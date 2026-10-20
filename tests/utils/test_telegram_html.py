@@ -78,6 +78,26 @@ def test_blockquote_and_code_preserved():
     assert html_to_telegram('<pre>x</pre>') == '<pre>x</pre>'
 
 
+def test_custom_emoji_keeps_its_id():
+    """<tg-emoji emoji-id="..."> — без id Telegram тег не примет, поэтому
+    атрибут обязан пережить конвертацию (как href у ссылки)."""
+    assert (
+        html_to_telegram('<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> текст')
+        == '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> текст'
+    )
+
+
+def test_custom_emoji_without_id_is_dropped_but_keeps_emoji():
+    """Тег без id бессмыслен — отдаём только юникод-эмодзи."""
+    assert html_to_telegram('<tg-emoji>📋</tg-emoji> текст') == '📋 текст'
+
+
+def test_custom_emoji_id_must_be_numeric():
+    """`emoji-id` идёт в разметку сообщения: пускать туда произвольную
+    строку из редактируемого текста нельзя."""
+    assert html_to_telegram('<tg-emoji emoji-id="1&quot; onload=&quot;x">📋</tg-emoji>') == '📋'
+
+
 def test_split_short_text_single_chunk():
     assert split_telegram_text('hello') == ['hello']
 

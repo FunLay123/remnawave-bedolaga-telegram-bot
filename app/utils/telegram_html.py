@@ -4,7 +4,7 @@ import re
 from html.parser import HTMLParser
 
 
-TELEGRAM_ALLOWED_TAGS = frozenset({'b', 'i', 'u', 's', 'a', 'code', 'pre', 'blockquote'})
+TELEGRAM_ALLOWED_TAGS = frozenset({'b', 'i', 'u', 's', 'a', 'code', 'pre', 'blockquote', 'tg-emoji'})
 
 _TAG_ALIASES = {'strong': 'b', 'em': 'i', 'ins': 'u', 'strike': 's', 'del': 's'}
 
@@ -15,6 +15,10 @@ _BLOCK_TAGS = frozenset({'p', 'div', 'section', 'article', 'table', 'tr', 'figur
 _SKIP_CONTENT_TAGS = frozenset({'script', 'style', 'iframe', 'video', 'audio', 'svg', 'head'})
 
 _SAFE_HREF_RE = re.compile(r'^https?://', re.IGNORECASE)
+
+# emoji-id кастомного эмодзи — всегда число; всё прочее (в том числе попытка
+# протащить атрибут с кавычкой) в разметку не пускаем.
+_EMOJI_ID_RE = re.compile(r'^\d+$')
 
 _TAG_RE = re.compile(r'<(/?)(\w[\w-]*)(?:\s+[^>]*)?>')
 
@@ -90,6 +94,14 @@ class _TelegramHtmlRenderer(HTMLParser):
                 if len(escaped) <= _MAX_HREF_LENGTH:
                     self._parts.append(f'<a href="{escaped}">')
                     self._open_tags.append('a')
+            return
+        if tag == 'tg-emoji':
+            # Без emoji-id Telegram тег не принимает — пропускаем только цифры
+            # и только с id: остальное отдаём как обычный эмодзи, без тега.
+            emoji_id = next((value for name, value in attrs if name == 'emoji-id'), None)
+            if emoji_id and _EMOJI_ID_RE.match(emoji_id.strip()):
+                self._parts.append(f'<tg-emoji emoji-id="{emoji_id.strip()}">')
+                self._open_tags.append('tg-emoji')
             return
         if tag in TELEGRAM_ALLOWED_TAGS:
             self._parts.append(f'<{tag}>')
