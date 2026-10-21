@@ -4279,7 +4279,9 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(handle_autopay_menu, F.data == 'subscription_autopay')
 
-    dp.callback_query.register(toggle_autopay, F.data.in_(['autopay_enable', 'autopay_disable']))
+    # `autopay_enable`/`autopay_disable` остаются ради старых сообщений в чатах:
+    # направление теперь берётся из состояния подписки, а не из callback_data.
+    dp.callback_query.register(toggle_autopay, F.data.in_(['autopay_toggle', 'autopay_enable', 'autopay_disable']))
 
     dp.callback_query.register(show_autopay_days, F.data == 'autopay_set_days')
 

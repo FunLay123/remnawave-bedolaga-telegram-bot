@@ -2384,26 +2384,29 @@ def get_confirmation_keyboard(
     )
 
 
-def get_autopay_keyboard(language: str = DEFAULT_LANGUAGE, sub_id: int | None = None) -> InlineKeyboardMarkup:
+def get_autopay_keyboard(
+    language: str = DEFAULT_LANGUAGE,
+    sub_id: int | None = None,
+    *,
+    enabled: bool = False,
+) -> InlineKeyboardMarkup:
+    """Экран автоплатежа: статус и один переключатель.
+
+    ``enabled`` — текущее состояние подписки, от него зависит надпись на
+    кнопке: показывать «Включить» рядом с «Выключить» бессмысленно, одна из
+    двух кнопок всегда не соответствует состоянию. Направление переключения
+    берёт обработчик из самого состояния, а не из callback_data.
+    """
     texts = get_texts(language)
     back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'menu_subscription'
+    toggle_text = (
+        texts.t('AUTOPAY_DISABLE_TOGGLE', '⏸ Выключить автоплатеж')
+        if enabled
+        else texts.t('AUTOPAY_ENABLE_TOGGLE', '▶️ Включить автоплатеж')
+    )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text=texts.t('ENABLE_BUTTON', '✅ Включить'), callback_data='autopay_enable'),
-                InlineKeyboardButton(text=texts.t('DISABLE_BUTTON', '❌ Выключить'), callback_data='autopay_disable'),
-            ],
-            [
-                InlineKeyboardButton(
-                    text=texts.t('AUTOPAY_SET_DAYS_BUTTON', '⚙️ Настроить дни'), callback_data='autopay_set_days'
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=texts.t('AUTOPAY_SET_PERIOD_BUTTON', '📅 Период продления'),
-                    callback_data='autopay_set_period',
-                )
-            ],
+            [InlineKeyboardButton(text=toggle_text, callback_data='autopay_toggle')],
             [InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)],
         ]
     )

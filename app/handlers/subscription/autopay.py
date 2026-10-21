@@ -156,7 +156,7 @@ async def handle_autopay_menu(callback: types.CallbackQuery, db_user: User, db: 
         ),
     ).format(status=status, days=days, period=period_text)
 
-    keyboard = get_autopay_keyboard(db_user.language, sub_id=sub_id)
+    keyboard = get_autopay_keyboard(db_user.language, sub_id=sub_id, enabled=bool(subscription.autopay_enabled))
     if settings.is_platega_recurrent_enabled():
         # Вставляем перед последней строкой (Back), чтобы кнопка СБП была
         # среди основных действий, а не под ней.
@@ -185,7 +185,16 @@ async def toggle_autopay(callback: types.CallbackQuery, db_user: User, db: Async
     subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
     if subscription is None:
         return
-    enable = callback.data.startswith('autopay_enable')
+    # Новый экран несёт одну кнопку, и её надпись отражает текущий статус —
+    # направление берём из состояния подписки. Старые сообщения в чатах несут
+    # обе кнопки с явным намерением в callback_data: там направление из данных,
+    # иначе нажатие «Включить» на включённой подписке её выключит.
+    if callback.data.startswith('autopay_enable'):
+        enable = True
+    elif callback.data.startswith('autopay_disable'):
+        enable = False
+    else:
+        enable = not subscription.autopay_enabled
 
     if enable:
         # Trial subscriptions cannot use autopay
