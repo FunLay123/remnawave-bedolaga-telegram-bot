@@ -2875,7 +2875,7 @@ def get_change_devices_keyboard(
         word = _get_device_declension(devices_count).ljust(max_word_width)
         if price_rub is not None:
             price = f'+{price_rub}₽'.rjust(max_price_width)
-            tail = f'  •  {price}{period_text}'
+            tail = f'       {price}{period_text}'
         elif is_free:
             tail = '  •  бесплатно'
         else:
