@@ -2400,13 +2400,19 @@ def get_autopay_keyboard(
     texts = get_texts(language)
     back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'menu_subscription'
     toggle_text = (
-        texts.t('AUTOPAY_DISABLE_TOGGLE', '⏸ Выключить автоплатеж')
+        texts.t('AUTOPAY_DISABLE_TOGGLE', 'Выключить автоплатеж')
         if enabled
-        else texts.t('AUTOPAY_ENABLE_TOGGLE', '▶️ Включить автоплатеж')
+        else texts.t('AUTOPAY_ENABLE_TOGGLE', 'Включить автоплатеж')
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=toggle_text, callback_data='autopay_toggle')],
+            [
+                InlineKeyboardButton(
+                    text=toggle_text,
+                    callback_data='autopay_toggle',
+                    icon_custom_emoji_id='5258466217273871977',
+                )
+            ],
             [InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)],
         ]
     )
