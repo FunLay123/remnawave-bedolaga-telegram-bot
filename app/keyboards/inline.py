@@ -3507,19 +3507,11 @@ def get_updated_subscription_settings_keyboard(
             ]
         )
 
-    # Устройства: для тарифов - только если указана цена за устройство
-    if has_tariff:
-        tariff_device_price = getattr(tariff, 'device_price_kopeks', None)
-        if tariff_device_price is not None and tariff_device_price > 0:
-            keyboard.append(
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('CHANGE_DEVICES_BUTTON', '📱 Изменить устройства'),
-                        callback_data='subscription_change_devices',
-                    )
-                ]
-            )
-    elif classic_addons_allowed and settings.is_devices_selection_enabled():
+    # Устройства: только для классической подписки. У тарифа управление
+    # устройствами уже вынесено отдельной кнопкой на экран подписки, и дубль
+    # здесь включал бы пункт «Настройки», который ведёт на экран из одной
+    # кнопки «Изменить устройства».
+    if not has_tariff and classic_addons_allowed and settings.is_devices_selection_enabled():
         keyboard.append(
             [
                 InlineKeyboardButton(

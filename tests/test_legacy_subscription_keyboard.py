@@ -143,6 +143,39 @@ def test_classic_subscription_settings_keep_classic_addons(monkeypatch):
     assert 'subscription_change_devices' in cbs
 
 
+def test_tariff_settings_do_not_duplicate_device_management(monkeypatch):
+    """У тарифа нет отдельного экрана настроек: устройства уже есть на экране подписки."""
+    _patch_mode(monkeypatch, tariffs=True)
+    _patch_setting(monkeypatch, 'is_devices_selection_enabled', True)
+
+    tariff = SimpleNamespace(id=7, is_daily=False, device_price_kopeks=5000, device_limit=3)
+    markup = kb.get_updated_subscription_settings_keyboard(
+        'ru',
+        show_countries_management=True,
+        tariff=tariff,
+        subscription=_sub(tariff_id=7),
+        is_legacy_subscription=False,
+    )
+
+    assert 'subscription_change_devices' not in _callbacks(markup)
+
+
+def test_subscription_screen_hides_redundant_settings_for_tariff(monkeypatch):
+    """Пункт «Настройки» не появляется ради экрана с одной кнопкой «Изменить устройства»."""
+    _patch_mode(monkeypatch, tariffs=True)
+
+    sub = _sub(tariff_id=7)
+    sub.tariff = SimpleNamespace(
+        id=7,
+        is_daily=False,
+        device_price_kopeks=5000,
+        device_limit=3,
+        can_topup_traffic=lambda: False,
+    )
+
+    assert 'subscription_settings' not in _keyboard(sub)
+
+
 def _list_callbacks(subs) -> list[str]:
     from app.handlers.subscription.my_subscriptions import _build_subscriptions_keyboard
 
