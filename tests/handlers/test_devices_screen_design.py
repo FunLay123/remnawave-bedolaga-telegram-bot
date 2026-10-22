@@ -99,7 +99,7 @@ def test_increase_price_uses_dot_separator_without_discount():
     increase = [b for b in _buttons(keyboard) if b.callback_data.startswith('change_devices_')]
     assert increase
     for button in increase:
-        assert ' · +' in button.text, button.text
+        assert ' • ' in button.text, button.text
         assert 'за 11 дн.' in button.text, button.text
         assert '(' not in button.text and ')' not in button.text, button.text
         assert 'скидка' not in button.text, button.text
@@ -119,20 +119,22 @@ def _change_counts(keyboard) -> list[int]:
     )
 
 
-def test_ten_options_around_current_value():
+def test_selector_caps_at_ten_devices():
+    """Потолок жёсткий: выше 10 устройств не предлагаем, даже если тариф даёт 20."""
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
     keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
 
-    # По 5 в каждую сторону от текущего значения.
-    assert _change_counts(keyboard) == [3, 4, 5, 7, 8, 9, 10, 11, 12, 13]
+    assert _change_counts(keyboard) == [3, 4, 5, 7, 8, 9, 10]
 
 
-def test_ten_options_near_max_limit_shift_window_down():
-    """У потолка окно сдвигается вниз — количество кнопок не уменьшается."""
+def test_selector_cap_is_independent_of_current_value():
+    """Текущее значение выше потолка (старые данные) — варианты всё равно до 10."""
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
-    keyboard = get_change_devices_keyboard(20, 'ru', tariff=tariff)
+    keyboard = get_change_devices_keyboard(15, 'ru', tariff=tariff)
 
-    assert _change_counts(keyboard) == list(range(10, 20))
+    counts = _change_counts(keyboard)
+    assert counts == list(range(3, 11))
+    assert max(counts) == 10
 
 
 async def _reset_and_get_render():

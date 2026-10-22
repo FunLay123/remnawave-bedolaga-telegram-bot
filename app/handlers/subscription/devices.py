@@ -45,6 +45,7 @@ from app.utils.pricing_utils import (
 )
 from app.utils.subscription_utils import (
     get_display_subscription_link,
+    resolve_max_device_limit,
 )
 
 from .common import (
@@ -352,12 +353,10 @@ async def confirm_change_devices(
         )
         return
 
-    # Используем max_device_limit из тарифа если есть, иначе глобальную настройку
-    tariff_max_devices = getattr(tariff, 'max_device_limit', None) if tariff else None
-    effective_max = (tariff_max_devices if tariff_max_devices is not None and tariff_max_devices > 0 else None) or (
-        settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else None
-    )
-    if effective_max and new_devices_count > effective_max:
+    # Потолок — не выше 10 устройств, даже если тариф или MAX_DEVICES_LIMIT
+    # разрешают больше.
+    effective_max = resolve_max_device_limit(tariff)
+    if new_devices_count > effective_max:
         await callback.answer(
             texts.t(
                 'DEVICES_LIMIT_EXCEEDED',
@@ -683,11 +682,8 @@ async def execute_change_devices(
 
         # Re-validate: prevent double-charge and max-limit violation
         if new_devices_count > current_devices:
-            tariff_max_recheck = getattr(tariff, 'max_device_limit', None) if tariff else None
-            max_devices = (
-                tariff_max_recheck if tariff_max_recheck is not None and tariff_max_recheck > 0 else None
-            ) or (settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else None)
-            if max_devices and new_devices_count > max_devices:
+            max_devices = resolve_max_device_limit(tariff)
+            if new_devices_count > max_devices:
                 if price > 0:
                     user_refund = await db.execute(
                         select(User)
@@ -1456,10 +1452,10 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
 
     new_total_devices = subscription.device_limit + devices_count
 
-    # Используем max_device_limit из тарифа если есть, иначе глобальную настройку
-    tariff_max_devices = getattr(tariff, 'max_device_limit', None) if tariff else None
-    effective_max = tariff_max_devices or (settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else None)
-    if effective_max and new_total_devices > effective_max:
+    # Потолок — не выше 10 устройств, даже если тариф или MAX_DEVICES_LIMIT
+    # разрешают больше.
+    effective_max = resolve_max_device_limit(tariff)
+    if new_total_devices > effective_max:
         await callback.answer(
             texts.t(
                 'DEVICES_LIMIT_EXCEEDED_DETAIL',
@@ -1611,9 +1607,8 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
         # Re-validate max device limit after re-lock
         actual_current = subscription.device_limit or 1
         actual_new = actual_current + devices_count
-        tariff_max_recheck = getattr(tariff, 'max_device_limit', None) if tariff else None
-        max_devices = tariff_max_recheck or (settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else None)
-        if max_devices and actual_new > max_devices:
+        max_devices = resolve_max_device_limit(tariff)
+        if actual_new > max_devices:
             # Concurrent purchase exceeded limit — refund
             user_refund = await db.execute(
                 select(User).where(User.id == db_user.id).with_for_update().execution_options(populate_existing=True)

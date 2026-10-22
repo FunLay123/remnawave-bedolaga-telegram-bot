@@ -153,6 +153,27 @@ def resolve_min_device_limit(tariff: object | None = None) -> int:
         return 1
 
 
+# Жёсткий потолок выбора в клиенте: больше 10 устройств не продаём, даже если
+# тариф или MAX_DEVICES_LIMIT разрешают больше.
+DEVICE_LIMIT_HARD_CAP = 10
+
+
+def resolve_max_device_limit(tariff: object | None = None) -> int:
+    """Верхняя граница лимита устройств для выбора и проверок.
+
+    Тарифный ``max_device_limit`` важнее глобального ``MAX_DEVICES_LIMIT``,
+    но ни один из них не поднимает потолок выше ``DEVICE_LIMIT_HARD_CAP``.
+    """
+    from app.config import settings
+
+    tariff_max = getattr(tariff, 'max_device_limit', None) if tariff is not None else None
+    if tariff_max is not None and tariff_max > 0:
+        return min(int(tariff_max), DEVICE_LIMIT_HARD_CAP)
+
+    global_max = settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else DEVICE_LIMIT_HARD_CAP
+    return min(global_max, DEVICE_LIMIT_HARD_CAP)
+
+
 def resolve_hwid_device_limit(subscription: Subscription | None) -> int | None:
     """Return a device limit value for RemnaWave payloads when selection is enabled.
 

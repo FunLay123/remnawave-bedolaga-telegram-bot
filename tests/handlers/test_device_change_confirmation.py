@@ -113,3 +113,18 @@ async def test_decrease_confirmation_without_extra_devices():
     assert '6 → 5' in text
     assert 'Средства не возвращаются' in text
     assert 'Лишние устройства' not in text
+
+
+@pytest.mark.anyio('asyncio')
+async def test_confirmation_rejects_more_than_ten_devices():
+    """Даже старый callback с 11 устройствами не должен пройти потолок."""
+    cb = _callback('change_devices_11')
+    with (
+        patch.object(devices_mod, '_resolve_subscription', new=AsyncMock(return_value=(_subscription(6), SUB_ID))),
+        patch('app.database.crud.tariff.get_tariff_by_id', new=AsyncMock(return_value=_tariff())),
+    ):
+        await devices_mod.confirm_change_devices(cb, _user(), AsyncMock(), None)
+
+    cb.message.edit_text.assert_not_awaited()
+    assert cb.answer.await_args.kwargs['show_alert'] is True
+    assert '10' in cb.answer.await_args.args[0]

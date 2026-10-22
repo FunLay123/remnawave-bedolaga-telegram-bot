@@ -2808,18 +2808,15 @@ def get_change_devices_keyboard(
 
     buttons = []
 
-    # Используем max_device_limit из тарифа если есть, иначе глобальную настройку
-    tariff_max_devices = getattr(tariff, 'max_device_limit', None) if tariff else None
-    if tariff_max_devices and tariff_max_devices > 0:
-        max_devices = tariff_max_devices
-    else:
-        max_devices = settings.MAX_DEVICES_LIMIT if settings.MAX_DEVICES_LIMIT > 0 else 100
-
+    # Потолок — не выше 10 устройств, даже если тариф или MAX_DEVICES_LIMIT
+    # разрешают больше.
+    #
     # По умолчанию ниже включённого в тариф опускать нельзя — кнопки с меньшими
     # значениями просто не показываем (ALLOW_DEVICES_BELOW_TARIFF_LIMIT=True
     # возвращает прежний минимум 1).
-    from app.utils.subscription_utils import resolve_min_device_limit
+    from app.utils.subscription_utils import resolve_max_device_limit, resolve_min_device_limit
 
+    max_devices = resolve_max_device_limit(tariff)
     min_devices = resolve_min_device_limit(tariff)
 
     # До 10 вариантов вокруг текущего значения (по 5 в каждую сторону).
@@ -2858,9 +2855,9 @@ def get_change_devices_keyboard(
                 total_price = max(100, total_price)  # Минимум 1 рубль
                 # Разделитель вместо вложенных скобок; скидку в подписи не
                 # показываем — цена уже со скидкой.
-                price_text = f' • +{total_price // 100}₽{period_text}'
+                price_text = f'   •   +{total_price // 100}₽{period_text}'
             else:
-                price_text = ' • бесплатно'
+                price_text = '   • бесплатно'
         else:
             # Про «без возврата» сказано в blockquote текста, дублировать
             # в каждой кнопке нечего.
@@ -2868,7 +2865,7 @@ def get_change_devices_keyboard(
 
         # Иконку рисует Telegram по icon_custom_emoji_id, поэтому юникод
         # ➕/➖ из подписи убран — иначе получились бы две иконки.
-        button_text = f'{devices_count} устр.{price_text}'
+        button_text = f'{devices_count} устройств{price_text}'
 
         buttons.append(
             [

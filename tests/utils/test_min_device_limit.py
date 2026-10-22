@@ -11,7 +11,11 @@ from types import SimpleNamespace
 import pytest
 
 from app.config import settings
-from app.utils.subscription_utils import resolve_min_device_limit
+from app.utils.subscription_utils import (
+    DEVICE_LIMIT_HARD_CAP,
+    resolve_max_device_limit,
+    resolve_min_device_limit,
+)
 
 
 def _tariff(device_limit):
@@ -41,6 +45,33 @@ def test_no_tariff_at_all_floor_is_one(monkeypatch):
     monkeypatch.setattr(settings, 'ALLOW_DEVICES_BELOW_TARIFF_LIMIT', False)
     assert resolve_min_device_limit(None) == 1
     assert resolve_min_device_limit() == 1
+
+
+def _max_tariff(max_device_limit):
+    return SimpleNamespace(max_device_limit=max_device_limit)
+
+
+def test_hard_cap_wins_over_larger_tariff_max(monkeypatch):
+    """Тариф может разрешать 20 — продаём не больше 10."""
+    monkeypatch.setattr(settings, 'MAX_DEVICES_LIMIT', 20)
+    assert DEVICE_LIMIT_HARD_CAP == 10
+    assert resolve_max_device_limit(_max_tariff(20)) == DEVICE_LIMIT_HARD_CAP
+
+
+def test_smaller_tariff_max_is_respected(monkeypatch):
+    monkeypatch.setattr(settings, 'MAX_DEVICES_LIMIT', 20)
+    assert resolve_max_device_limit(_max_tariff(5)) == 5
+
+
+def test_global_setting_used_when_tariff_has_no_max(monkeypatch):
+    monkeypatch.setattr(settings, 'MAX_DEVICES_LIMIT', 7)
+    assert resolve_max_device_limit(_max_tariff(None)) == 7
+
+
+def test_unconfigured_max_still_capped(monkeypatch):
+    """MAX_DEVICES_LIMIT=0 («без ограничений») не отменяет жёсткий потолок."""
+    monkeypatch.setattr(settings, 'MAX_DEVICES_LIMIT', 0)
+    assert resolve_max_device_limit(None) == DEVICE_LIMIT_HARD_CAP
 
 
 def _offered_counts(keyboard) -> list[int]:
