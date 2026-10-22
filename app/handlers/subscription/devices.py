@@ -77,6 +77,18 @@ def _devices_back_callback(sub_id: int | None) -> str:
     return 'menu_subscription'
 
 
+def _devices_management_callback(sub_id: int | None) -> str:
+    """Возврат из экранов изменения лимита — в список устройств.
+
+    «Лимит устройств» открывают из списка устройств, поэтому назад нужно
+    возвращать туда же, а не на карточку подписки: иначе пользователь теряет
+    контекст и делает лишний шаг.
+    """
+    if settings.is_multi_tariff_enabled() and sub_id:
+        return f'device_management:{sub_id}'
+    return 'subscription_manage_devices'
+
+
 def _get_panel_user_id(subscription, db_user):
     """Get the numeric Remnawave user id for device operations.
 
@@ -270,8 +282,12 @@ async def handle_change_devices(
             ),
         ).format(current_devices=current_devices)
 
-    # В мульти-тарифе кнопка "назад" ведёт к детальному виду подписки
-    back_cb = f'sm:{sub_id}' if settings.is_multi_tariff_enabled() and sub_id else 'menu_subscription'
+    # «Назад» ведёт туда, откуда пришли: из меню «Устройства» мульти-тарифа —
+    # обратно в него, из списка устройств — обратно в список.
+    if callback.data.startswith('change_devices_menu'):
+        back_cb = f'sd:{sub_id}' if sub_id else 'menu_subscription'
+    else:
+        back_cb = _devices_management_callback(sub_id)
 
     await callback.message.edit_text(
         prompt_text,
@@ -400,12 +416,11 @@ async def confirm_change_devices(
             'devices',
             period_hint_days,
         )
-        discounted_per_month, discount_per_month = apply_percentage_discount(
+        discounted_per_month, _ = apply_percentage_discount(
             devices_price_per_month,
             devices_discount_percent,
         )
         price, charged_days = calculate_prorated_price(discounted_per_month, subscription.end_date)
-        total_discount = int(discount_per_month * charged_days / 30)
         period_label = f'{charged_days} дн.' if charged_days > 1 else '1 день'
 
         if price > 0 and db_user.balance_kopeks < price:
@@ -457,40 +472,25 @@ async def confirm_change_devices(
             await callback.answer()
             return
 
-        action_text = texts.t(
-            'DEVICE_CHANGE_ACTION_INCREASE',
-            'увеличить до {count}',
-        ).format(count=new_devices_count)
         if price > 0:
             cost_text = texts.t(
                 'DEVICE_CHANGE_EXTRA_COST',
-                'Доплата: {amount} (за {period})',
+                '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> {amount} за {period}',
             ).format(
                 amount=texts.format_price(price),
                 period=period_label,
                 months=period_label,
             )
-            if total_discount > 0:
-                cost_text += texts.t(
-                    'DEVICE_CHANGE_DISCOUNT_INFO',
-                    ' (скидка {percent}%: -{amount})',
-                ).format(
-                    percent=devices_discount_percent,
-                    amount=texts.format_price(total_discount),
-                )
         else:
-            cost_text = texts.t('DEVICE_CHANGE_FREE', 'Бесплатно')
+            cost_text = ''
 
     else:
         price = 0
-        action_text = texts.t(
-            'DEVICE_CHANGE_ACTION_DECREASE',
-            'уменьшить до {count}',
-        ).format(count=new_devices_count)
-        cost_text = texts.t('DEVICE_CHANGE_NO_REFUND', 'Возврат средств не производится')
+        cost_text = ''
 
-    # Проверяем количество подключённых устройств для предупреждения
-    devices_warning = ''
+    # Проверяем количество подключённых устройств: при уменьшении лимита
+    # лишние устройства будут сброшены — это меняет подсказку под ценой.
+    devices_will_reset = False
     panel_user_id = _get_panel_user_id(subscription, db_user)
     if new_devices_count < current_devices and panel_user_id:
         try:
@@ -500,37 +500,42 @@ async def confirm_change_devices(
                 if isinstance(devices_info, dict):
                     connected_count = devices_info.get('total', 0)
                     if connected_count > new_devices_count:
-                        devices_warning = texts.t(
-                            'DEVICE_CHANGE_RESET_WARNING',
-                            (
-                                '\n⚠️ <b>Внимание!</b>\n'
-                                'У вас подключено {connected} устройств.\n'
-                                'При уменьшении лимита до {new} все устройства будут сброшены.\n'
-                                'Вам нужно будет заново подключить нужные устройства.\n'
-                            ),
-                        ).format(connected=connected_count, new=new_devices_count)
+                        devices_will_reset = True
         except Exception as e:
             logger.error('Ошибка проверки устройств', error=e)
+
+    if devices_difference > 0 and price > 0:
+        hint_text = texts.t(
+            'DEVICE_CHANGE_HINT_PAID',
+            '\n\n<blockquote>Доплата спишется с баланса</blockquote>',
+        )
+    elif devices_difference > 0:
+        hint_text = texts.t(
+            'DEVICE_CHANGE_HINT_FREE',
+            '\n\n<blockquote>В пределах тарифа — доплаты нет</blockquote>',
+        )
+    elif devices_will_reset:
+        hint_text = texts.t(
+            'DEVICE_CHANGE_HINT_RESET',
+            '\n\n<blockquote>Средства не возвращаются. Лишние устройства будут сброшены</blockquote>',
+        )
+    else:
+        hint_text = texts.t(
+            'DEVICE_CHANGE_HINT_NO_REFUND',
+            '\n\n<blockquote>Средства не возвращаются</blockquote>',
+        )
 
     confirm_text = texts.t(
         'DEVICE_CHANGE_CONFIRMATION',
         (
-            '📱 <b>Подтверждение изменения</b>\n\n'
-            'Текущее количество: {current} устройств\n'
-            'Новое количество: {new} устройств\n\n'
-            'Действие: {action}\n'
-            '💰 {cost}\n\n'
-            'Подтвердить изменение?'
+            '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Подтверждение</b>\n\n'
+            '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> {current} → {new}{details}'
         ),
     ).format(
         current=current_devices,
         new=new_devices_count,
-        action=action_text,
-        cost=cost_text,
+        details=(cost_text + hint_text) if cost_text else hint_text,
     )
-
-    if devices_warning:
-        confirm_text += devices_warning
 
     await callback.message.edit_text(
         confirm_text,
@@ -538,7 +543,12 @@ async def confirm_change_devices(
             new_devices_count,
             price,
             db_user.language,
-            back_callback=f'sm:{sub_id}' if settings.is_multi_tariff_enabled() and sub_id else 'menu_subscription',
+            # «Отмена» возвращает к выбору количества, а не в меню подписки.
+            back_callback=(
+                f'change_devices_menu:{sub_id}'
+                if settings.is_multi_tariff_enabled() and sub_id
+                else 'subscription_change_devices'
+            ),
         ),
     )
 
@@ -816,7 +826,9 @@ async def execute_change_devices(
 
         await callback.message.edit_text(
             success_text,
-            reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(subscription.id)),
+            reply_markup=get_back_keyboard(
+                db_user.language, callback_data=_devices_management_callback(subscription.id)
+            ),
         )
 
         logger.info(
@@ -831,7 +843,9 @@ async def execute_change_devices(
         logger.error('Ошибка изменения количества устройств', error=e)
         await callback.message.edit_text(
             texts.ERROR,
-            reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(subscription.id)),
+            reply_markup=get_back_keyboard(
+                db_user.language, callback_data=_devices_management_callback(subscription.id)
+            ),
         )
 
     await callback.answer()

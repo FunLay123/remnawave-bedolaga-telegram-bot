@@ -2791,7 +2791,7 @@ def get_change_devices_keyboard(
         now = datetime.now(UTC)
         days_left = max(1, math.ceil((subscription_end_date - now).total_seconds() / 86400))
         price_multiplier = days_left / 30
-        period_text = f' (за {days_left} дн.)' if days_left > 1 else ' (за 1 день)'
+        period_text = f' за {days_left} дн.' if days_left > 1 else ' за 1 день'
     else:
         price_multiplier = 1
         period_text = ''
@@ -2822,8 +2822,19 @@ def get_change_devices_keyboard(
 
     min_devices = resolve_min_device_limit(tariff)
 
-    start_range = max(min_devices, min(current_devices - 3, max_devices - 6))
-    end_range = min(max_devices + 1, max(current_devices + 4, 7))
+    # До 10 вариантов вокруг текущего значения (по 5 в каждую сторону).
+    # У нижней/верхней границы окно сдвигается, чтобы кнопок осталось столько же.
+    visible_options = 10
+    half = visible_options // 2
+
+    start_range = max(
+        min_devices,
+        min(current_devices - half, max_devices - visible_options),
+    )
+    end_range = min(
+        max_devices + 1,
+        max(current_devices + half + 1, min_devices + visible_options + 1),
+    )
 
     for devices_count in range(start_range, end_range):
         # Кнопки текущего значения нет: она ведёт на тот же экран и ничего
@@ -2831,36 +2842,43 @@ def get_change_devices_keyboard(
         if devices_count == current_devices:
             continue
 
-        if devices_count > current_devices:
-            emoji = '➕'
-
+        is_increase = devices_count > current_devices
+        if is_increase:
             current_chargeable = max(0, current_devices - default_device_limit)
             new_chargeable = max(0, devices_count - default_device_limit)
             chargeable_devices = new_chargeable - current_chargeable
 
             if chargeable_devices > 0:
                 price_per_month = chargeable_devices * device_price_per_month
-                discounted_per_month, discount_per_month = apply_percentage_discount(
+                discounted_per_month, _ = apply_percentage_discount(
                     price_per_month,
                     discount_percent,
                 )
                 total_price = int(discounted_per_month * price_multiplier)
                 total_price = max(100, total_price)  # Минимум 1 рубль
-                price_text = f' (+{total_price // 100}₽{period_text})'
-                total_discount = int(discount_per_month * price_multiplier)
-                if discount_percent > 0 and total_discount > 0:
-                    price_text += f' (скидка {discount_percent}%: -{total_discount // 100}₽)'
+                # Разделитель вместо вложенных скобок; скидку в подписи не
+                # показываем — цена уже со скидкой.
+                price_text = f' · +{total_price // 100}₽{period_text}'
             else:
-                price_text = ' (бесплатно)'
+                price_text = ' · бесплатно'
         else:
             # Про «без возврата» сказано в blockquote текста, дублировать
             # в каждой кнопке нечего.
-            emoji = '➖'
             price_text = ''
 
-        button_text = f'{emoji} {devices_count} устр.{price_text}'
+        # Иконку рисует Telegram по icon_custom_emoji_id, поэтому юникод
+        # ➕/➖ из подписи убран — иначе получились бы две иконки.
+        button_text = f'{devices_count} устр.{price_text}'
 
-        buttons.append([InlineKeyboardButton(text=button_text, callback_data=f'change_devices_{devices_count}')])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f'change_devices_{devices_count}',
+                    icon_custom_emoji_id='5258466217273871977',
+                )
+            ]
+        )
 
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 

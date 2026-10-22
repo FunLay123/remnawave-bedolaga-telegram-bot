@@ -11,16 +11,22 @@
   средств вынесено в blockquote текста.
 """
 
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import app.handlers.subscription.devices as devices_mod
-from app.keyboards.inline import get_confirm_change_devices_keyboard, get_devices_management_keyboard
+from app.keyboards.inline import (
+    get_change_devices_keyboard,
+    get_confirm_change_devices_keyboard,
+    get_devices_management_keyboard,
+)
 from app.utils.pagination import paginate_list
 
 
-DEVICE_ICON = '5258466217273871977'  # крестик (из кнопки автоплатежа)
+DEVICE_ICON = '5258466217273871977'  # общая иконка устройств (крестик/плюс/минус)
 CONFIRM_ICON = '5334552404736104314'  # монетка (из кнопки «Продлить подписку»)
 
 
@@ -69,6 +75,64 @@ def test_confirm_button_is_primary_with_coin_icon():
     confirm = _buttons(keyboard)[0]
     assert confirm.style == 'primary'
     assert confirm.icon_custom_emoji_id == CONFIRM_ICON
+
+
+def test_change_buttons_use_custom_icons_instead_of_unicode():
+    """Кнопки «X устр.» несут свою иконку, а не ➕/➖ в тексте."""
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
+
+    change_buttons = [b for b in _buttons(keyboard) if b.callback_data.startswith('change_devices_')]
+    assert change_buttons
+
+    for button in change_buttons:
+        assert button.icon_custom_emoji_id == DEVICE_ICON, button.text
+        assert '➕' not in button.text and '➖' not in button.text, button.text
+
+
+def test_increase_price_uses_dot_separator_without_discount():
+    """«5 устр. · +36₽ за 11 дн.» — без вложенных скобок и без скидки."""
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    end_date = datetime.now(UTC) + timedelta(days=11)
+    keyboard = get_change_devices_keyboard(3, 'ru', subscription_end_date=end_date, tariff=tariff)
+
+    increase = [b for b in _buttons(keyboard) if b.callback_data.startswith('change_devices_')]
+    assert increase
+    for button in increase:
+        assert ' · +' in button.text, button.text
+        assert 'за 11 дн.' in button.text, button.text
+        assert '(' not in button.text and ')' not in button.text, button.text
+        assert 'скидка' not in button.text, button.text
+
+
+def test_decrease_button_has_no_price_suffix():
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
+
+    decrease = next(b for b in _buttons(keyboard) if b.callback_data == 'change_devices_3')
+    assert decrease.text == '3 устр.'
+
+
+def _change_counts(keyboard) -> list[int]:
+    return sorted(
+        int(b.callback_data.split('_')[-1]) for b in _buttons(keyboard) if b.callback_data.startswith('change_devices_')
+    )
+
+
+def test_ten_options_around_current_value():
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
+
+    # По 5 в каждую сторону от текущего значения.
+    assert _change_counts(keyboard) == [3, 4, 5, 7, 8, 9, 10, 11, 12, 13]
+
+
+def test_ten_options_near_max_limit_shift_window_down():
+    """У потолка окно сдвигается вниз — количество кнопок не уменьшается."""
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    keyboard = get_change_devices_keyboard(20, 'ru', tariff=tariff)
+
+    assert _change_counts(keyboard) == list(range(10, 20))
 
 
 async def _reset_and_get_render():
