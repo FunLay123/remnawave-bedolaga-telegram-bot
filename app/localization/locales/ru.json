@@ -1167,7 +1167,7 @@
   "DEVICE_MANAGEMENT_ACTIONS": "\n💡 <b>Действия:</b>\n• Выберите устройство для сброса\n• Или сбросьте все устройства сразу",
   "DEVICE_MANAGEMENT_CONNECTED_HEADER": "<b>Подключенные устройства:</b>\n",
   "DEVICE_MANAGEMENT_LIST_ITEM": "• {device}\n",
-  "DEVICE_MANAGEMENT_OVERVIEW": "<tg-emoji emoji-id=\"5359415772844152891\">📋</tg-emoji> <b>Управление устройствами</b>\n\n<tg-emoji emoji-id=\"5237868881267153432\">📱</tg-emoji> Устройства: {used} / {limit}\n<blockquote>Нажмите на устройство ниже, чтобы отключить его</blockquote>",
+  "DEVICE_MANAGEMENT_OVERVIEW": "<tg-emoji emoji-id=\"5359415772844152891\">📋</tg-emoji> <b>Управление устройствами</b>\n\n<tg-emoji emoji-id=\"5237868881267153432\">📱</tg-emoji> Устройства: {used} / {limit}\n\n<blockquote>Нажмите на устройство ниже, чтобы отключить его</blockquote>",
   "DEVICE_NONE_CONNECTED": "<tg-emoji emoji-id=\"5289862389552919154\">ℹ️</tg-emoji> У вас нет подключенных устройств",
   "DEVICE_PAGE_LOAD_ERROR": "❌ Ошибка загрузки страницы",
   "DEVICE_RESET_ALL_DONE": "<tg-emoji emoji-id=\"5289862389552919154\">ℹ️</tg-emoji> Все устройства сброшены",
