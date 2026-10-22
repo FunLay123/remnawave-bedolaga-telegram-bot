@@ -91,8 +91,10 @@ def test_change_buttons_have_no_unicode_plus_minus():
 
 
 def _plain(text: str) -> str:
-    """NBSP-выравнивание → обычные пробелы, чтобы утверждения читались."""
-    return text.replace('\u00a0', ' ').strip()
+    """Типографские пробелы выравнивания → обычные, чтобы утверждения читались."""
+    for pad in ('\u00a0', '\u2007', '\u2002'):
+        text = text.replace(pad, ' ')
+    return text.strip()
 
 
 def test_increase_price_uses_dot_separator_without_discount():

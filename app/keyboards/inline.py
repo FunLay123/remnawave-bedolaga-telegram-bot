@@ -2834,9 +2834,13 @@ def get_change_devices_keyboard(
     )
 
     # Подписи собираем в два прохода: сначала считаем ширины полей, затем
-    # добиваем их неразрывными пробелами. Telegram центрирует текст кнопки,
-    # поэтому колонки совпадают только у строк одинаковой длины.
+    # добиваем их типографскими пробелами. Telegram центрирует текст кнопки,
+    # поэтому колонки совпадают только у строк одинаковой длины. Ширина
+    # заполнителя должна совпадать с шириной недостающего символа:
+    # FIGURE SPACE — цифра, EN SPACE — буква, NBSP — обычный пробел.
     nbsp = '\u00a0'
+    figure_space = '\u2007'
+    en_space = '\u2002'
     entries = []  # (devices_count, price_rub | None, is_free)
     for devices_count in range(start_range, end_range):
         # Кнопки текущего значения нет: она ведёт на тот же экран и ничего
@@ -2871,10 +2875,11 @@ def get_change_devices_keyboard(
 
     labels = []
     for devices_count, price_rub, is_free in entries:
-        number = str(devices_count).rjust(max_number_width)
-        word = _get_device_declension(devices_count).ljust(max_word_width)
+        number = str(devices_count).rjust(max_number_width, figure_space)
+        word = _get_device_declension(devices_count)
+        word += en_space * (max_word_width - len(word))
         if price_rub is not None:
-            price = f'+{price_rub}₽'.rjust(max_price_width)
+            price = f'+{price_rub}₽'.rjust(max_price_width, figure_space)
             tail = f'  •   {price}{period_text}'
         elif is_free:
             tail = '  •  бесплатно'
@@ -2882,14 +2887,14 @@ def get_change_devices_keyboard(
             tail = ''
         labels.append(f'{number} {word}{tail}'.replace(' ', nbsp))
 
-    # Кнопки без цены короче — добиваем хвостом из NBSP, чтобы и они стояли
-    # по центру тех же колонок.
+    # Кнопки без цены короче — добиваем хвостом, чтобы и они стояли по центру
+    # тех же колонок.
     max_label_width = max(len(label) for label in labels)
     for (devices_count, _, _), label in zip(entries, labels, strict=True):
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=label.ljust(max_label_width, nbsp),
+                    text=label.ljust(max_label_width, en_space),
                     callback_data=f'change_devices_{devices_count}',
                     # icon_custom_emoji_id='5258466217273871977',
                 )
