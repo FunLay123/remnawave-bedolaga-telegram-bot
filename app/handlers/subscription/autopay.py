@@ -143,7 +143,7 @@ async def handle_autopay_menu(callback: types.CallbackQuery, db_user: User, db: 
     if period_value:
         period_text = texts.t('AUTOPAY_PERIOD_VALUE', '{days} дн.').format(days=period_value)
     else:
-        period_text = texts.t('AUTOPAY_PERIOD_DEFAULT_VALUE', 'по умолчанию (самый дешёвый период тарифа)')
+        period_text = texts.t('AUTOPAY_PERIOD_DEFAULT_VALUE', '30 дн.')
 
     text = texts.t(
         'AUTOPAY_MENU_TEXT',
