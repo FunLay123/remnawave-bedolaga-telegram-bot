@@ -195,6 +195,16 @@ def _directory_is_writable(directory: Path) -> bool:
 
 
 def ensure_locale_templates() -> None:
+    """Зеркалит локали репозитория во внешнюю папку (``LOCALES_PATH``).
+
+    Зовётся на каждом старте, и копия **перезаписывается** содержимым
+    репозитория. Раньше существующие файлы пропускались, и внешняя папка
+    оставалась снапшотом первого запуска — а при слиянии она побеждает
+    (``_merge_dicts(defaults, overrides)``). Правки текстов в репозитории
+    до бота не доходили: правишь локаль, перезапускаешь — на экране старое.
+
+    Файлы, которых нет в репозитории, не трогаются: это чужие заметки.
+    """
     destination = _resolve_user_locales_dir()
     try:
         destination.mkdir(parents=True, exist_ok=True)
@@ -209,33 +219,16 @@ def ensure_locale_templates() -> None:
     if not _directory_is_writable(destination):
         return
 
-    destination_has_files = any(destination.glob('*'))
-
     def _copy_locale(source: Path, target: Path) -> None:
         try:
             shutil.copyfile(source, target)
         except Exception as error:
             _logger.warning('Failed to copy default locale', source=source, target=target, error=error)
 
-    if not destination_has_files:
-        for template in _DEFAULT_LOCALES_DIR.iterdir():
-            if not template.is_file():
-                continue
-            _copy_locale(template, destination / template.name)
-        return
-
-    for locale_code in ('ru', 'en', 'fa'):
-        source_path = _DEFAULT_LOCALES_DIR / f'{locale_code}.json'
-        target_path = destination / f'{locale_code}.json'
-
-        if target_path.exists():
+    for template in _DEFAULT_LOCALES_DIR.iterdir():
+        if not template.is_file():
             continue
-
-        if not source_path.exists():
-            _logger.debug('Default locale template is missing', locale_code=locale_code, source_path=source_path)
-            continue
-
-        _copy_locale(source_path, target_path)
+        _copy_locale(template, destination / template.name)
 
 
 def _load_default_locale(language: str) -> dict[str, Any]:
