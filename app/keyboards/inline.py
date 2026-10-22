@@ -2858,9 +2858,9 @@ def get_change_devices_keyboard(
                 total_price = max(100, total_price)  # Минимум 1 рубль
                 # Разделитель вместо вложенных скобок; скидку в подписи не
                 # показываем — цена уже со скидкой.
-                price_text = f' · +{total_price // 100}₽{period_text}'
+                price_text = f' • +{total_price // 100}₽{period_text}'
             else:
-                price_text = ' · бесплатно'
+                price_text = ' • бесплатно'
         else:
             # Про «без возврата» сказано в blockquote текста, дублировать
             # в каждой кнопке нечего.
