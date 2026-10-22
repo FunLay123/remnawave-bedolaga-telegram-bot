@@ -2833,14 +2833,18 @@ def get_change_devices_keyboard(
         max(current_devices + half + 1, min_devices + visible_options + 1),
     )
 
+    # Подписи собираем в два прохода: сначала считаем ширины полей, затем
+    # добиваем их неразрывными пробелами. Telegram центрирует текст кнопки,
+    # поэтому колонки совпадают только у строк одинаковой длины.
+    nbsp = '\u00a0'
+    entries = []  # (devices_count, price_rub | None, is_free)
     for devices_count in range(start_range, end_range):
         # Кнопки текущего значения нет: она ведёт на тот же экран и ничего
         # не меняет. Текущее значение видно в тексте сообщения.
         if devices_count == current_devices:
             continue
 
-        is_increase = devices_count > current_devices
-        if is_increase:
+        if devices_count > current_devices:
             current_chargeable = max(0, current_devices - default_device_limit)
             new_chargeable = max(0, devices_count - default_device_limit)
             chargeable_devices = new_chargeable - current_chargeable
@@ -2853,26 +2857,41 @@ def get_change_devices_keyboard(
                 )
                 total_price = int(discounted_per_month * price_multiplier)
                 total_price = max(100, total_price)  # Минимум 1 рубль
-                # Разделитель вместо вложенных скобок; скидку в подписи не
-                # показываем — цена уже со скидкой.
-                price_text = f'   •   +{total_price // 100}₽{period_text}'
+                entries.append((devices_count, total_price // 100, False))
             else:
-                price_text = '   • бесплатно'
+                entries.append((devices_count, None, True))
         else:
             # Про «без возврата» сказано в blockquote текста, дублировать
             # в каждой кнопке нечего.
-            price_text = ''
+            entries.append((devices_count, None, False))
 
-        # Иконку рисует Telegram по icon_custom_emoji_id, поэтому юникод
-        # ➕/➖ из подписи убран — иначе получились бы две иконки.
-        button_text = f'{devices_count} устройств{price_text}'
+    max_number_width = max(len(str(count)) for count, _, _ in entries)
+    max_word_width = max(len(_get_device_declension(count)) for count, _, _ in entries)
+    max_price_width = max((len(f'+{price}₽') for _, price, _ in entries if price is not None), default=0)
 
+    labels = []
+    for devices_count, price_rub, is_free in entries:
+        number = str(devices_count).rjust(max_number_width)
+        word = _get_device_declension(devices_count).ljust(max_word_width)
+        if price_rub is not None:
+            price = f'+{price_rub}₽'.rjust(max_price_width)
+            tail = f'  •  {price}{period_text}'
+        elif is_free:
+            tail = '  •  бесплатно'
+        else:
+            tail = ''
+        labels.append(f'{number} {word}{tail}'.replace(' ', nbsp))
+
+    # Кнопки без цены короче — добиваем хвостом из NBSP, чтобы и они стояли
+    # по центру тех же колонок.
+    max_label_width = max(len(label) for label in labels)
+    for (devices_count, _, _), label in zip(entries, labels, strict=True):
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=button_text,
+                    text=label.ljust(max_label_width, nbsp),
                     callback_data=f'change_devices_{devices_count}',
-                    #icon_custom_emoji_id='5258466217273871977',
+                    # icon_custom_emoji_id='5258466217273871977',
                 )
             ]
         )

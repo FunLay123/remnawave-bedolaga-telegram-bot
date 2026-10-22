@@ -19,6 +19,7 @@ import pytest
 
 import app.handlers.subscription.devices as devices_mod
 from app.keyboards.inline import (
+    _get_device_declension,
     get_change_devices_keyboard,
     get_confirm_change_devices_keyboard,
     get_devices_management_keyboard,
@@ -77,8 +78,8 @@ def test_confirm_button_is_primary_with_coin_icon():
     assert confirm.icon_custom_emoji_id == CONFIRM_ICON
 
 
-def test_change_buttons_use_custom_icons_instead_of_unicode():
-    """Кнопки «X устр.» несут свою иконку, а не ➕/➖ в тексте."""
+def test_change_buttons_have_no_unicode_plus_minus():
+    """Юникодных ➕/➖ в подписи нет — иначе будут две иконки, если вернуть кастомную."""
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
     keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
 
@@ -86,12 +87,16 @@ def test_change_buttons_use_custom_icons_instead_of_unicode():
     assert change_buttons
 
     for button in change_buttons:
-        assert button.icon_custom_emoji_id == DEVICE_ICON, button.text
         assert '➕' not in button.text and '➖' not in button.text, button.text
 
 
+def _plain(text: str) -> str:
+    """NBSP-выравнивание → обычные пробелы, чтобы утверждения читались."""
+    return text.replace('\u00a0', ' ').strip()
+
+
 def test_increase_price_uses_dot_separator_without_discount():
-    """«5 устр. · +36₽ за 11 дн.» — без вложенных скобок и без скидки."""
+    """«5 устройств • +36₽ за 11 дн.» — без вложенных скобок и без скидки."""
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
     end_date = datetime.now(UTC) + timedelta(days=11)
     keyboard = get_change_devices_keyboard(3, 'ru', subscription_end_date=end_date, tariff=tariff)
@@ -99,10 +104,11 @@ def test_increase_price_uses_dot_separator_without_discount():
     increase = [b for b in _buttons(keyboard) if b.callback_data.startswith('change_devices_')]
     assert increase
     for button in increase:
-        assert ' • ' in button.text, button.text
-        assert 'за 11 дн.' in button.text, button.text
-        assert '(' not in button.text and ')' not in button.text, button.text
-        assert 'скидка' not in button.text, button.text
+        text = _plain(button.text)
+        assert ' • ' in text, text
+        assert 'за 11 дн.' in text, text
+        assert '(' not in text and ')' not in text, text
+        assert 'скидка' not in text, text
 
 
 def test_decrease_button_has_no_price_suffix():
@@ -110,7 +116,50 @@ def test_decrease_button_has_no_price_suffix():
     keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
 
     decrease = next(b for b in _buttons(keyboard) if b.callback_data == 'change_devices_3')
-    assert decrease.text == '3 устр.'
+    assert _plain(decrease.text) == '3 устройства'
+
+
+@pytest.mark.parametrize(
+    ('count', 'word'),
+    [
+        (1, 'устройство'),
+        (2, 'устройства'),
+        (4, 'устройства'),
+        (5, 'устройств'),
+        (10, 'устройств'),
+        (11, 'устройств'),
+        (21, 'устройство'),
+        (22, 'устройства'),
+    ],
+)
+def test_device_declension(count, word):
+    assert _get_device_declension(count) == word
+
+
+def test_labels_use_correct_declension():
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
+
+    labels = {
+        int(b.callback_data.rsplit('_', 1)[1]): _plain(b.text)
+        for b in _buttons(keyboard)
+        if b.callback_data.startswith('change_devices_')
+    }
+    assert labels[3].startswith('3 устройства')
+    assert labels[4].startswith('4 устройства')
+    assert labels[5].startswith('5 устройств')
+    assert labels[10].startswith('10 устройств')
+
+
+def test_labels_are_padded_to_equal_length():
+    """Равная длина строк — единственный способ выровнять колонки: текст кнопок центрируется."""
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    end_date = datetime.now(UTC) + timedelta(days=11)
+    keyboard = get_change_devices_keyboard(6, 'ru', subscription_end_date=end_date, tariff=tariff)
+
+    labels = [b.text for b in _buttons(keyboard) if b.callback_data.startswith('change_devices_')]
+    assert len(labels) == 7
+    assert len({len(label) for label in labels}) == 1, labels
 
 
 def _change_counts(keyboard) -> list[int]:
