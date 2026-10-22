@@ -2872,7 +2872,7 @@ def get_change_devices_keyboard(
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'change_devices_{devices_count}',
-                    icon_custom_emoji_id='5258466217273871977',
+                    #icon_custom_emoji_id='5258466217273871977',
                 )
             ]
         )
