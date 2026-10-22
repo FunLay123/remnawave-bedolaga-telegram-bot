@@ -31,7 +31,7 @@ from app.keyboards.inline import (
     get_insufficient_balance_keyboard,
     get_specific_app_keyboard,
 )
-from app.localization.texts import get_texts
+from app.localization.texts import Texts, get_texts
 from app.services.pricing_engine import PricingEngine
 from app.services.remnawave_service import RemnaWaveService
 from app.services.subscription_service import SubscriptionService
@@ -252,25 +252,21 @@ async def handle_change_devices(
         prompt_text = texts.t(
             'CHANGE_DEVICES_PROMPT_TARIFF',
             (
-                '📱 <b>Изменение количества устройств</b>\n\n'
-                'Текущий лимит: {current_devices} устройств\n'
-                'Цена за доп. устройство: {price}/мес\n'
-                'Выберите новое количество устройств:\n\n'
-                '💡 <b>Важно:</b>\n'
-                '• При увеличении - доплата пропорционально оставшемуся времени\n'
-                '• При уменьшении - возврат средств не производится'
+                '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Лимит устройств</b>\n\n'
+                '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> Сейчас: {current_devices}\n'
+                '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> Цена за доп. устройство: {price}/мес\n'
+                '<blockquote>При увеличении спишется доплата за оставшиеся дни. '
+                'При уменьшении средства не возвращаются, но снижается цена следующего продления</blockquote>'
             ),
         ).format(current_devices=current_devices, price=price_text)
     else:
         prompt_text = texts.t(
             'CHANGE_DEVICES_PROMPT',
             (
-                '📱 <b>Изменение количества устройств</b>\n\n'
-                'Текущий лимит: {current_devices} устройств\n'
-                'Выберите новое количество устройств:\n\n'
-                '💡 <b>Важно:</b>\n'
-                '• При увеличении - доплата пропорционально оставшемуся времени\n'
-                '• При уменьшении - возврат средств не производится'
+                '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Лимит устройств</b>\n\n'
+                '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> Сейчас: {current_devices}\n'
+                '<blockquote>При увеличении спишется доплата за оставшиеся дни. '
+                'При уменьшении средства не возвращаются, но снижается цена следующего продления</blockquote>'
             ),
         ).format(current_devices=current_devices)
 
@@ -884,7 +880,15 @@ async def handle_device_management(
                     await callback.answer()
                     return
 
-                await show_devices_page(callback, db_user, devices_list, page=1, sub_id=sub_id)
+                await show_devices_page(
+                    callback,
+                    db_user,
+                    devices_list,
+                    page=1,
+                    sub_id=sub_id,
+                    show_buy_devices=await _can_buy_devices(db, subscription, db_user),
+                    device_limit=subscription.device_limit,
+                )
             else:
                 await callback.answer(
                     texts.t(
@@ -925,59 +929,71 @@ async def _enrich_devices_with_aliases(devices_list: list[dict], user_id: int) -
     return attach_aliases_to_devices(devices_list, aliases)
 
 
+# Сколько устройств показывать на странице. Одно значение на весь файл:
+# кнопка `reset_device_{i}_{page}` кодирует индекс ВНУТРИ страницы, поэтому
+# разные значения в разных местах заставили бы тап удалять не то устройство.
+DEVICES_PER_PAGE = 20
+
+
+async def _can_buy_devices(db: AsyncSession, subscription, db_user: User) -> bool:
+    """Доступна ли докупка устройств этой подписке — для кнопки в списке.
+
+    Условия те же, что проверяет сам экран докупки (``handle_change_devices``),
+    чтобы кнопка не вела на гарантированный отказ: платная подписка, не legacy,
+    и у тарифа задана цена за устройство либо включён выбор устройств.
+    """
+    if not subscription or subscription.is_trial or is_legacy_subscription(subscription):
+        return False
+
+    try:
+        tariff = None
+        if subscription.tariff_id:
+            from app.database.crud.tariff import get_tariff_by_id
+
+            tariff = await get_tariff_by_id(db, subscription.tariff_id)
+
+        if tariff:
+            price = getattr(tariff, 'device_price_kopeks', None)
+            return bool(price and price > 0)
+
+        return bool(settings.is_devices_selection_enabled())
+    except Exception as error:
+        # Сбой запроса не должен ронять экран устройств ради одной кнопки:
+        # без докупки список остаётся рабочим.
+        logger.warning('Не удалось определить доступность докупки устройств', error=str(error)[:200])
+        return False
+
+
 async def show_devices_page(
-    callback: types.CallbackQuery, db_user: User, devices_list: list[dict], page: int = 1, sub_id: int | None = None
+    callback: types.CallbackQuery,
+    db_user: User,
+    devices_list: list[dict],
+    page: int = 1,
+    sub_id: int | None = None,
+    *,
+    show_buy_devices: bool = False,
+    device_limit: int | None = None,
 ):
     texts = get_texts(db_user.language)
-    devices_per_page = 5
 
     # Все вызовы рендера проходят через show_devices_page, поэтому единое место
     # для прикрепления локальных имён — здесь. Клавиатура и текст подтягивают
     # `local_name` из enriched dict'ов.
     devices_list = await _enrich_devices_with_aliases(devices_list, db_user.id)
 
-    pagination = paginate_list(devices_list, page=page, per_page=devices_per_page)
+    pagination = paginate_list(devices_list, page=page, per_page=DEVICES_PER_PAGE)
 
+    # Список устройств текстом не дублируется — они и так на кнопках. В тексте
+    # только заголовок, лимит и подсказка о том, что делает тап.
+    device_limit_text = Texts.format_device_limit(device_limit)
     devices_text = texts.t(
         'DEVICE_MANAGEMENT_OVERVIEW',
         (
-            '🔄 <b>Управление устройствами</b>\n\n'
-            '📊 Всего подключено: {total} устройств\n'
-            '📄 Страница {page} из {pages}\n\n'
+            '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Управление устройствами</b>\n\n'
+            '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> Устройства: {used} / {limit}\n'
+            '<blockquote>Нажмите на устройство ниже, чтобы отключить его</blockquote>'
         ),
-    ).format(total=len(devices_list), page=pagination.page, pages=pagination.total_pages)
-
-    if pagination.items:
-        devices_text += texts.t(
-            'DEVICE_MANAGEMENT_CONNECTED_HEADER',
-            '<b>Подключенные устройства:</b>\n',
-        )
-        for device in pagination.items:
-            local_name = (device.get('local_name') or '').strip()
-            if local_name:
-                device_info = local_name
-            else:
-                platform = device.get('platform', 'Unknown')
-                device_model = device.get('deviceModel', 'Unknown')
-                device_info = f'{platform} - {device_model}'
-
-            if len(device_info) > 35:
-                device_info = device_info[:32] + '...'
-
-            devices_text += texts.t(
-                'DEVICE_MANAGEMENT_LIST_ITEM',
-                '• {device}\n',
-            ).format(device=html_mod.escape(device_info))
-
-    devices_text += texts.t(
-        'DEVICE_MANAGEMENT_ACTIONS',
-        (
-            '\n💡 <b>Действия:</b>\n'
-            '• ✏️ — переименовать устройство (видно только вам)\n'
-            '• 🔄 — сбросить устройство\n'
-            '• Или сбросьте все устройства сразу'
-        ),
-    )
+    ).format(used=len(devices_list), limit=device_limit_text)
 
     await callback.message.edit_text(
         devices_text,
@@ -986,6 +1002,7 @@ async def show_devices_page(
             pagination,
             db_user.language,
             back_callback=f'sm:{sub_id}' if settings.is_multi_tariff_enabled() and sub_id else 'menu_subscription',
+            show_buy_devices=show_buy_devices,
         ),
     )
 
@@ -1006,7 +1023,15 @@ async def handle_devices_page(callback: types.CallbackQuery, db_user: User, db: 
 
             if isinstance(devices_info, dict):
                 devices_list = devices_info.get('devices', [])
-                await show_devices_page(callback, db_user, devices_list, page=page, sub_id=sub_id)
+                await show_devices_page(
+                    callback,
+                    db_user,
+                    devices_list,
+                    page=page,
+                    sub_id=sub_id,
+                    show_buy_devices=await _can_buy_devices(db, subscription, db_user),
+                    device_limit=subscription.device_limit,
+                )
             else:
                 await callback.answer(
                     texts.t('DEVICE_FETCH_ERROR', '❌ Ошибка получения устройств'),
@@ -1070,7 +1095,7 @@ async def start_device_rename(callback: types.CallbackQuery, db_user: User, db: 
         return
 
     devices_list = (devices_info or {}).get('devices', []) or []
-    pagination = paginate_list(devices_list, page=page, per_page=5)
+    pagination = paginate_list(devices_list, page=page, per_page=DEVICES_PER_PAGE)
     if device_index >= len(pagination.items):
         await callback.answer(
             texts.t('DEVICE_RENAME_NOT_FOUND', '❌ Устройство не найдено'),
@@ -1192,7 +1217,7 @@ async def process_device_rename(message: types.Message, db_user: User, db: Async
 
         # Сообщения от FSM-handler'а — не callback, поэтому отдельный пост.
         devices_list = await _enrich_devices_with_aliases(devices_list, db_user.id)
-        pagination = paginate_list(devices_list, page=page, per_page=5)
+        pagination = paginate_list(devices_list, page=page, per_page=DEVICES_PER_PAGE)
         back_cb = f'sm:{sub_id}' if settings.is_multi_tariff_enabled() and sub_id else 'menu_subscription'
 
         await message.answer(
@@ -1232,7 +1257,14 @@ async def cancel_device_rename(
             async with service.get_api_client() as api:
                 devices_info = await api.get_user_devices(panel_user_id)
             devices_list = (devices_info or {}).get('devices', []) or []
-            await show_devices_page(callback, db_user, devices_list, page=page, sub_id=sub_id)
+            await show_devices_page(
+                callback,
+                db_user,
+                devices_list,
+                page=page,
+                sub_id=sub_id,
+                device_limit=getattr(subscription, 'device_limit', None),
+            )
             await callback.answer(texts.t('DEVICE_RENAME_CANCELLED', '✖️ Переименование отменено'))
             return
         except Exception as exc:
@@ -1286,7 +1318,7 @@ async def handle_single_device_reset(
             if isinstance(devices_info, dict):
                 devices_list = devices_info.get('devices', [])
 
-                devices_per_page = 5
+                devices_per_page = DEVICES_PER_PAGE
                 pagination = paginate_list(devices_list, page=page, per_page=devices_per_page)
 
                 if device_index < len(pagination.items):
@@ -1306,13 +1338,9 @@ async def handle_single_device_reset(
                         device_model = device.get('deviceModel', 'Unknown')
                         device_info = f'{platform} - {device_model}'
 
-                        await callback.answer(
-                            texts.t(
-                                'DEVICE_RESET_SUCCESS',
-                                '✅ Устройство {device} успешно сброшено!',
-                            ).format(device=device_info),
-                            show_alert=True,
-                        )
+                        # Короткий ответ во всплывашке: список ниже и так
+                        # обновится, отдельный экран со справкой не нужен.
+                        await callback.answer(texts.t('DEVICE_RESET_SUCCESS', 'Устройство сброшено'))
 
                         updated_devices_info = await api.get_user_devices(panel_user_id)
                         if isinstance(updated_devices_info, dict):
@@ -1325,7 +1353,15 @@ async def handle_single_device_reset(
                                 if not updated_pagination.items and page > 1:
                                     page = page - 1
 
-                                await show_devices_page(callback, db_user, updated_devices, page=page, sub_id=sub_id)
+                                await show_devices_page(
+                                    callback,
+                                    db_user,
+                                    updated_devices,
+                                    page=page,
+                                    sub_id=sub_id,
+                                    show_buy_devices=await _can_buy_devices(db, subscription, db_user),
+                                    device_limit=subscription.device_limit,
+                                )
                             else:
                                 await callback.message.edit_text(
                                     texts.t(
@@ -1367,138 +1403,6 @@ async def handle_single_device_reset(
             texts.t('DEVICE_RESET_ERROR', '❌ Ошибка сброса устройства'),
             show_alert=True,
         )
-
-
-async def handle_all_devices_reset_from_management(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None
-):
-    texts = get_texts(db_user.language)
-    subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
-    panel_user_id = _get_panel_user_id(subscription, db_user) if subscription else db_user.remnawave_id
-
-    if not panel_user_id:
-        await callback.answer(
-            texts.t('DEVICE_UUID_NOT_FOUND', '❌ UUID пользователя не найден'),
-            show_alert=True,
-        )
-        return
-
-    try:
-        from app.services.remnawave_service import RemnaWaveService
-
-        service = RemnaWaveService()
-
-        async with service.get_api_client() as api:
-            devices_info = await api.get_user_devices(panel_user_id)
-
-            if not isinstance(devices_info, dict):
-                await callback.answer(
-                    texts.t(
-                        'DEVICE_LIST_FETCH_ERROR',
-                        '❌ Ошибка получения списка устройств',
-                    ),
-                    show_alert=True,
-                )
-                return
-
-            devices_list = devices_info.get('devices', [])
-
-            if not devices_list:
-                await callback.answer(
-                    texts.t('DEVICE_NONE_CONNECTED', 'ℹ️ У вас нет подключенных устройств'),
-                    show_alert=True,
-                )
-                return
-
-            logger.info('🔧 Найдено устройств для сброса', devices_list_count=len(devices_list))
-
-            success_count = 0
-            failed_count = 0
-
-            for device in devices_list:
-                device_hwid = device.get('hwid')
-                if device_hwid:
-                    # remove_device сам логирует и возвращает False вместо исключения
-                    if await api.remove_device(panel_user_id, device_hwid):
-                        success_count += 1
-                        logger.info('✅ Устройство удалено', device_hwid=device_hwid)
-                    else:
-                        failed_count += 1
-                        logger.error('❌ Ошибка удаления устройства', device_hwid=device_hwid)
-                else:
-                    failed_count += 1
-                    logger.warning('⚠️ У устройства нет HWID', device=device)
-
-            if success_count > 0:
-                if failed_count == 0:
-                    await callback.message.edit_text(
-                        texts.t(
-                            'DEVICE_RESET_ALL_SUCCESS_MESSAGE',
-                            (
-                                '✅ <b>Все устройства успешно сброшены!</b>\n\n'
-                                '🔄 Сброшено: {count} устройств\n'
-                                '📱 Теперь вы можете заново подключить свои устройства\n\n'
-                                "💡 Используйте ссылку из раздела 'Моя подписка' для повторного подключения"
-                            ),
-                        ).format(count=success_count),
-                        reply_markup=get_back_keyboard(
-                            db_user.language, callback_data=_devices_back_callback(sub_id)
-                        ),
-                        parse_mode='HTML',
-                    )
-                    logger.info(
-                        '✅ Пользователь успешно сбросил устройств',
-                        telegram_id=db_user.telegram_id,
-                        success_count=success_count,
-                    )
-                else:
-                    await callback.message.edit_text(
-                        texts.t(
-                            'DEVICE_RESET_PARTIAL_MESSAGE',
-                            (
-                                '⚠️ <b>Частичный сброс устройств</b>\n\n'
-                                '✅ Удалено: {success} устройств\n'
-                                '❌ Не удалось удалить: {failed} устройств\n\n'
-                                'Попробуйте еще раз или обратитесь в поддержку.'
-                            ),
-                        ).format(success=success_count, failed=failed_count),
-                        reply_markup=get_back_keyboard(
-                            db_user.language, callback_data=_devices_back_callback(sub_id)
-                        ),
-                        parse_mode='HTML',
-                    )
-                    logger.warning(
-                        '⚠️ Частичный сброс у пользователя /',
-                        telegram_id=db_user.telegram_id,
-                        success_count=success_count,
-                        devices_list_count=len(devices_list),
-                    )
-            else:
-                await callback.message.edit_text(
-                    texts.t(
-                        'DEVICE_RESET_ALL_FAILED_MESSAGE',
-                        (
-                            '❌ <b>Не удалось сбросить устройства</b>\n\n'
-                            'Попробуйте еще раз позже или обратитесь в техподдержку.\n\n'
-                            'Всего устройств: {total}'
-                        ),
-                    ).format(total=len(devices_list)),
-                    reply_markup=get_back_keyboard(
-                        db_user.language, callback_data=_devices_back_callback(sub_id)
-                    ),
-                    parse_mode='HTML',
-                )
-                logger.error(
-                    '❌ Не удалось сбросить ни одного устройства у пользователя', telegram_id=db_user.telegram_id
-                )
-
-    except Exception as e:
-        logger.error('Ошибка сброса всех устройств', error=e)
-        await callback.message.edit_text(
-            texts.ERROR, reply_markup=get_back_keyboard(db_user.language, callback_data=_devices_back_callback(sub_id))
-        )
-
-    await callback.answer()
 
 
 async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):
@@ -1778,18 +1682,6 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
         )
 
     await callback.answer()
-
-
-async def handle_reset_devices(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None
-):
-    await handle_device_management(callback, db_user, db, state)
-
-
-async def confirm_reset_devices(
-    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None
-):
-    await handle_device_management(callback, db_user, db, state)
 
 
 async def handle_device_guide(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):

@@ -46,6 +46,10 @@ def _make_subscription():
     sub.id = SUB_ID
     sub.is_trial = False
     sub.remnawave_id = PANEL_USER_ID
+    # Лимит устройств показывается в тексте экрана и форматируется как число.
+    sub.device_limit = 3
+    sub.tariff_id = None
+    sub.connected_squads = []
     return sub
 
 
@@ -101,24 +105,11 @@ async def test_device_list_back_goes_to_subscription_menu():
     with (
         patch.object(devices_mod, '_resolve_subscription', new=AsyncMock(return_value=(_make_subscription(), SUB_ID))),
         patch.object(devices_mod, '_enrich_devices_with_aliases', new=AsyncMock(side_effect=lambda lst, uid: lst)),
+        # Кнопка докупки не предмет этого теста — её доступность не считаем.
+        patch.object(devices_mod, '_can_buy_devices', new=AsyncMock(return_value=False)),
         patch('app.services.remnawave_service.RemnaWaveService', return_value=service),
     ):
         await devices_mod.handle_device_management(cb, user, MagicMock(), None)
-
-    assert _back_callback(cb) == 'menu_subscription'
-
-
-@pytest.mark.anyio('asyncio')
-async def test_reset_all_devices_back_goes_to_subscription_menu():
-    """Экран «все устройства сброшены» — тоже не должен уезжать в главное меню."""
-    cb, user = _make_callback(), _make_user()
-    service = _service([{'hwid': 'AA', 'platform': 'iOS', 'deviceModel': 'X'}])
-
-    with (
-        patch.object(devices_mod, '_resolve_subscription', new=AsyncMock(return_value=(_make_subscription(), SUB_ID))),
-        patch('app.services.remnawave_service.RemnaWaveService', return_value=service),
-    ):
-        await devices_mod.handle_all_devices_reset_from_management(cb, user, MagicMock(), None)
 
     assert _back_callback(cb) == 'menu_subscription'
 

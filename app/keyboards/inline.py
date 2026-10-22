@@ -2826,11 +2826,12 @@ def get_change_devices_keyboard(
     end_range = min(max_devices + 1, max(current_devices + 4, 7))
 
     for devices_count in range(start_range, end_range):
+        # Кнопки текущего значения нет: она ведёт на тот же экран и ничего
+        # не меняет. Текущее значение видно в тексте сообщения.
         if devices_count == current_devices:
-            emoji = '✅'
-            action_text = ' (текущее)'
-            price_text = ''
-        elif devices_count > current_devices:
+            continue
+
+        if devices_count > current_devices:
             emoji = '➕'
 
             current_chargeable = max(0, current_devices - default_device_limit)
@@ -2849,24 +2850,17 @@ def get_change_devices_keyboard(
                 total_discount = int(discount_per_month * price_multiplier)
                 if discount_percent > 0 and total_discount > 0:
                     price_text += f' (скидка {discount_percent}%: -{total_discount // 100}₽)'
-                action_text = ''
             else:
                 price_text = ' (бесплатно)'
-                action_text = ''
         else:
+            # Про «без возврата» сказано в blockquote текста, дублировать
+            # в каждой кнопке нечего.
             emoji = '➖'
-            action_text = ''
-            price_text = ' (без возврата)'
+            price_text = ''
 
-        button_text = f'{emoji} {devices_count} устр.{action_text}{price_text}'
+        button_text = f'{emoji} {devices_count} устр.{price_text}'
 
         buttons.append([InlineKeyboardButton(text=button_text, callback_data=f'change_devices_{devices_count}')])
-
-    if current_devices < start_range or current_devices >= end_range:
-        current_button = f'✅ {current_devices} устр. (текущее)'
-        buttons.insert(
-            0, [InlineKeyboardButton(text=current_button, callback_data=f'change_devices_{current_devices}')]
-        )
 
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
@@ -2885,8 +2879,10 @@ def get_confirm_change_devices_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=texts.t('CONFIRM_CHANGE_BUTTON', '✅ Подтвердить изменение'),
+                    text=texts.t('CONFIRM_CHANGE_BUTTON', 'Подтвердить изменение'),
                     callback_data=f'confirm_change_devices_{new_devices_count}_{price}',
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
                 )
             ],
             [InlineKeyboardButton(text=texts.CANCEL, callback_data=back_callback)],
@@ -3344,7 +3340,16 @@ def get_devices_management_keyboard(
     pagination,
     language: str = DEFAULT_LANGUAGE,
     back_callback: str = 'subscription_settings',
+    *,
+    show_buy_devices: bool = False,
 ) -> InlineKeyboardMarkup:
+    """Кнопки списка устройств: одна полная кнопка на устройство.
+
+    Тап по устройству сбрасывает его сразу, без подтверждения. Отдельной
+    кнопки переименования нет — хендлеры остались, но из UI выведены.
+    Докупка устройств идёт последней строкой и показывается только когда
+    она доступна подписке (``show_buy_devices``).
+    """
     texts = get_texts(language)
 
     keyboard = []
@@ -3360,18 +3365,17 @@ def get_devices_management_keyboard(
             device_model = device.get('deviceModel', 'Unknown')
             device_info = f'{platform} - {device_model}'
 
-        if len(device_info) > 22:
-            device_info = device_info[:19] + '...'
+        if len(device_info) > 35:
+            device_info = device_info[:32] + '...'
 
-        # Ряд: pencil-кнопка переименования (компактная иконка) + сброс
-        # устройства с его лейблом (исторический callback).
+        # Тап = сброс устройства. Кнопка одна в ряду — на всю ширину.
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text=texts.t('DEVICE_RENAME_BUTTON', '✏️'),
-                    callback_data=f'device_rename_{i}_{pagination.page}',
-                ),
-                InlineKeyboardButton(text=f'🔄 {device_info}', callback_data=f'reset_device_{i}_{pagination.page}'),
+                    text=device_info,
+                    callback_data=f'reset_device_{i}_{pagination.page}',
+                    icon_custom_emoji_id='5258466217273871977',
+                )
             ]
         )
 
@@ -3398,14 +3402,16 @@ def get_devices_management_keyboard(
 
         keyboard.append(nav_row)
 
-    keyboard.append(
-        [
-            InlineKeyboardButton(
-                text=texts.t('RESET_ALL_DEVICES_BUTTON', '🔄 Сбросить все устройства'),
-                callback_data='reset_all_devices',
-            )
-        ]
-    )
+    if show_buy_devices:
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.t('DEVICES_LIMIT_BUTTON', 'Лимит устройств'),
+                    callback_data='subscription_change_devices',
+                    style='primary',
+                )
+            ]
+        )
 
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
@@ -3487,24 +3493,6 @@ def get_updated_subscription_settings_keyboard(
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
-
-
-def get_device_reset_confirm_keyboard(
-    device_info: str, device_index: int, page: int, language: str = DEFAULT_LANGUAGE
-) -> InlineKeyboardMarkup:
-    texts = get_texts(language)
-
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=texts.t('RESET_DEVICE_CONFIRM_BUTTON', '✅ Да, сбросить это устройство'),
-                    callback_data=f'confirm_reset_device_{device_index}_{page}',
-                )
-            ],
-            [InlineKeyboardButton(text=texts.CANCEL, callback_data=f'devices_page_{page}')],
-        ]
-    )
 
 
 def get_device_management_help_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:

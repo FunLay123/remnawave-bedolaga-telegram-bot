@@ -13,7 +13,6 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import get_traffic_prices, settings
 from app.database.models import Subscription, User
-from app.localization.texts import get_texts
 from app.utils.incy_crypt1 import wrap_incy_deep_link
 from app.utils.pricing_utils import (
     apply_percentage_discount,
@@ -567,18 +566,6 @@ def create_deep_link(app: dict[str, Any], subscription_url: str) -> str | None:
     redirect_link = build_redirect_link(scheme_link, template) if scheme_link and template else None
 
     return redirect_link or scheme_link or subscription_url
-
-
-def get_reset_devices_confirm_keyboard(
-    language: str = 'ru', back_callback: str = 'menu_subscription'
-) -> InlineKeyboardMarkup:
-    get_texts(language)
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text='✅ Да, сбросить все устройства', callback_data='confirm_reset_devices')],
-            [InlineKeyboardButton(text='❌ Отмена', callback_data=back_callback)],
-        ]
-    )
 
 
 def get_traffic_switch_keyboard(

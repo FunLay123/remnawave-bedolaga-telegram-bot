@@ -151,17 +151,14 @@ from .countries import (
 from .devices import (
     confirm_add_devices,
     confirm_change_devices,
-    confirm_reset_devices,
     execute_change_devices,
     get_current_devices_count,
     get_servers_display_names,
-    handle_all_devices_reset_from_management,
     handle_app_selection,
     handle_change_devices,
     handle_device_guide,
     handle_device_management,
     handle_devices_page,
-    handle_reset_devices,
     handle_single_device_reset,
     handle_specific_app_guide,
     show_device_connection_help,
@@ -4242,10 +4239,6 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(confirm_reset_traffic, F.data == 'confirm_reset_traffic')
 
-    dp.callback_query.register(handle_reset_devices, F.data == 'subscription_reset_devices')
-
-    dp.callback_query.register(confirm_reset_devices, F.data == 'confirm_reset_devices')
-
     dp.callback_query.register(select_period, F.data.startswith('period_'), SubscriptionStates.selecting_period)
 
     dp.callback_query.register(select_traffic, F.data.startswith('traffic_'), SubscriptionStates.selecting_traffic)
@@ -4380,8 +4373,6 @@ def register_handlers(dp: Dispatcher):
     # F.text — игнорируем стикеры/фото/voice пока юзер в FSM, иначе
     # message.text==None трактуется как пустая строка и очищает alias.
     dp.message.register(process_device_rename, SubscriptionStates.renaming_device, F.text)
-
-    dp.callback_query.register(handle_all_devices_reset_from_management, F.data == 'reset_all_devices')
 
     dp.callback_query.register(show_device_connection_help, F.data == 'device_connection_help')
 
