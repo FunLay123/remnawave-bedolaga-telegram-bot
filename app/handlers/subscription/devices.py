@@ -735,7 +735,6 @@ async def execute_change_devices(
             await subscription_service.enable_remnawave_user(panel_user_id)
 
         # При уменьшении лимита - удалить лишние устройства (последние подключённые)
-        devices_reset_count = 0
         if new_devices_count < current_devices and panel_user_id:
             try:
                 service = RemnaWaveService()
@@ -767,7 +766,6 @@ async def execute_change_devices(
                                 if device_hwid:
                                     # remove_device сам логирует и возвращает False вместо исключения
                                     if await api.remove_device(panel_user_id, device_hwid):
-                                        devices_reset_count += 1
                                         logger.info('✅ Удалено устройство', device_hwid=device_hwid)
                                     else:
                                         logger.error('Ошибка удаления устройства', device_hwid=device_hwid)
@@ -787,45 +785,10 @@ async def execute_change_devices(
         except Exception as e:
             logger.error('Ошибка отправки уведомления об изменении устройств', error=e)
 
-        if new_devices_count > current_devices:
-            success_text = texts.t(
-                'DEVICE_CHANGE_INCREASE_SUCCESS',
-                '✅ Количество устройств увеличено!\n\n',
-            )
-            success_text += texts.t(
-                'DEVICE_CHANGE_RESULT_LINE',
-                '📱 Было: {old} → Стало: {new}\n',
-            ).format(old=current_devices, new=new_devices_count)
-            if price > 0:
-                success_text += texts.t(
-                    'DEVICE_CHANGE_CHARGED',
-                    '💰 Списано: {amount}',
-                ).format(amount=texts.format_price(price))
-        else:
-            success_text = texts.t(
-                'DEVICE_CHANGE_DECREASE_SUCCESS',
-                '✅ Количество устройств уменьшено!\n\n',
-            )
-            success_text += texts.t(
-                'DEVICE_CHANGE_RESULT_LINE',
-                '📱 Было: {old} → Стало: {new}\n',
-            ).format(old=current_devices, new=new_devices_count)
-            if devices_reset_count > 0:
-                success_text += texts.t(
-                    'DEVICE_CHANGE_DEVICES_REMOVED',
-                    '\n🗑 Удалено устройств: {count}\n',
-                ).format(count=devices_reset_count)
-            success_text += texts.t(
-                'DEVICE_CHANGE_NO_REFUND_INFO',
-                'ℹ️ Возврат средств не производится',
-            )
-
-        await callback.message.edit_text(
-            success_text,
-            reply_markup=get_back_keyboard(
-                db_user.language, callback_data=_devices_management_callback(subscription.id)
-            ),
-        )
+        # Отдельный экран успеха не показываем: сразу открываем список
+        # устройств с уже обновлённым лимитом — там же видны списания
+        # и актуальные подключения.
+        await handle_device_management(callback, db_user, db, state)
 
         logger.info(
             '✅ Пользователь изменил количество устройств с на доплата: ₽',
