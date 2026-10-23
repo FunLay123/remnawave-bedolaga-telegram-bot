@@ -43,8 +43,10 @@ def _build_revoke_confirm_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=texts.t('SUBSCRIPTION_REVOKE_CONFIRM_BTN', '✅ Подтвердить'),
+                    text=texts.t('SUBSCRIPTION_REVOKE_CONFIRM_BTN', 'Перевыпустить'),
                     callback_data='subscription_revoke_confirm',
+                    style='primary',
+                    icon_custom_emoji_id='4911241630633165627',
                 ),
             ],
             [
@@ -136,12 +138,9 @@ async def start_subscription_revoke(
         texts.t(
             'SUBSCRIPTION_REVOKE_WARNING',
             (
-                '⚠️ <b>Перевыпуск подписки</b>\n\n'
-                'Это действие:\n'
-                '• Сгенерирует новую ссылку подключения\n'
-                '• Сбросит все подключённые устройства\n'
-                '• Старая ссылка перестанет работать\n\n'
-                'Продолжить?'
+                '<tg-emoji emoji-id="5332588449335628124">🔄</tg-emoji> <b>Перевыпуск подписки</b>\n\n'
+                '<blockquote>Создаст новую ссылку и отключит все устройства. '
+                'Старая ссылка перестанет работать</blockquote>'
             ),
         ),
         reply_markup=_build_revoke_confirm_keyboard(db_user.language, multi_tariff=False),
@@ -337,12 +336,9 @@ async def start_multi_revoke(
         texts.t(
             'SUBSCRIPTION_REVOKE_WARNING',
             (
-                '⚠️ <b>Перевыпуск подписки</b>\n\n'
-                'Это действие:\n'
-                '• Сгенерирует новую ссылку подключения\n'
-                '• Сбросит все подключённые устройства\n'
-                '• Старая ссылка перестанет работать\n\n'
-                'Продолжить?'
+                '<tg-emoji emoji-id="5332588449335628124">🔄</tg-emoji> <b>Перевыпуск подписки</b>\n\n'
+                '<blockquote>Создаст новую ссылку и отключит все устройства. '
+                'Старая ссылка перестанет работать</blockquote>'
             ),
         ),
         reply_markup=_build_revoke_confirm_keyboard(db_user.language, multi_tariff=True),
