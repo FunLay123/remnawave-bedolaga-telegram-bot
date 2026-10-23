@@ -43,7 +43,7 @@ def _build_revoke_confirm_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=texts.t('SUBSCRIPTION_REVOKE_CONFIRM_BTN', 'Перевыпустить'),
+                    text=texts.t('SUBSCRIPTION_REVOKE_CONFIRM_BTN', 'Подтвердить'),
                     callback_data='subscription_revoke_confirm',
                     style='primary',
                     icon_custom_emoji_id='4911241630633165627',
@@ -138,7 +138,7 @@ async def start_subscription_revoke(
         texts.t(
             'SUBSCRIPTION_REVOKE_WARNING',
             (
-                '<tg-emoji emoji-id="5332588449335628124">🔄</tg-emoji> <b>Перевыпуск подписки</b>\n\n'
+                '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Перевыпуск подписки</b>\n\n'
                 '<blockquote>Создаст новую ссылку и отключит все устройства. '
                 'Старая ссылка перестанет работать</blockquote>'
             ),
@@ -336,7 +336,7 @@ async def start_multi_revoke(
         texts.t(
             'SUBSCRIPTION_REVOKE_WARNING',
             (
-                '<tg-emoji emoji-id="5332588449335628124">🔄</tg-emoji> <b>Перевыпуск подписки</b>\n\n'
+                '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Перевыпуск подписки</b>\n\n'
                 '<blockquote>Создаст новую ссылку и отключит все устройства. '
                 'Старая ссылка перестанет работать</blockquote>'
             ),

@@ -14,14 +14,14 @@ from app.handlers.subscription.revoke import _build_revoke_confirm_keyboard
 
 
 REVOKE_ICON = '4911241630633165627'  # та же иконка, что у пункта «Перевыпустить»
-TITLE_ICON = '5332588449335628124'
+TITLE_ICON = '5359415772844152891'
 
 
 def test_confirm_button_is_primary_with_reissue_icon():
     keyboard = _build_revoke_confirm_keyboard('ru')
 
     button = keyboard.inline_keyboard[0][0]
-    assert button.text == 'Перевыпустить'
+    assert button.text == 'Подтвердить'
     assert button.style == 'primary'
     assert button.icon_custom_emoji_id == REVOKE_ICON
 
