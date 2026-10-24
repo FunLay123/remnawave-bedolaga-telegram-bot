@@ -210,7 +210,7 @@ def _confirm_price_line(texts, price: int, balance_kopeks: int) -> str:
         return '\n\n<blockquote>Без доплаты</blockquote>'
 
     line = (
-        '\n\n<tg-emoji emoji-id="5460899957353493817">💰</tg-emoji> '
+        '\n\n<tg-emoji emoji-id="5449444442056441600">💰</tg-emoji> '
         f'{texts.format_price(price)}'
     )
     if balance_kopeks >= price:
@@ -1154,7 +1154,7 @@ async def _render_premium_traffic_packages(
     if state is not None:
         remaining_gb = round(state.remaining_bytes / BYTES_IN_GB, 2)
         remaining_line = (
-            f'<tg-emoji emoji-id="5454156248813432363">📊</tg-emoji> Остаток: {remaining_gb} ГБ\n'
+            f'<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Остаток: {remaining_gb} ГБ\n'
         )
 
     hints: list[str] = []
@@ -1181,7 +1181,7 @@ async def _render_premium_traffic_packages(
         (
             '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Белые списки</b>\n\n'
             '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> <b>{squad}</b>\n'
-            '{remaining_line}<tg-emoji emoji-id="5454156248813432363">📈</tg-emoji> Общий трафик: {overall}{hints}'
+            '{remaining_line}<tg-emoji emoji-id="5449444442056441600">📈</tg-emoji> Общий трафик: {overall}{hints}'
         ),
     ).format(
         squad=html.escape(row['name']),
@@ -1324,7 +1324,7 @@ async def show_premium_traffic_confirmation(
         old_remaining = round(premium_state.remaining_bytes / BYTES_IN_GB, 2)
         new_remaining = round(old_remaining + gb, 2)
         remaining_line = (
-            f'\n<tg-emoji emoji-id="5454156248813432363">📊</tg-emoji> '
+            f'\n<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> '
             f'Остаток: {old_remaining} → {new_remaining} ГБ'
         )
 
