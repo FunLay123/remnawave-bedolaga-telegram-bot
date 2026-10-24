@@ -2950,7 +2950,7 @@ def get_confirm_change_devices_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=texts.t('CONFIRM_CHANGE_BUTTON', 'Подтвердить изменение'),
+                    text=texts.t('CONFIRM_CHANGE_BUTTON', 'Подтвердить'),
                     callback_data=f'confirm_change_devices_{new_devices_count}_{price}',
                     style='primary',
                     icon_custom_emoji_id='5334552404736104314',

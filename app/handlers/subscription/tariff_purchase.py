@@ -34,6 +34,7 @@ from app.utils.formatting import format_period, format_price_kopeks, format_traf
 from app.utils.legacy_subscription import is_legacy_subscription as _legacy_subscription
 from app.utils.promo_offer import get_user_active_promo_discount_percent
 from app.utils.subscription_time import local_days_until
+from app.utils.timezone import format_local_datetime
 
 
 logger = structlog.get_logger(__name__)
@@ -443,45 +444,34 @@ def get_tariff_extend_insufficient_balance_keyboard(
 ) -> InlineKeyboardMarkup:
     """Клавиатура «Недостаточно средств» при продлении тарифа.
 
-    Зеркало ``get_tariff_insufficient_balance_keyboard`` для buy-flow: при
-    ``AUTO_PURCHASE_AFTER_TOPUP_ENABLED`` встраивает кнопки прямой оплаты на
-    недостающую сумму (``topup_amount|метод|сумма``), иначе — классический
-    переход ``balance_topup``. «Назад» всегда ``subscription_extend`` (не
-    ``tariff_select``).
+    Одна primary-кнопка «Пополнить на N ₽» ведёт на ``balance_topup``: сумма
+    подставляется из сохранённой корзины (``missing_amount``), поэтому отдельные
+    ``topup_amount|метод|сумма`` здесь больше не нужны.
 
-    ``tariff_id`` / ``period`` — контекст вызывающего (симметрия с
-    insufficient-веткой). ``subscription_id`` определяет адрес «Назад»: в
-    мультитарифе — ``se:{id}``, потому что голый ``subscription_extend`` на
-    экране возврата после пополнения упирается в «Выберите подписку» и ничего
-    не перерисовывает (FSM к тому моменту мог быть очищен, а активная подписка
-    там не закрепляется). Идиома та же, что в monitoring_service и
-    recurrent_payment_service.
-
-    SBP/Lava-строки (``tariff_sbp`` / ``tariff_lava``) не добавляем: их
-    обработчики оформляют новую подписку с привязкой провайдера, а не продление
-    существующей — отдельных extend-callback'ов нет.
+    ``subscription_id`` определяет адрес «Назад»: в мультитарифе — ``se:{id}``,
+    потому что голый ``subscription_extend`` на экране возврата после пополнения
+    упирается в «Выберите подписку» и ничего не перерисовывает.
     """
     texts = get_texts(language)
     back_callback = (
         f'se:{subscription_id}' if settings.is_multi_tariff_enabled() and subscription_id else 'subscription_extend'
     )
-    back_button = InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)
 
-    if settings.is_auto_purchase_after_topup_enabled() and missing_kopeks > 0:
-        from app.keyboards.inline import get_payment_methods_keyboard
-
-        payment_rows = [
-            row
-            for row in get_payment_methods_keyboard(missing_kopeks, language).inline_keyboard
-            if row and all((button.callback_data or '').startswith('topup_amount|') for button in row)
-        ]
-        if payment_rows:
-            return InlineKeyboardMarkup(inline_keyboard=[*payment_rows, [back_button]])
+    topup_text = texts.t('TARIFF_RENEW_TOPUP_BUTTON', 'Пополнить на {amount}').format(
+        amount=format_price_kopeks(missing_kopeks),
+    )
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=texts.t('BALANCE_TOPUP', '💳 Пополнить баланс'), callback_data='balance_topup')],
-            [back_button],
+            [
+                InlineKeyboardButton(
+                    text=topup_text,
+                    callback_data='balance_topup',
+                    style='primary',
+                    icon_custom_emoji_id='5332588449335628124',
+                )
+            ],
+            [InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)],
         ]
     )
 
@@ -2651,11 +2641,13 @@ def get_tariff_extend_confirm_keyboard(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text=texts.t('TARIFF_RENEW_CONFIRM_BUTTON', '✅ Подтвердить продление'),
+                    text=texts.t('TARIFF_RENEW_CONFIRM_BUTTON', 'Подтвердить'),
                     callback_data=f'tariff_ext_confirm:{subscription_id}:{tariff_id}:{period}',
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
                 )
             ],
-            [InlineKeyboardButton(text=texts.BACK, callback_data='subscription_extend')],
+            [InlineKeyboardButton(text=texts.CANCEL, callback_data='subscription_extend')],
         ]
     )
 
@@ -2801,40 +2793,39 @@ async def show_tariff_extend(
         await callback.answer()
         return
 
-    traffic = format_traffic(tariff.traffic_limit_gb)
-
-    # Проверяем есть ли у пользователя скидки по периодам
-    promo_group = db_user.get_primary_promo_group() if hasattr(db_user, 'get_primary_promo_group') else None
-    if promo_group is None:
-        promo_group = getattr(db_user, 'promo_group', None)
-    has_period_discounts = False
-    if promo_group:
-        period_discounts = getattr(promo_group, 'period_discounts', None)
-        if period_discounts and isinstance(period_discounts, dict) and len(period_discounts) > 0:
-            has_period_discounts = True
-
-    discount_hint = ''
-    if has_period_discounts:
-        discount_hint = texts.t(
-            'TARIFF_RENEW_PERIOD_DISCOUNTS_HINT', '\n🎁 <i>Скидки зависят от выбранного периода</i>'
-        )
-
     actual_device_limit = subscription.device_limit or tariff.device_limit
+
+    # Шапка: до какой даты действует подписка и что в ней сейчас.
+    from app.utils.premium_traffic import get_premium_squads_for_tariff
+    from app.utils.timezone import format_local_datetime
+
+    premium_gb: int | None = None
+    premium_configs = get_premium_squads_for_tariff(tariff)
+    if premium_configs:
+        connected = set(getattr(subscription, 'connected_squads', None) or [])
+        selected = [
+            config for squad_uuid, config in premium_configs.items() if not connected or squad_uuid in connected
+        ]
+        if selected:
+            premium_gb = sum(int(getattr(config, 'limit_gb', 0) or 0) for config in selected)
+
+    params = f'{actual_device_limit} устр.'
+    if premium_gb is not None:
+        premium_text = '∞' if premium_gb == 0 else f'{premium_gb} ГБ'
+        params += f' · {premium_text} белые списки'
+
+    end_date_text = format_local_datetime(subscription.end_date, '%d.%m.%Y', na_placeholder='—')
+    days_left = local_days_until(subscription.end_date) if subscription.end_date else 0
 
     await callback.message.edit_text(
         texts.t(
             'TARIFF_RENEW_TITLE',
-            '🔄 <b>Продление подписки</b>{discount_hint}\n\n'
-            '📦 Тариф: <b>{name}</b>\n'
-            '📊 Трафик: {traffic}\n'
-            '📱 Устройств: {devices}\n\n'
-            'Выберите период продления:',
-        ).format(
-            discount_hint=discount_hint,
-            name=html.escape(tariff.name),
-            traffic=traffic,
-            devices=actual_device_limit,
-        ),
+            (
+                '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Продление подписки</b>\n\n'
+                '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> Текущая: до {end_date} ({days} дн.)\n'
+                '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Параметры: {params}'
+            ),
+        ).format(end_date=end_date_text, days=days_left, params=params),
         reply_markup=get_tariff_extend_keyboard(
             tariff,
             db_user.language,
@@ -2900,33 +2891,21 @@ async def select_tariff_extend_period(
     # Проверяем баланс
     user_balance = db_user.balance_kopeks or 0
 
-    traffic = format_traffic(tariff.traffic_limit_gb)
-
     if user_balance >= final_price:
-        discount_text = ''
-        if discount_percent > 0:
-            discount_text = texts.t(
-                'TARIFF_PURCHASE_DISCOUNT_SHORT_LINE', '\n🎁 Скидка: {percent}% (-{amount})'
-            ).format(percent=discount_percent, amount=format_price_kopeks(total_discount))
+        new_end_date = subscription.end_date + timedelta(days=period) if subscription.end_date else None
+        new_end_text = format_local_datetime(new_end_date, '%d.%m.%Y', na_placeholder='—')
 
         await callback.message.edit_text(
             texts.t(
                 'TARIFF_RENEW_CONFIRM',
-                '✅ <b>Подтверждение продления</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📊 Трафик: {traffic}\n'
-                '📱 Устройств: {devices}\n'
-                '📅 Период: {period}\n'
-                '{discount}\n'
-                '💰 <b>К оплате: {total}</b>\n\n'
-                '💳 Ваш баланс: {balance}\n'
-                'После оплаты: {after}',
+                (
+                    '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Подтверждение</b>\n\n'
+                    '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> Продление: +{period} (до {new_date})\n'
+                    '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {total} · баланс {balance} → {after}'
+                ),
             ).format(
-                name=html.escape(tariff.name),
-                traffic=traffic,
-                devices=actual_device_limit,
                 period=format_period(period),
-                discount=discount_text,
+                new_date=new_end_text,
                 total=format_price_kopeks(final_price),
                 balance=format_price_kopeks(user_balance),
                 after=format_price_kopeks(user_balance - final_price),
@@ -2958,23 +2937,17 @@ async def select_tariff_extend_period(
 
         await callback.message.edit_text(
             texts.t(
-                'TARIFF_PURCHASE_INSUFFICIENT',
-                '❌ <b>Недостаточно средств</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📅 Период: {period}\n'
-                '💰 Стоимость: {price}\n\n'
-                '💳 Ваш баланс: {balance}\n'
-                '⚠️ Не хватает: <b>{missing}</b>',
+                'TARIFF_RENEW_INSUFFICIENT',
+                (
+                    '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Недостаточно средств</b>\n\n'
+                    '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> К оплате: {price} ({period})\n'
+                    '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Не хватает: {missing} (баланс: {balance})'
+                ),
             ).format(
-                name=html.escape(tariff.name),
-                period=format_period(period),
                 price=format_price_kopeks(final_price),
-                balance=format_price_kopeks(user_balance),
+                period=format_period(period),
                 missing=format_price_kopeks(missing),
-            )
-            + texts.t(
-                'TARIFF_RENEW_CART_SAVED_HINT',
-                '\n\n🛒 <i>Корзина сохранена! После пополнения баланса подписка будет продлена автоматически.</i>',
+                balance=format_price_kopeks(user_balance),
             ),
             reply_markup=get_tariff_extend_insufficient_balance_keyboard(
                 tariff_id,
@@ -3078,12 +3051,10 @@ async def confirm_tariff_extend(
         )
         return
 
-    # Отвечаем на callback СРАЗУ — до тяжёлых операций (панель, транзакции),
-    # иначе Telegram инвалидирует query через 30 сек → TelegramBadRequest
-    try:
-        await callback.answer()
-    except Exception:
-        pass
+    # Ответ на callback даём в конце: пользователь должен увидеть тост
+    # «Подписка продлена…». Второй answer после раннего был бы отклонён.
+    # Если панельный синк займёт больше 30 секунд, тост просто не дойдёт —
+    # экран подписки всё равно обновится.
 
     try:
         # Списываем баланс
@@ -3098,6 +3069,10 @@ async def confirm_tariff_extend(
         if not success:
             try:
                 await callback.message.edit_text(texts.t('TARIFF_PURCHASE_CHARGE_ERROR', '❌ Ошибка списания баланса'))
+            except Exception:
+                pass
+            try:
+                await callback.answer('⚠️ Ошибка списания')
             except Exception:
                 pass
             return
@@ -3182,45 +3157,24 @@ async def confirm_tariff_extend(
 
         await state.clear()
 
-        traffic = format_traffic(tariff.traffic_limit_gb)
+        # Экрана успеха больше нет: тост и обновлённый экран подписки.
+        from .purchase import show_subscription_info
 
-        await callback.message.edit_text(
-            texts.t(
-                'TARIFF_RENEW_SUCCESS',
-                '🎉 <b>Подписка успешно продлена!</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📊 Трафик: {traffic}\n'
-                '📱 Устройств: {devices}\n'
-                '📅 Добавлено: {period}\n'
-                '💰 Списано: {price}',
-            ).format(
-                name=html.escape(tariff.name),
-                traffic=traffic,
-                devices=actual_device_limit,
-                period=format_period(period),
-                price=format_price_kopeks(final_price),
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                            callback_data=f'sm:{subscription.id}'
-                            if settings.is_multi_tariff_enabled() and subscription
-                            else 'menu_subscription',
-                        )
-                    ],
-                    [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
-                ]
-            ),
-            parse_mode='HTML',
-        )
+        try:
+            await callback.answer(f'Подписка продлена на {period} дн.')
+        except Exception:
+            pass
+        await show_subscription_info(callback, db_user, db)
     except Exception as e:
         logger.error('Ошибка при продлении тарифа', error=e, exc_info=True)
         try:
             await callback.message.edit_text(
                 texts.t('TARIFF_RENEW_ERROR', '❌ Произошла ошибка при продлении подписки')
             )
+        except Exception:
+            pass
+        try:
+            await callback.answer('⚠️ Ошибка продления')
         except Exception:
             pass
 
