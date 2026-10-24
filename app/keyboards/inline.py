@@ -24,6 +24,9 @@ from app.utils.subscription_utils import (
 
 logger = structlog.get_logger(__name__)
 
+# Иконка кнопок выбора периода («30 дней — 300 ₽»).
+PERIOD_BUTTON_ICON_ID = '5334829606220354437'
+
 
 async def get_main_menu_keyboard_async(
     db: AsyncSession,
@@ -1279,7 +1282,15 @@ def get_subscription_period_keyboard(
             add_exclamation=False,
         )
 
-        keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f'period_{days}')])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f'period_{days}',
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                )
+            ]
+        )
 
     # Кнопка "Простая покупка" была убрана из выбора периода подписки
 
@@ -3400,7 +3411,15 @@ def get_extend_subscription_keyboard_with_prices(language: str, prices: dict) ->
             add_exclamation=False,
         )
 
-        keyboard.append([InlineKeyboardButton(text=button_text, callback_data=f'extend_period_{days}')])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f'extend_period_{days}',
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                )
+            ]
+        )
 
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')])
 

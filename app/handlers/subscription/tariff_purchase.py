@@ -39,6 +39,9 @@ from app.utils.timezone import format_local_datetime
 
 logger = structlog.get_logger(__name__)
 
+# Иконка кнопок выбора периода («30 дней — 300 ₽»).
+PERIOD_BUTTON_ICON_ID = '5334829606220354437'
+
 
 async def _persist_failed_refund(
     user_id: int,
@@ -299,7 +302,15 @@ def get_tariff_periods_keyboard(
             price_text = format_price_kopeks(price)
 
         button_text = _period_button_text(tariff, period, price_text, texts)
-        buttons.append([InlineKeyboardButton(text=button_text, callback_data=f'tariff_period:{tariff.id}:{period}')])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f'tariff_period:{tariff.id}:{period}',
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                )
+            ]
+        )
 
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
@@ -335,7 +346,13 @@ def get_tariff_periods_keyboard_with_traffic(
         button_text = _period_button_text(tariff, period, price_text, texts)
         # Используем другой callback для перехода к настройке трафика
         buttons.append(
-            [InlineKeyboardButton(text=button_text, callback_data=f'tariff_period_traffic:{tariff.id}:{period}')]
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f'tariff_period_traffic:{tariff.id}:{period}',
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                )
+            ]
         )
 
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
@@ -2620,6 +2637,7 @@ def get_tariff_extend_keyboard(
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'tariff_extend:{subscription_id}:{tariff.id}:{period}',
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
                 )
             ]
         )
@@ -3299,7 +3317,15 @@ def get_tariff_switch_periods_keyboard(
             price_text = format_price_kopeks(price)
 
         button_text = _period_button_text(tariff, period, price_text, texts)
-        buttons.append([InlineKeyboardButton(text=button_text, callback_data=f'tariff_sw_period:{tariff.id}:{period}')])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f'tariff_sw_period:{tariff.id}:{period}',
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                )
+            ]
+        )
 
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data='tariff_switch')])
 
