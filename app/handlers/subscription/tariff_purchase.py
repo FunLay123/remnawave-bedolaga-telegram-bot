@@ -23,7 +23,7 @@ from app.database.crud.transaction import create_transaction
 from app.database.crud.user import subtract_user_balance
 from app.database.database import AsyncSessionLocal
 from app.database.models import Tariff, Transaction, TransactionType, User
-from app.keyboards.inline import pad_period_button_labels
+from app.keyboards.inline import pad_button_labels
 from app.localization.texts import Texts, get_texts
 from app.services.admin_notification_service import AdminNotificationService
 from app.services.panel_sync import should_create_panel_account
@@ -313,7 +313,7 @@ def get_tariff_periods_keyboard(
             ]
         )
 
-    pad_period_button_labels(buttons, ('tariff_period:',))
+    pad_button_labels(buttons, ('tariff_period:',))
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -357,7 +357,7 @@ def get_tariff_periods_keyboard_with_traffic(
             ]
         )
 
-    pad_period_button_labels(buttons, ('tariff_period_traffic:',))
+    pad_button_labels(buttons, ('tariff_period_traffic:',))
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2640,13 +2640,16 @@ def get_tariff_extend_keyboard(
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'tariff_extend:{subscription_id}:{tariff.id}:{period}',
+                    style='primary',
                     icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
                 )
             ]
         )
 
-    pad_period_button_labels(buttons, ('tariff_extend:',))
-    buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')])
+    pad_button_labels(buttons, ('tariff_extend:',))
+    buttons.append(
+        [InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription', style='primary')]
+    )
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -3331,7 +3334,7 @@ def get_tariff_switch_periods_keyboard(
             ]
         )
 
-    pad_period_button_labels(buttons, ('tariff_sw_period:',))
+    pad_button_labels(buttons, ('tariff_sw_period:',))
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data='tariff_switch')])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)

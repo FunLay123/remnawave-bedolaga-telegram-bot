@@ -28,25 +28,25 @@ logger = structlog.get_logger(__name__)
 PERIOD_BUTTON_ICON_ID = '5334829606220354437'
 
 
-def pad_period_button_labels(
+def pad_button_labels(
     buttons: list[list[InlineKeyboardButton]],
     prefixes: tuple[str, ...],
 ) -> None:
-    """Добить подписи кнопок периода типографскими пробелами до равной длины.
+    """Добить подписи кнопок с кастомной иконкой до равной длины.
 
     Telegram центрирует содержимое инлайн-кнопки, поэтому при разной длине
     подписей («14 дней — 70 ₽» и «180 дней — 699 ₽») кастомная иконка
     оказывается на разном расстоянии от края. Равная длина ставит её в одну
     колонку.
     """
-    period_buttons = [
+    icon_buttons = [
         row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)
     ]
-    if not period_buttons:
+    if not icon_buttons:
         return
 
-    max_len = max(len(button.text) for button in period_buttons)
-    for button in period_buttons:
+    max_len = max(len(button.text) for button in icon_buttons)
+    for button in icon_buttons:
         button.text = button.text + '\u2007' * (max_len - len(button.text))
 
 
@@ -1316,7 +1316,7 @@ def get_subscription_period_keyboard(
 
     # Кнопка "Простая покупка" была убрана из выбора периода подписки
 
-    pad_period_button_labels(keyboard, ('period_',))
+    pad_button_labels(keyboard, ('period_',))
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -2659,6 +2659,8 @@ def get_add_traffic_keyboard(
             ]
         )
 
+    pad_button_labels(buttons, ('add_traffic_',))
+
     if premium_button:
         buttons.append(premium_button)
 
@@ -2748,6 +2750,8 @@ def get_add_traffic_keyboard_from_tariff(
     # Без этого блока кнопка докупки премиум-трафика пропадала бы всякий раз,
     # когда в тарифе настроены обычные пакеты трафика — то есть в основном
     # рабочем случае режима тарифов, а не только в пустом списке пакетов выше.
+    pad_button_labels(buttons, ('add_traffic_',))
+
     if premium_button:
         buttons.append(premium_button)
 
@@ -2830,6 +2834,8 @@ def get_premium_traffic_packages_keyboard(
                 )
             ]
         )
+
+    pad_button_labels(buttons, ('premium_traffic_buy_',))
 
     if show_ordinary:
         buttons.append(
@@ -3444,7 +3450,7 @@ def get_extend_subscription_keyboard_with_prices(language: str, prices: dict) ->
             ]
         )
 
-    pad_period_button_labels(keyboard, ('extend_period_',))
+    pad_button_labels(keyboard, ('extend_period_',))
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -3516,6 +3522,10 @@ def get_devices_management_keyboard(
                 )
             ]
         )
+
+    # Выравниваем иконки-крестики: Telegram центрирует подпись, и у устройств
+    # с разной длиной названия иконка иначе уезжает в сторону.
+    pad_button_labels(keyboard, ('reset_device_',))
 
     if pagination.total_pages > 1:
         nav_row = []
