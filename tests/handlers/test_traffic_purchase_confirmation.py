@@ -48,6 +48,22 @@ def _buttons(markup):
     return [button for row in markup.inline_keyboard for button in row]
 
 
+@pytest.mark.parametrize(
+    ('gb', 'expected'),
+    [
+        (2.0, '2 ГБ'),
+        (1.4, '1.4 ГБ'),
+        (1.46, '1.5 ГБ'),
+        (0.4, '0.4 ГБ'),
+        (0.0, '0 ГБ'),
+        (1024.0, '1 ТБ'),
+        (1536.0, '1.5 ТБ'),
+    ],
+)
+def test_traffic_value_uses_decimals_only_when_needed(gb, expected):
+    assert traffic_mod._format_traffic_gb(gb) == expected
+
+
 @pytest.mark.anyio('asyncio')
 async def test_ordinary_confirmation_shows_new_limit_and_price(monkeypatch):
     subscription = _subscription(tariff_id=42)
@@ -99,7 +115,7 @@ async def test_premium_confirmation_shows_remaining_and_price(monkeypatch):
 
     text = callback.message.edit_text.await_args.args[0]
     assert 'DE-1' in text
-    assert 'Остаток: 10.0 → 15.0 ГБ' in text
+    assert 'Остаток: 10 ГБ → 15 ГБ' in text
     assert '20' in text, 'цена должна быть видна до подтверждения'
     assert 'до конца текущего периода' in text
 

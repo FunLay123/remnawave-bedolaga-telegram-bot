@@ -204,6 +204,20 @@ async def _show_premium_entry(
         await callback.answer()
 
 
+def _format_traffic_gb(gb: float) -> str:
+    """ГБ/ТБ с дробной частью только когда она есть: 2 ГБ, 1.4 ГБ.
+
+    Точность — максимум десятые.
+    """
+    value = round(float(gb), 1)
+    unit = 'ГБ'
+    if value >= 1024:
+        value = round(value / 1024, 1)
+        unit = 'ТБ'
+    text = f'{value:.1f}'.rstrip('0').rstrip('.')
+    return f'{text} {unit}'
+
+
 def _confirm_price_line(texts, price: int, balance_kopeks: int) -> str:
     """Строка цены и баланса на экране подтверждения."""
     if price <= 0:
@@ -1155,8 +1169,8 @@ async def _render_premium_traffic_packages(
         remaining_gb = round(state.remaining_bytes / BYTES_IN_GB, 2)
         remaining_line = texts.t(
             'PREMIUM_TRAFFIC_REMAINING',
-            '<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Остаток: {remaining} ГБ\n',
-        ).format(remaining=remaining_gb)
+            '<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Остаток: {remaining}\n',
+        ).format(remaining=_format_traffic_gb(remaining_gb))
 
     hints: list[str] = []
     if state is not None and state.is_limited:
@@ -1181,7 +1195,7 @@ async def _render_premium_traffic_packages(
         'PREMIUM_TRAFFIC_OVERVIEW',
         (
             '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Белые списки</b>\n\n'
-            '{remaining_line}<tg-emoji emoji-id="5449444442056441600">📈</tg-emoji> Общий трафик: {overall}{hints}'
+            '{remaining_line}<tg-emoji emoji-id="5449444442056441600">📈</tg-emoji> Обычный трафик: {overall}{hints}'
         ),
     ).format(
         remaining_line=remaining_line,
@@ -1326,9 +1340,12 @@ async def show_premium_traffic_confirmation(
             'CONFIRM_PREMIUM_TRAFFIC_REMAINING',
             (
                 '\n<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> '
-                'Остаток: {old} → {new} ГБ'
+                'Остаток: {old} → {new}'
             ),
-        ).format(old=old_remaining, new=new_remaining)
+        ).format(
+            old=_format_traffic_gb(old_remaining),
+            new=_format_traffic_gb(new_remaining),
+        )
 
     details = _confirm_price_line(texts, final_price, db_user.balance_kopeks) + texts.t(
         'PREMIUM_TRAFFIC_PURCHASE_HINT',
