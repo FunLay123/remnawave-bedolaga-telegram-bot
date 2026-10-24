@@ -22,6 +22,7 @@ from app.handlers.subscription.traffic import (
     add_traffic,
     buy_premium_traffic,
     handle_add_traffic,
+    handle_ordinary_traffic,
     handle_premium_traffic_squad,
     handle_premium_traffic_topup,
 )
@@ -1764,6 +1765,8 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(add_traffic, F.data.startswith('add_traffic_'))
 
     dp.callback_query.register(handle_premium_traffic_topup, F.data == 'premium_traffic_topup')
+
+    dp.callback_query.register(handle_ordinary_traffic, F.data == 'ordinary_traffic')
 
     dp.callback_query.register(handle_premium_traffic_squad, F.data.startswith('premium_traffic_squad_'))
 

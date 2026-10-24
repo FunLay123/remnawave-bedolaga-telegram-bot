@@ -386,7 +386,7 @@ class TestUnlimitedOverallTrafficStillOffersPremium:
 
             markup = callback.message.edit_text.await_args.kwargs['reply_markup']
             callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-            assert 'premium_traffic_topup' in callbacks
+            assert any(cb.startswith('premium_traffic_buy_0_') for cb in callbacks)
             # Пакетов обычного трафика быть не должно — общий лимит уже безлимитный.
             assert not any(cb.startswith('add_traffic_') for cb in callbacks)
 
@@ -443,8 +443,10 @@ class TestUnlimitedOverallTrafficStillOffersPremium:
             assert state.extra_bytes == 5 * BYTES_IN_GB
 
             buy_callback.message.edit_text.assert_awaited_once()
-            (success_text,) = buy_callback.message.edit_text.await_args.args[:1]
-            assert 'Премиум-трафик докуплен' in success_text
+            (refreshed_text,) = buy_callback.message.edit_text.await_args.args[:1]
+            assert 'Премиум-трафик' in refreshed_text
+            assert 'Остаток' in refreshed_text
+            assert buy_callback.answer.await_args.args[0] == 'Премиум-трафик добавлен'
 
 
 class TestTariffTopupDisabledButPremiumAvailable:
@@ -469,7 +471,7 @@ class TestTariffTopupDisabledButPremiumAvailable:
 
             markup = callback.message.edit_text.await_args.kwargs['reply_markup']
             callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-            assert 'premium_traffic_topup' in callbacks
+            assert any(cb.startswith('premium_traffic_buy_0_') for cb in callbacks)
             assert not any(cb.startswith('add_traffic_') for cb in callbacks)
 
     async def test_can_complete_premium_purchase_when_ordinary_topup_disabled(self, monkeypatch):
@@ -556,7 +558,7 @@ class TestClassicModeStillOffersPremium:
 
             markup = callback.message.edit_text.await_args.kwargs['reply_markup']
             callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-            assert 'premium_traffic_topup' in callbacks
+            assert any(cb.startswith('premium_traffic_buy_0_') for cb in callbacks)
             assert not any(cb.startswith('add_traffic_') for cb in callbacks)
 
     async def test_reaches_premium_button_when_global_topup_disabled(self, monkeypatch):
@@ -576,7 +578,7 @@ class TestClassicModeStillOffersPremium:
 
             markup = callback.message.edit_text.await_args.kwargs['reply_markup']
             callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
-            assert 'premium_traffic_topup' in callbacks
+            assert any(cb.startswith('premium_traffic_buy_0_') for cb in callbacks)
             assert not any(cb.startswith('add_traffic_') for cb in callbacks)
 
 
@@ -614,7 +616,8 @@ class TestRealTransactionRecord:
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
             (shown_text,) = callback.message.edit_text.await_args.args[:1]
-            assert 'Премиум-трафик докуплен' in shown_text, 'успешная покупка не должна выглядеть ошибкой'
+            assert 'Премиум-трафик' in shown_text, 'после покупки — обновлённый экран, а не ошибка'
+            assert 'Остаток' in shown_text
 
             rows = (await db.execute(select(Transaction))).scalars().all()
             assert len(rows) == 1
@@ -679,8 +682,9 @@ class TestBuySucceeds:
             assert state.extra_bytes == 5 * BYTES_IN_GB
 
             callback.message.edit_text.assert_awaited_once()
-            (success_text,) = callback.message.edit_text.await_args.args[:1]
-            assert 'Премиум-трафик докуплен' in success_text
+            (refreshed_text,) = callback.message.edit_text.await_args.args[:1]
+            assert 'Премиум-трафик' in refreshed_text
+            assert 'Остаток' in refreshed_text
 
     async def test_insufficient_balance_saves_cart_without_charging(self, monkeypatch):
         subscription = _subscription()

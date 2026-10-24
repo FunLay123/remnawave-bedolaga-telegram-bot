@@ -60,6 +60,149 @@ async def _resolve_subscription(callback, db_user, db, state=None):
     return await resolve_subscription_from_context(callback, db_user, db, state)
 
 
+def _subscription_back_callback(sub_id: int | None) -> str:
+    """Куда ведёт «Назад» с экранов трафика: карточка подписки или меню."""
+    if sub_id and settings.is_multi_tariff_enabled():
+        return f'sm:{sub_id}'
+    return 'menu_subscription'
+
+
+async def _ordinary_traffic_available(db: AsyncSession, subscription, *, tariff=None) -> bool:
+    """Есть ли что предложить в разделе обычного трафика.
+
+    Гейты те же, что были в `handle_add_traffic`: безлимитный общий трафик,
+    отключённая докупка тарифа, глобальный рубильник, фиксированный режим и
+    legacy-подписка закрывают раздел.
+    """
+    if subscription is None:
+        return False
+    if (getattr(subscription, 'traffic_limit_gb', 0) or 0) == 0:
+        return False
+    if is_legacy_subscription(subscription):
+        return False
+
+    if settings.is_tariffs_mode() and getattr(subscription, 'tariff_id', None):
+        if tariff is None:
+            from app.database.crud.tariff import get_tariff_by_id
+
+            tariff = await get_tariff_by_id(db, subscription.tariff_id)
+        if not tariff or not tariff.can_topup_traffic():
+            return False
+        packages = tariff.get_traffic_topup_packages()
+        return any(price and price > 0 for price in packages.values())
+
+    if not settings.is_traffic_topup_enabled() or settings.is_traffic_topup_blocked():
+        return False
+
+    packages = settings.get_traffic_topup_packages()
+    return any(package.get('enabled') and (package.get('price') or 0) > 0 for package in packages)
+
+
+async def _render_ordinary_traffic_screen(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    subscription,
+    sub_id: int | None,
+    *,
+    back_callback: str,
+    discount_percent: int | None = None,
+    answer_callback: bool = True,
+) -> None:
+    """Экран обычных пакетов трафика."""
+    texts = get_texts(db_user.language)
+
+    tariff = None
+    if settings.is_tariffs_mode() and getattr(subscription, 'tariff_id', None):
+        from app.database.crud.tariff import get_tariff_by_id
+
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+
+    if discount_percent is None:
+        period_hint_days = _get_period_hint_from_subscription(subscription)
+        discount_percent = PricingEngine.get_addon_discount_percent(
+            db_user,
+            'traffic',
+            period_hint_days,
+        )
+
+    prompt_text = texts.t(
+        'ADD_TRAFFIC_PROMPT',
+        (
+            '📈 <b>Обычный трафик</b>\n\n'
+            '📊 Текущий лимит: {current_traffic}\n'
+            '<blockquote>Пакет действует 30 дней с момента покупки</blockquote>'
+        ),
+    ).format(current_traffic=texts.format_traffic(subscription.traffic_limit_gb))
+
+    if tariff is not None:
+        keyboard = get_add_traffic_keyboard_from_tariff(
+            db_user.language,
+            tariff.get_traffic_topup_packages(),
+            subscription.end_date,
+            discount_percent,
+            sub_id=sub_id,
+            has_premium_topup=False,
+            back_callback=back_callback,
+        )
+    else:
+        keyboard = get_add_traffic_keyboard(
+            db_user.language,
+            subscription.end_date,
+            discount_percent,
+            sub_id=sub_id,
+            has_premium_topup=False,
+            back_callback=back_callback,
+        )
+
+    await callback.message.edit_text(prompt_text, reply_markup=keyboard, parse_mode='HTML')
+    if answer_callback:
+        await callback.answer()
+
+
+async def _show_premium_entry(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    subscription,
+    rows: list[dict],
+    sub_id: int | None,
+    *,
+    show_ordinary: bool,
+    answer_callback: bool = True,
+) -> None:
+    """Экран премиум-трафика: объёмы для одного сквада, иначе список серверов."""
+    back_callback = _subscription_back_callback(sub_id or getattr(subscription, 'id', None))
+
+    if len(rows) == 1:
+        await _render_premium_traffic_packages(
+            callback,
+            db_user,
+            db,
+            subscription,
+            rows[0],
+            0,
+            back_callback,
+            show_ordinary=show_ordinary,
+            answer_callback=answer_callback,
+        )
+        return
+
+    texts = get_texts(db_user.language)
+    await callback.message.edit_text(
+        texts.t('PREMIUM_TRAFFIC_SELECT_SQUAD', '💠 <b>Премиум-трафик по серверам</b>\n\nВыберите сервер для докупки:'),
+        reply_markup=get_premium_traffic_squads_keyboard(
+            db_user.language,
+            rows,
+            back_callback=back_callback,
+            show_ordinary=show_ordinary,
+        ),
+        parse_mode='HTML',
+    )
+    if answer_callback:
+        await callback.answer()
+
+
 async def handle_add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):
     from app.config import settings
     from app.database.crud.subscription import get_active_subscriptions_by_user_id
@@ -124,116 +267,102 @@ async def handle_add_traffic(callback: types.CallbackQuery, db_user: User, db: A
 
     # Премиум-докупка (посквадные лимиты) не зависит от общего трафика
     # подписки — это отдельная сущность (см. docs/premium-traffic-limits.md).
-    # Считаем её доступность ДО ordinary-гейтов ниже: иначе тариф с безлимитным
-    # общим трафиком (или с отключённой обычной докупкой) никогда бы не
-    # долистал до экрана, на котором эта кнопка вообще появляется — при том,
-    # что премиум-сквад у него может быть настроен и открыт для докупки.
     premium_rows = await _get_purchasable_premium_squads(db, subscription)
     has_premium = bool(premium_rows)
     unlimited_overall = subscription.traffic_limit_gb == 0
 
-    # Режим тарифов - проверяем настройки тарифа
+    tariff = None
     if settings.is_tariffs_mode() and subscription.tariff_id:
         tariff = await get_tariff_by_id(db, subscription.tariff_id)
-        ordinary_available = bool(tariff) and tariff.can_topup_traffic() and not unlimited_overall
 
-        if not ordinary_available and not has_premium:
-            # Ни обычной докупки, ни премиум-сквадов предложить нечего — это
-            # ordinary-гейты, они и решают текст отказа.
-            if unlimited_overall:
-                await callback.answer(
-                    texts.t('TRAFFIC_ALREADY_UNLIMITED', '⚠ У вас уже безлимитный трафик'),
-                    show_alert=True,
-                )
-            else:
-                await callback.answer(
-                    texts.t(
-                        'TARIFF_TRAFFIC_TOPUP_DISABLED',
-                        '⚠️ На вашем тарифе докупка трафика недоступна',
-                    ),
-                    show_alert=True,
-                )
-            return
+    ordinary_available = await _ordinary_traffic_available(db, subscription, tariff=tariff)
 
-        current_traffic = subscription.traffic_limit_gb
-        period_hint_days = _get_period_hint_from_subscription(subscription)
-        traffic_discount_percent = PricingEngine.get_addon_discount_percent(
+    # Премиум есть — сразу открываем его экран, без промежуточного «Трафик».
+    # Обычные пакеты доступны оттуда отдельной кнопкой.
+    if has_premium:
+        await _show_premium_entry(
+            callback,
             db_user,
-            'traffic',
-            period_hint_days,
+            db,
+            subscription,
+            premium_rows,
+            sub_id,
+            show_ordinary=ordinary_available,
         )
-
-        if ordinary_available:
-            packages = tariff.get_traffic_topup_packages()
-            prompt_text = texts.t(
-                'ADD_TRAFFIC_PROMPT',
-                (
-                    '📈 <b>Добавить трафик к подписке</b>\n\n'
-                    'Текущий лимит: {current_traffic}\n'
-                    'Выберите дополнительный трафик:'
-                ),
-            ).format(current_traffic=texts.format_traffic(current_traffic))
-        else:
-            # Обычной докупки предложить нечего (либо общий трафик уже
-            # безлимитный, либо тариф её не продаёт), но премиум-сквады есть —
-            # экран остаётся честным: без пакетов обычного трафика, только с
-            # причиной и кнопкой премиум-докупки ниже.
-            packages = {}
-            if unlimited_overall:
-                prompt_text = texts.t(
-                    'ADD_TRAFFIC_PROMPT_UNLIMITED_WITH_PREMIUM',
-                    (
-                        '📈 <b>Трафик</b>\n\n'
-                        '♾️ Ваш общий трафик уже безлимитный — докупать обычный трафик не нужно.\n'
-                        '💠 Но на вашем тарифе есть отдельные лимиты по серверам — их можно докупить ниже:'
-                    ),
-                )
-            else:
-                prompt_text = texts.t(
-                    'ADD_TRAFFIC_PROMPT_TARIFF_DISABLED_WITH_PREMIUM',
-                    (
-                        '📈 <b>Трафик</b>\n\n'
-                        '⚠️ На вашем тарифе докупка обычного трафика недоступна.\n'
-                        '💠 Но есть отдельные лимиты по серверам — их можно докупить ниже:'
-                    ),
-                )
-
-        await callback.message.edit_text(
-            prompt_text,
-            reply_markup=get_add_traffic_keyboard_from_tariff(
-                db_user.language,
-                packages,
-                subscription.end_date,
-                traffic_discount_percent,
-                sub_id=sub_id,
-                has_premium_topup=has_premium,
-            ),
-            parse_mode='HTML',
-        )
-
-        await callback.answer()
         return
 
-    # Стандартный режим - проверяем глобальные настройки
-    ordinary_available = settings.is_traffic_topup_enabled() and not unlimited_overall
-
-    if not ordinary_available and not has_premium:
+    if not ordinary_available:
         if unlimited_overall:
             await callback.answer(
                 texts.t('TRAFFIC_ALREADY_UNLIMITED', '⚠ У вас уже безлимитный трафик'),
                 show_alert=True,
             )
-        else:
+        elif settings.is_tariffs_mode() and subscription.tariff_id:
             await callback.answer(
                 texts.t(
-                    'TRAFFIC_TOPUP_DISABLED',
-                    '⚠️ Функция докупки трафика отключена',
+                    'TARIFF_TRAFFIC_TOPUP_DISABLED',
+                    '⚠️ На вашем тарифе докупка трафика недоступна',
                 ),
+                show_alert=True,
+            )
+        elif settings.is_traffic_topup_blocked():
+            await callback.answer(
+                texts.t(
+                    'TRAFFIC_FIXED_MODE',
+                    '⚠️ В текущем режиме трафик фиксированный и не может быть изменен',
+                ),
+                show_alert=True,
+            )
+        else:
+            await callback.answer(
+                texts.t('TRAFFIC_TOPUP_DISABLED', '⚠️ Функция докупки трафика отключена'),
                 show_alert=True,
             )
         return
 
-    if ordinary_available and settings.is_traffic_topup_blocked():
+    await _render_ordinary_traffic_screen(
+        callback,
+        db_user,
+        db,
+        subscription,
+        sub_id,
+        back_callback=_subscription_back_callback(sub_id or subscription.id),
+    )
+
+
+async def handle_ordinary_traffic(
+    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None
+):
+    """Кнопка «Обычный трафик» на экране премиум-докупки."""
+    texts = get_texts(db_user.language)
+    subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
+    if subscription is None:
+        return
+
+    if not subscription or subscription.is_trial:
+        await callback.answer(
+            texts.t('PAID_FEATURE_ONLY', '⚠ Эта функция доступна только для платных подписок'),
+            show_alert=True,
+        )
+        return
+
+    if is_legacy_subscription(subscription):
+        await callback.answer(
+            texts.t(
+                'LEGACY_ADDONS_UNAVAILABLE',
+                '⚠️ Сначала перейдите на тариф — докупки для этой подписки недоступны',
+            ),
+            show_alert=True,
+        )
+        return
+
+    tariff = None
+    if settings.is_tariffs_mode() and subscription.tariff_id:
+        from app.database.crud.tariff import get_tariff_by_id
+
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+
+    if tariff is None and settings.is_traffic_topup_blocked():
         await callback.answer(
             texts.t(
                 'TRAFFIC_FIXED_MODE',
@@ -243,55 +372,24 @@ async def handle_add_traffic(callback: types.CallbackQuery, db_user: User, db: A
         )
         return
 
-    current_traffic = subscription.traffic_limit_gb
-    period_hint_days = _get_period_hint_from_subscription(subscription)
-    traffic_discount_percent = PricingEngine.get_addon_discount_percent(
+    if not await _ordinary_traffic_available(db, subscription, tariff=tariff):
+        await callback.answer(
+            texts.t('TRAFFIC_TOPUP_DISABLED', '⚠️ Функция докупки трафика отключена'),
+            show_alert=True,
+        )
+        return
+
+    premium_rows = await _get_purchasable_premium_squads(db, subscription)
+    back_callback = 'premium_traffic_topup' if premium_rows else _subscription_back_callback(sub_id or subscription.id)
+
+    await _render_ordinary_traffic_screen(
+        callback,
         db_user,
-        'traffic',
-        period_hint_days,
+        db,
+        subscription,
+        sub_id,
+        back_callback=back_callback,
     )
-
-    if ordinary_available:
-        prompt_text = texts.t(
-            'ADD_TRAFFIC_PROMPT',
-            (
-                '📈 <b>Добавить трафик к подписке</b>\n\nТекущий лимит: {current_traffic}\n'
-                'Выберите дополнительный трафик:'
-            ),
-        ).format(current_traffic=texts.format_traffic(current_traffic))
-    elif unlimited_overall:
-        prompt_text = texts.t(
-            'ADD_TRAFFIC_PROMPT_UNLIMITED_WITH_PREMIUM',
-            (
-                '📈 <b>Трафик</b>\n\n'
-                '♾️ Ваш общий трафик уже безлимитный — докупать обычный трафик не нужно.\n'
-                '💠 Но на вашем тарифе есть отдельные лимиты по серверам — их можно докупить ниже:'
-            ),
-        )
-    else:
-        prompt_text = texts.t(
-            'ADD_TRAFFIC_PROMPT_TOPUP_DISABLED_WITH_PREMIUM',
-            (
-                '📈 <b>Трафик</b>\n\n'
-                '⚠️ Докупка обычного трафика сейчас отключена.\n'
-                '💠 Но доступна докупка премиум-трафика по отдельным серверам — ниже:'
-            ),
-        )
-
-    await callback.message.edit_text(
-        prompt_text,
-        reply_markup=get_add_traffic_keyboard(
-            db_user.language,
-            subscription.end_date,
-            traffic_discount_percent,
-            sub_id=sub_id,
-            has_premium_topup=has_premium,
-            ordinary_enabled=ordinary_available,
-        ),
-        parse_mode='HTML',
-    )
-
-    await callback.answer()
 
 
 def _calculate_traffic_reset_price(subscription) -> int:
@@ -662,12 +760,11 @@ async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSes
         return
 
     period_hint_days = _get_period_hint_from_subscription(subscription)
-    discounted_per_month, discount_per_month, traffic_discount_pct = PricingEngine.calculate_traffic_discount(
+    discounted_per_month, _, traffic_discount_pct = PricingEngine.calculate_traffic_discount(
         base_price,
         db_user,
         period_hint_days,
     )
-    charged_days = 30
 
     # На тарифах пакеты трафика покупаются на 1 месяц (30 дней),
     # цена в тарифе уже месячная — не умножаем на оставшиеся месяцы подписки.
@@ -677,14 +774,12 @@ async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSes
     if is_tariff_mode:
         price = discounted_per_month
     elif subscription:
-        price, charged_days = calculate_prorated_price(
+        price, _ = calculate_prorated_price(
             discounted_per_month,
             subscription.end_date,
         )
     else:
         price = discounted_per_month
-
-    total_discount_value = int(discount_per_month * charged_days / 30)
 
     if price > 0 and db_user.balance_kopeks < price:
         missing_kopeks = price - db_user.balance_kopeks
@@ -739,6 +834,7 @@ async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSes
 
     # Сохраняем старое значение трафика для уведомления
     old_traffic_limit = subscription.traffic_limit_gb
+    success_toast: str | None = None
 
     try:
         success = await subtract_user_balance(
@@ -803,19 +899,32 @@ async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSes
         except Exception as e:
             logger.error('Ошибка отправки уведомления о докупке трафика', error=e)
 
-        success_text = '✅ Трафик успешно добавлен!\n\n'
-        if traffic_gb == 0:
-            success_text += '🎉 Теперь у вас безлимитный трафик!'
+        # Экран успеха не показываем: тост + экран, с которого пришли
+        # (премиум-хаб, если он есть, иначе обычные пакеты).
+        premium_rows = await _get_purchasable_premium_squads(db, subscription)
+        if premium_rows:
+            await _show_premium_entry(
+                callback,
+                db_user,
+                db,
+                subscription,
+                premium_rows,
+                sub_id or subscription.id,
+                show_ordinary=await _ordinary_traffic_available(db, subscription),
+                answer_callback=False,
+            )
         else:
-            success_text += f'📈 Добавлено: {traffic_gb} ГБ\n'
-            success_text += f'Новый лимит: {texts.format_traffic(subscription.traffic_limit_gb)}'
-
-        if price > 0:
-            success_text += f'\n💰 Списано: {texts.format_price(price)}'
-            if total_discount_value > 0:
-                success_text += f' (скидка {traffic_discount_pct}%: -{texts.format_price(total_discount_value)})'
-
-        await callback.message.edit_text(success_text, reply_markup=get_back_keyboard(db_user.language))
+            await _render_ordinary_traffic_screen(
+                callback,
+                db_user,
+                db,
+                subscription,
+                sub_id or subscription.id,
+                back_callback=_subscription_back_callback(sub_id or subscription.id),
+                discount_percent=traffic_discount_pct,
+                answer_callback=False,
+            )
+        success_toast = 'Трафик добавлен'
 
         logger.info('✅ Пользователь добавил ГБ трафика', telegram_id=db_user.telegram_id, traffic_gb=traffic_gb)
 
@@ -823,7 +932,7 @@ async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSes
         logger.error('Ошибка добавления трафика', error=e)
         await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(db_user.language))
 
-    await callback.answer()
+    await callback.answer(success_toast)
 
 
 # =============================================================================
@@ -902,58 +1011,80 @@ async def _get_purchasable_premium_squads(db: AsyncSession, subscription) -> lis
 async def _render_premium_traffic_packages(
     callback: types.CallbackQuery,
     db_user: User,
+    db: AsyncSession,
+    subscription,
     row: dict,
     idx: int,
     back_callback: str,
+    *,
+    show_ordinary: bool = False,
+    discount_percent: int | None = None,
+    answer_callback: bool = True,
 ) -> None:
     """Экран выбора объёма докупки для одного сквада."""
     config = row['config']
     state = row['state']
+    texts = get_texts(db_user.language)
 
-    lines = [f'💠 <b>{html.escape(row["name"])}</b>', '', 'Выберите объём докупки:']
-
+    remaining_line = ''
     if state is not None:
         remaining_gb = round(state.remaining_bytes / BYTES_IN_GB, 2)
-        lines.append(f'Остаток в текущем периоде: {remaining_gb} ГБ')
-        if state.is_limited:
-            # `_get_purchasable_premium_squads` уже отсеяла закрытые администратором
-            # сквады (`closed_at is not None`), так что здесь `is_limited=True`
-            # означает одно из двух: расход исчерпал лимит, либо администратор уже
-            # открыл доступ, но воркер ещё не успел вернуть сквад в панель. Это
-            # разные состояния (см. `PremiumSquadCardState` в `admin/users.py`), и
-            # называть второе «исчерпанием лимита» неверно — лимит как раз не исчерпан.
-            if state.is_exhausted:
-                lines.append('⛔ Сервер сейчас ограничен из-за исчерпания лимита — докупка вернёт доступ')
-            else:
-                lines.append(
-                    '🔓 Доступ уже открыт администратором, сервер вот-вот вернётся — обычно занимает пару минут'
-                )
+        remaining_line = f'📊 Остаток: {remaining_gb} ГБ\n'
+
+    hints: list[str] = []
+    if state is not None and state.is_limited:
+        # `_get_purchasable_premium_squads` уже отсеяла закрытые администратором
+        # сквады (`closed_at is not None`), так что здесь `is_limited=True`
+        # означает одно из двух: расход исчерпал лимит, либо администратор уже
+        # открыл доступ, но воркер ещё не успел вернуть сквад в панель. Это
+        # разные состояния (см. `PremiumSquadCardState` в `admin/users.py`), и
+        # называть второе «исчерпанием лимита» неверно — лимит как раз не исчерпан.
+        if state.is_exhausted:
+            hints.append('⛔ Сервер ограничен из-за исчерпания лимита — докупка вернёт доступ')
+        else:
+            hints.append('🔓 Доступ уже открыт администратором — сервер вернётся в течение пары минут')
 
     if config.max_topup_gb > 0:
-        # Потолок только показываем — решает, укладывается ли покупка в него,
-        # исключительно сервис (`apply_premium_topup`, под блокировкой строки).
-        # Второй проверки здесь нет: конкурентная покупка могла изменить
-        # остаток уже после отрисовки этого текста.
+        # Потолок только показываем — решает сервис под блокировкой строки.
         already_gb = round((state.extra_bytes if state else 0) / BYTES_IN_GB, 2)
-        lines.append(f'Потолок докупки за период: {config.max_topup_gb} ГБ (уже докуплено {already_gb} ГБ)')
+        hints.append(f'Потолок докупки за период: {config.max_topup_gb} ГБ (уже докуплено {already_gb} ГБ)')
 
-    # Период квоты премиум-сквада фиксирован (см. premium_traffic_purchase) и
-    # не завязан на остаток подписки — скидку считаем с тем же хинтом 30 дней,
-    # что и при самой покупке, чтобы показанная цена не разъезжалась с charge.
-    discount_percent = PricingEngine.get_addon_discount_percent(db_user, 'traffic', 30)
+    hints_block = f'\n\n<blockquote>{chr(10).join(hints)}</blockquote>' if hints else ''
+
+    overview = texts.t(
+        'PREMIUM_TRAFFIC_OVERVIEW',
+        (
+            '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Премиум-трафик</b>\n\n'
+            '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> <b>{squad}</b>\n'
+            '{remaining_line}📈 Общий трафик: {overall}{hints}'
+        ),
+    ).format(
+        squad=html.escape(row['name']),
+        remaining_line=remaining_line,
+        overall=texts.format_traffic(getattr(subscription, 'traffic_limit_gb', 0) or 0),
+        hints=hints_block,
+    )
+
+    if discount_percent is None:
+        # Период квоты премиум-сквада фиксирован (см. premium_traffic_purchase) и
+        # не завязан на остаток подписки — скидку считаем с тем же хинтом 30 дней,
+        # что и при самой покупке, чтобы показанная цена не разъезжалась с charge.
+        discount_percent = PricingEngine.get_addon_discount_percent(db_user, 'traffic', 30)
 
     await callback.message.edit_text(
-        '\n'.join(lines),
+        overview,
         reply_markup=get_premium_traffic_packages_keyboard(
             db_user.language,
             idx,
             config.available_packages(),
             discount_percent,
             back_callback=back_callback,
+            show_ordinary=show_ordinary,
         ),
         parse_mode='HTML',
     )
-    await callback.answer()
+    if answer_callback:
+        await callback.answer()
 
 
 async def handle_premium_traffic_topup(
@@ -979,18 +1110,15 @@ async def handle_premium_traffic_topup(
         await callback.answer('⚠️ Докупка премиум-трафика сейчас недоступна', show_alert=True)
         return
 
-    back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'menu_subscription'
-
-    if len(rows) == 1:
-        await _render_premium_traffic_packages(callback, db_user, rows[0], 0, back_callback='buy_traffic')
-        return
-
-    await callback.message.edit_text(
-        '💠 <b>Премиум-трафик по серверам</b>\n\nВыберите сервер для докупки:',
-        reply_markup=get_premium_traffic_squads_keyboard(db_user.language, rows, back_callback=back_cb),
-        parse_mode='HTML',
+    await _show_premium_entry(
+        callback,
+        db_user,
+        db,
+        subscription,
+        rows,
+        sub_id,
+        show_ordinary=await _ordinary_traffic_available(db, subscription),
     )
-    await callback.answer()
 
 
 async def handle_premium_traffic_squad(
@@ -1007,7 +1135,16 @@ async def handle_premium_traffic_squad(
         await callback.answer('⚠️ Список серверов изменился, откройте меню заново', show_alert=True)
         return
 
-    await _render_premium_traffic_packages(callback, db_user, rows[idx], idx, back_callback='premium_traffic_topup')
+    await _render_premium_traffic_packages(
+        callback,
+        db_user,
+        db,
+        subscription,
+        rows[idx],
+        idx,
+        back_callback='premium_traffic_topup',
+        show_ordinary=await _ordinary_traffic_available(db, subscription),
+    )
 
 
 async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):
@@ -1136,6 +1273,7 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
         return
 
     description = f'Докупка {gb} ГБ премиум-трафика ({squad_name})'
+    success_toast: str | None = None
 
     try:
         # Списание, начисление и запись транзакции — одна точка сохранения:
@@ -1206,16 +1344,27 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
                 )
 
         await db.refresh(db_user)
+        # Subscription может быть не ORM-объектом в тестах — refresh только для mapped.
+        if hasattr(subscription, '__mapper__'):
+            await db.refresh(subscription)
 
-        success_text = f'✅ Премиум-трафик докуплен!\n\n💠 {html.escape(squad_name)}\n📈 Добавлено: {gb} ГБ'
-        if restored:
-            success_text += '\n🔓 Доступ к серверу восстановлен'
-        if final_price > 0:
-            success_text += f'\n💰 Списано: {texts.format_price(final_price)}'
-            if discount_value > 0:
-                success_text += f' (скидка {discount_percent}%: -{texts.format_price(discount_value)})'
-
-        await callback.message.edit_text(success_text, reply_markup=get_back_keyboard(db_user.language))
+        # Отдельный экран успеха не показываем: тост и обновлённый экран
+        # объёмов с новым остатком.
+        fresh_rows = await _get_purchasable_premium_squads(db, subscription)
+        if idx < len(fresh_rows):
+            await _render_premium_traffic_packages(
+                callback,
+                db_user,
+                db,
+                subscription,
+                fresh_rows[idx],
+                idx,
+                _subscription_back_callback(sub_id or subscription.id),
+                show_ordinary=await _ordinary_traffic_available(db, subscription),
+                discount_percent=discount_percent,
+                answer_callback=False,
+            )
+        success_toast = 'Премиум-трафик добавлен'
 
         logger.info(
             '✅ Пользователь докупил премиум-трафик',
@@ -1238,7 +1387,7 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
         logger.error('Ошибка докупки премиум-трафика', error=e)
         await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(user_language))
 
-    await callback.answer()
+    await callback.answer(success_toast)
 
 
 async def handle_no_traffic_packages(callback: types.CallbackQuery, db_user: User):
