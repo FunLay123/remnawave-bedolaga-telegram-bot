@@ -1153,9 +1153,10 @@ async def _render_premium_traffic_packages(
     remaining_line = ''
     if state is not None:
         remaining_gb = round(state.remaining_bytes / BYTES_IN_GB, 2)
-        remaining_line = (
-            f'<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Остаток: {remaining_gb} ГБ\n'
-        )
+        remaining_line = texts.t(
+            'PREMIUM_TRAFFIC_REMAINING',
+            '<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Остаток: {remaining} ГБ\n',
+        ).format(remaining=remaining_gb)
 
     hints: list[str] = []
     if state is not None and state.is_limited:
@@ -1321,10 +1322,13 @@ async def show_premium_traffic_confirmation(
     if premium_state is not None:
         old_remaining = round(premium_state.remaining_bytes / BYTES_IN_GB, 2)
         new_remaining = round(old_remaining + gb, 2)
-        remaining_line = (
-            f'\n<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> '
-            f'Остаток: {old_remaining} → {new_remaining} ГБ'
-        )
+        remaining_line = texts.t(
+            'CONFIRM_PREMIUM_TRAFFIC_REMAINING',
+            (
+                '\n<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> '
+                'Остаток: {old} → {new} ГБ'
+            ),
+        ).format(old=old_remaining, new=new_remaining)
 
     details = _confirm_price_line(texts, final_price, db_user.balance_kopeks) + texts.t(
         'PREMIUM_TRAFFIC_PURCHASE_HINT',
