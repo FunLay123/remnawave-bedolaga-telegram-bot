@@ -1154,7 +1154,7 @@ async def _render_premium_traffic_packages(
     if state is not None:
         remaining_gb = round(state.remaining_bytes / BYTES_IN_GB, 2)
         remaining_line = (
-            f'<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Остаток: {remaining_gb} ГБ\n'
+            f'<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Остаток: {remaining_gb} ГБ\n'
         )
 
     hints: list[str] = []
@@ -1180,11 +1180,9 @@ async def _render_premium_traffic_packages(
         'PREMIUM_TRAFFIC_OVERVIEW',
         (
             '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Белые списки</b>\n\n'
-            '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> <b>{squad}</b>\n'
             '{remaining_line}<tg-emoji emoji-id="5449444442056441600">📈</tg-emoji> Общий трафик: {overall}{hints}'
         ),
     ).format(
-        squad=html.escape(row['name']),
         remaining_line=remaining_line,
         overall=texts.format_traffic(getattr(subscription, 'traffic_limit_gb', 0) or 0),
         hints=hints_block,
