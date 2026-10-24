@@ -29,11 +29,11 @@ def _callback(data: str):
     return cb
 
 
-def _user():
+def _user(balance_kopeks: int = 10_000_000):
     user = MagicMock()
     user.id = 1
     user.language = 'ru'
-    user.balance_kopeks = 10_000_000
+    user.balance_kopeks = balance_kopeks
     user.promo_group = None
     user.get_primary_promo_group = MagicMock(return_value=None)
     return user
@@ -71,14 +71,20 @@ def _rendered_text(callback) -> str:
     return callback.message.edit_text.await_args.args[0]
 
 
-async def _run(data: str, subscription, *, connected: int = 0) -> str:
+async def _run(
+    data: str,
+    subscription,
+    *,
+    connected: int = 0,
+    balance_kopeks: int = 10_000_000,
+) -> str:
     cb = _callback(data)
     with (
         patch.object(devices_mod, '_resolve_subscription', new=AsyncMock(return_value=(subscription, SUB_ID))),
         patch('app.database.crud.tariff.get_tariff_by_id', new=AsyncMock(return_value=_tariff())),
         patch.object(devices_mod, 'RemnaWaveService', return_value=_remnawave_with(connected)),
     ):
-        await devices_mod.confirm_change_devices(cb, _user(), AsyncMock(), None)
+        await devices_mod.confirm_change_devices(cb, _user(balance_kopeks), AsyncMock(), None)
     return _rendered_text(cb)
 
 
@@ -88,6 +94,7 @@ async def test_increase_confirmation_is_compact():
 
     assert '3 → 5' in text
     assert 'Доплата спишется с баланса' in text
+    assert '→' in text, 'баланс показывается как «было → станет»'
     assert 'за 30 дн.' in text
     # Многословие старого экрана убрано.
     assert 'Текущее количество' not in text

@@ -199,6 +199,11 @@ def is_trial_offered(db_user: User) -> bool:
     )
 
 
+# Блок «Подключённые устройства» скрыт с экрана подписки по редизайну.
+# Список устройств, экран управления и хендлеры остаются в коде.
+_SHOW_CONNECTED_DEVICES = False
+
+
 async def show_subscription_info(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
     # Multi-tariff: redirect to "My subscriptions" list
     if settings.is_multi_tariff_enabled():
@@ -508,7 +513,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         device_limit=device_limit_display,
     )
 
-    if show_devices and devices_list:
+    if _SHOW_CONNECTED_DEVICES and show_devices and devices_list:
         message += '\n\n' + texts.t(
             'SUBSCRIPTION_CONNECTED_DEVICES_TITLE',
             '<blockquote>📱 <b>Подключенные устройства:</b>\n',

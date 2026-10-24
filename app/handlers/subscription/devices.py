@@ -504,9 +504,14 @@ async def confirm_change_devices(
             logger.error('Ошибка проверки устройств', error=e)
 
     if devices_difference > 0 and price > 0:
+        # До этого места доходят только при достаточном балансе: при нехватке
+        # confirm_change_devices показывает экран пополнения и возвращается.
         hint_text = texts.t(
             'DEVICE_CHANGE_HINT_PAID',
-            '\n\n<blockquote>Доплата спишется с баланса</blockquote>',
+            '\n\n<blockquote>Доплата спишется с баланса: {balance} → {after}</blockquote>',
+        ).format(
+            balance=texts.format_price(db_user.balance_kopeks),
+            after=texts.format_price(db_user.balance_kopeks - price),
         )
     elif devices_difference > 0:
         hint_text = texts.t(

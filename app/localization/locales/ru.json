@@ -1159,7 +1159,7 @@
   "DEVICE_CHANGE_FREE": "Бесплатно",
   "DEVICE_CHANGE_HINT_FREE": "\n\n<blockquote>В пределах тарифа — доплаты нет</blockquote>",
   "DEVICE_CHANGE_HINT_NO_REFUND": "\n\n<blockquote>Средства не возвращаются</blockquote>",
-  "DEVICE_CHANGE_HINT_PAID": "\n\n<blockquote>Доплата спишется с баланса</blockquote>",
+  "DEVICE_CHANGE_HINT_PAID": "\n\n<blockquote>Доплата спишется с баланса: {balance} → {after}</blockquote>",
   "DEVICE_CHANGE_HINT_RESET": "\n\n<blockquote>Средства не возвращаются. Лишние устройства будут сброшены</blockquote>",
   "DEVICE_CHANGE_INCREASE_SUCCESS": "✅ Количество устройств увеличено!\n\n",
   "DEVICE_CHANGE_NO_REFUND": "Возврат средств не производится",
