@@ -2822,8 +2822,8 @@ async def show_tariff_extend(
             'TARIFF_RENEW_TITLE',
             (
                 '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Продление подписки</b>\n\n'
-                '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> Текущая: до {end_date} ({days} дн.)\n'
-                '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Параметры: {params}'
+                '<tg-emoji emoji-id="5222148368955877900">💠</tg-emoji> До {end_date} ({days} дн.)\n'
+                '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {params}'
             ),
         ).format(end_date=end_date_text, days=days_left, params=params),
         reply_markup=get_tariff_extend_keyboard(
