@@ -28,6 +28,28 @@ logger = structlog.get_logger(__name__)
 PERIOD_BUTTON_ICON_ID = '5334829606220354437'
 
 
+def pad_period_button_labels(
+    buttons: list[list[InlineKeyboardButton]],
+    prefixes: tuple[str, ...],
+) -> None:
+    """Добить подписи кнопок периода типографскими пробелами до равной длины.
+
+    Telegram центрирует содержимое инлайн-кнопки, поэтому при разной длине
+    подписей («14 дней — 70 ₽» и «180 дней — 699 ₽») кастомная иконка
+    оказывается на разном расстоянии от края. Равная длина ставит её в одну
+    колонку.
+    """
+    period_buttons = [
+        row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)
+    ]
+    if not period_buttons:
+        return
+
+    max_len = max(len(button.text) for button in period_buttons)
+    for button in period_buttons:
+        button.text = button.text + '\u2007' * (max_len - len(button.text))
+
+
 async def get_main_menu_keyboard_async(
     db: AsyncSession,
     language: str = DEFAULT_LANGUAGE,
@@ -1294,6 +1316,7 @@ def get_subscription_period_keyboard(
 
     # Кнопка "Простая покупка" была убрана из выбора периода подписки
 
+    pad_period_button_labels(keyboard, ('period_',))
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -3421,6 +3444,7 @@ def get_extend_subscription_keyboard_with_prices(language: str, prices: dict) ->
             ]
         )
 
+    pad_period_button_labels(keyboard, ('extend_period_',))
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
