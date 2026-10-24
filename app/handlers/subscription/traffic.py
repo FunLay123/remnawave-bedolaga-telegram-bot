@@ -191,7 +191,7 @@ async def _show_premium_entry(
 
     texts = get_texts(db_user.language)
     await callback.message.edit_text(
-        texts.t('PREMIUM_TRAFFIC_SELECT_SQUAD', '💠 <b>Премиум-трафик по серверам</b>\n\nВыберите сервер для докупки:'),
+        texts.t('PREMIUM_TRAFFIC_SELECT_SQUAD', '💠 <b>Белые списки</b>\n\nВыберите сервер для докупки:'),
         reply_markup=get_premium_traffic_squads_keyboard(
             db_user.language,
             rows,
@@ -204,11 +204,23 @@ async def _show_premium_entry(
         await callback.answer()
 
 
-def _confirm_price_line(texts, price: int) -> str:
-    """Строка цены на экране подтверждения."""
+def _confirm_price_line(texts, price: int, balance_kopeks: int) -> str:
+    """Строка цены и баланса на экране подтверждения."""
     if price <= 0:
         return '\n\n<blockquote>Без доплаты</blockquote>'
-    return f'\n\n<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> {texts.format_price(price)}'
+
+    line = (
+        '\n\n<tg-emoji emoji-id="5460899957353493817">💰</tg-emoji> '
+        f'{texts.format_price(price)}'
+    )
+    if balance_kopeks >= price:
+        line += (
+            f' · баланс {texts.format_price(balance_kopeks)} → '
+            f'{texts.format_price(balance_kopeks - price)}'
+        )
+    else:
+        line += f' · не хватает {texts.format_price(price - balance_kopeks)}'
+    return line
 
 
 async def handle_add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):
@@ -806,7 +818,7 @@ async def show_add_traffic_confirmation(
     new_limit_value = 0 if traffic_gb == 0 else (subscription.traffic_limit_gb or 0) + traffic_gb
     new_limit = texts.format_traffic(new_limit_value)
 
-    details = _confirm_price_line(texts, price) + texts.t(
+    details = _confirm_price_line(texts, price, db_user.balance_kopeks) + texts.t(
         'TRAFFIC_PURCHASE_HINT',
         '\n\n<blockquote>Пакет действует 30 дней с момента покупки</blockquote>',
     )
@@ -1160,15 +1172,14 @@ async def _render_premium_traffic_packages(
 
     if config.max_topup_gb > 0:
         # Потолок только показываем — решает сервис под блокировкой строки.
-        already_gb = round((state.extra_bytes if state else 0) / BYTES_IN_GB, 2)
-        hints.append(f'Потолок докупки за период: {config.max_topup_gb} ГБ (уже докуплено {already_gb} ГБ)')
+        hints.append(f'Потолок докупки за период: {config.max_topup_gb} ГБ')
 
     hints_block = f'\n\n<blockquote>{chr(10).join(hints)}</blockquote>' if hints else ''
 
     overview = texts.t(
         'PREMIUM_TRAFFIC_OVERVIEW',
         (
-            '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Премиум-трафик</b>\n\n'
+            '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Белые списки</b>\n\n'
             '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> <b>{squad}</b>\n'
             '{remaining_line}<tg-emoji emoji-id="5454156248813432363">📈</tg-emoji> Общий трафик: {overall}{hints}'
         ),
@@ -1317,7 +1328,7 @@ async def show_premium_traffic_confirmation(
             f'Остаток: {old_remaining} → {new_remaining} ГБ'
         )
 
-    details = _confirm_price_line(texts, final_price) + texts.t(
+    details = _confirm_price_line(texts, final_price, db_user.balance_kopeks) + texts.t(
         'PREMIUM_TRAFFIC_PURCHASE_HINT',
         '\n\n<blockquote>Докупка действует до конца текущего периода</blockquote>',
     )
@@ -1562,7 +1573,7 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
                 discount_percent=discount_percent,
                 answer_callback=False,
             )
-        success_toast = 'Премиум-трафик добавлен'
+        success_toast = 'Трафик добавлен'
 
         logger.info(
             '✅ Пользователь докупил премиум-трафик',

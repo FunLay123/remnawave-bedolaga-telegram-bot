@@ -2560,7 +2560,7 @@ def get_add_traffic_keyboard(
     )
 
     premium_button = (
-        [InlineKeyboardButton(text='💠 Премиум-трафик', callback_data='premium_traffic_topup')]
+        [InlineKeyboardButton(text='💠 Белые списки', callback_data='premium_traffic_topup')]
         if has_premium_topup
         else None
     )
@@ -2600,13 +2600,13 @@ def get_add_traffic_keyboard(
 
         if gb == 0:
             if use_russian_fallback:
-                text = f'♾️ Безлимитный трафик - {total_price // 100} ₽{period_text}'
+                text = f'Безлимитный трафик - {total_price // 100} ₽{period_text}'
             else:
-                text = f'♾️ Unlimited traffic - {total_price // 100} ₽{period_text}'
+                text = f'Unlimited traffic - {total_price // 100} ₽{period_text}'
         elif use_russian_fallback:
-            text = f'📊 +{gb} ГБ трафика - {total_price // 100} ₽{period_text}'
+            text = f'+{gb} ГБ трафика - {total_price // 100} ₽{period_text}'
         else:
-            text = f'📊 +{gb} GB traffic - {total_price // 100} ₽{period_text}'
+            text = f'+{gb} GB traffic - {total_price // 100} ₽{period_text}'
 
         if discount_percent > 0 and total_discount > 0:
             if use_russian_fallback:
@@ -2662,7 +2662,7 @@ def get_add_traffic_keyboard_from_tariff(
     )
 
     premium_button = (
-        [InlineKeyboardButton(text='💠 Премиум-трафик', callback_data='premium_traffic_topup')]
+        [InlineKeyboardButton(text='💠 Белые списки', callback_data='premium_traffic_topup')]
         if has_premium_topup
         else None
     )
@@ -2690,9 +2690,9 @@ def get_add_traffic_keyboard_from_tariff(
         period_text = ' /мес' if use_russian_fallback else ' /mo'
 
         if use_russian_fallback:
-            text = f'📊 +{gb} ГБ трафика - {discounted_price // 100} ₽{period_text}'
+            text = f'+{gb} ГБ трафика - {discounted_price // 100} ₽{period_text}'
         else:
-            text = f'📊 +{gb} GB traffic - {discounted_price // 100} ₽{period_text}'
+            text = f'+{gb} GB traffic - {discounted_price // 100} ₽{period_text}'
 
         if discount_percent > 0 and discount_value > 0:
             if use_russian_fallback:
@@ -2776,9 +2776,9 @@ def get_premium_traffic_packages_keyboard(
         discounted_price, discount_value = apply_percentage_discount(price_kopeks, discount_percent)
 
         if use_russian_fallback:
-            text = f'📊 +{gb} ГБ - {discounted_price // 100} ₽'
+            text = f'+{gb} ГБ - {discounted_price // 100} ₽'
         else:
-            text = f'📊 +{gb} GB - {discounted_price // 100} ₽'
+            text = f'+{gb} GB - {discounted_price // 100} ₽'
 
         if discount_percent > 0 and discount_value > 0:
             if use_russian_fallback:

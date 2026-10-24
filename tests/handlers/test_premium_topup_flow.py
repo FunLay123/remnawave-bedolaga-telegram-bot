@@ -140,19 +140,19 @@ class TestButtonVisibility:
         keyboard = get_add_traffic_keyboard('ru', has_premium_topup=True)
         texts = [button.text for row in keyboard.inline_keyboard for button in row]
 
-        assert any('Премиум-трафик' in text for text in texts)
+        assert any('Белые списки' in text for text in texts)
 
     def test_premium_button_absent_when_switch_disabled(self):
         keyboard = get_add_traffic_keyboard('ru', has_premium_topup=False)
         texts = [button.text for row in keyboard.inline_keyboard for button in row]
 
-        assert not any('Премиум-трафик' in text for text in texts)
+        assert not any('Белые списки' in text for text in texts)
 
     def test_tariff_keyboard_premium_button_absent_when_switch_disabled(self):
         keyboard = get_add_traffic_keyboard_from_tariff('ru', {5: 1000}, has_premium_topup=False)
         texts = [button.text for row in keyboard.inline_keyboard for button in row]
 
-        assert not any('Премиум-трафик' in text for text in texts)
+        assert not any('Белые списки' in text for text in texts)
 
 
 # ============================= Точка входа =============================
@@ -444,9 +444,9 @@ class TestUnlimitedOverallTrafficStillOffersPremium:
 
             buy_callback.message.edit_text.assert_awaited_once()
             (refreshed_text,) = buy_callback.message.edit_text.await_args.args[:1]
-            assert 'Премиум-трафик' in refreshed_text
+            assert 'Белые списки' in refreshed_text
             assert 'Остаток' in refreshed_text
-            assert buy_callback.answer.await_args.args[0] == 'Премиум-трафик добавлен'
+            assert buy_callback.answer.await_args.args[0] == 'Трафик добавлен'
 
 
 class TestTariffTopupDisabledButPremiumAvailable:
@@ -616,7 +616,7 @@ class TestRealTransactionRecord:
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
             (shown_text,) = callback.message.edit_text.await_args.args[:1]
-            assert 'Премиум-трафик' in shown_text, 'после покупки — обновлённый экран, а не ошибка'
+            assert 'Белые списки' in shown_text, 'после покупки — обновлённый экран, а не ошибка'
             assert 'Остаток' in shown_text
 
             rows = (await db.execute(select(Transaction))).scalars().all()
@@ -683,7 +683,7 @@ class TestBuySucceeds:
 
             callback.message.edit_text.assert_awaited_once()
             (refreshed_text,) = callback.message.edit_text.await_args.args[:1]
-            assert 'Премиум-трафик' in refreshed_text
+            assert 'Белые списки' in refreshed_text
             assert 'Остаток' in refreshed_text
 
     async def test_insufficient_balance_saves_cart_without_charging(self, monkeypatch):
@@ -891,7 +891,6 @@ class TestCeilingIsDisplayOnly:
 
             (rendered_text,) = callback.message.edit_text.await_args.args[:1]
             assert 'Потолок докупки за период: 10 ГБ' in rendered_text
-            assert 'уже докуплено 9' in rendered_text
 
     async def test_service_still_refuses_a_purchase_that_would_cross_the_ceiling(self, monkeypatch):
         """Реальный отказ на потолке приходит от сервиса — а не от того, что экран его скрыл."""

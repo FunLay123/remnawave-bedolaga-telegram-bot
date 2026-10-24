@@ -1149,7 +1149,7 @@ class PremiumTrafficService:
         texts = get_texts(getattr(user, 'language', 'ru'))
         # Без названия человек с несколькими премиум-серверами не поймёт, на
         # каком именно кончился лимит.
-        name = target.display_name or texts.t('PREMIUM_TRAFFIC_LABEL', 'Премиум-трафик')
+        name = target.display_name or texts.t('PREMIUM_TRAFFIC_LABEL', 'Белые списки')
         message = texts.t(key, default_text).format(
             name=name,
             used=round((state.used_bytes or 0) / BYTES_IN_GB, 1),
