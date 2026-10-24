@@ -2614,7 +2614,16 @@ def get_add_traffic_keyboard(
             else:
                 text += f' (discount {discount_percent}%: -{total_discount // 100}₽)'
 
-        buttons.append([InlineKeyboardButton(text=text, callback_data=f'add_traffic_{gb}')])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f'add_traffic_{gb}',
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
+                )
+            ]
+        )
 
     if premium_button:
         buttons.append(premium_button)
@@ -2691,7 +2700,16 @@ def get_add_traffic_keyboard_from_tariff(
             else:
                 text += f' (discount {discount_percent}%: -{discount_value // 100}₽)'
 
-        buttons.append([InlineKeyboardButton(text=text, callback_data=f'add_traffic_{gb}')])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f'add_traffic_{gb}',
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
+                )
+            ]
+        )
 
     # Без этого блока кнопка докупки премиум-трафика пропадала бы всякий раз,
     # когда в тарифе настроены обычные пакеты трафика — то есть в основном
@@ -2768,7 +2786,16 @@ def get_premium_traffic_packages_keyboard(
             else:
                 text += f' (discount {discount_percent}%: -{discount_value // 100}₽)'
 
-        buttons.append([InlineKeyboardButton(text=text, callback_data=f'premium_traffic_buy_{idx}_{gb}')])
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f'premium_traffic_buy_{idx}_{gb}',
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
+                )
+            ]
+        )
 
     if show_ordinary:
         buttons.append(
@@ -2925,6 +2952,30 @@ def get_confirm_change_devices_keyboard(
                 InlineKeyboardButton(
                     text=texts.t('CONFIRM_CHANGE_BUTTON', 'Подтвердить изменение'),
                     callback_data=f'confirm_change_devices_{new_devices_count}_{price}',
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
+                )
+            ],
+            [InlineKeyboardButton(text=texts.CANCEL, callback_data=back_callback)],
+        ]
+    )
+
+
+def get_confirm_traffic_purchase_keyboard(
+    language: str = DEFAULT_LANGUAGE,
+    *,
+    confirm_callback: str,
+    back_callback: str,
+) -> InlineKeyboardMarkup:
+    """Подтверждение покупки трафика — как у изменения лимита устройств."""
+    texts = get_texts(language)
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=texts.t('CONFIRM_PURCHASE_BUTTON', 'Подтвердить'),
+                    callback_data=confirm_callback,
                     style='primary',
                     icon_custom_emoji_id='5334552404736104314',
                 )

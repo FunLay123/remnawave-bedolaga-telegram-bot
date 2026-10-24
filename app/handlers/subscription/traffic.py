@@ -18,6 +18,7 @@ from app.keyboards.inline import (
     get_add_traffic_keyboard,
     get_add_traffic_keyboard_from_tariff,
     get_back_keyboard,
+    get_confirm_traffic_purchase_keyboard,
     get_countries_keyboard,
     get_devices_keyboard,
     get_insufficient_balance_keyboard,
@@ -201,6 +202,13 @@ async def _show_premium_entry(
     )
     if answer_callback:
         await callback.answer()
+
+
+def _confirm_price_line(texts, price: int) -> str:
+    """Строка цены на экране подтверждения."""
+    if price <= 0:
+        return '\n\n<blockquote>Без доплаты</blockquote>'
+    return f'\n\n<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> {texts.format_price(price)}'
 
 
 async def handle_add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):
@@ -718,10 +726,114 @@ async def select_traffic(callback: types.CallbackQuery, state: FSMContext, db_us
         await callback.answer()
 
 
+async def show_add_traffic_confirmation(
+    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None
+):
+    """Экран подтверждения покупки обычного пакета трафика."""
+    texts = get_texts(db_user.language)
+    try:
+        traffic_gb = int(callback.data.rsplit('_', 1)[-1])
+    except (ValueError, IndexError):
+        await callback.answer(texts.t('INVALID_REQUEST', 'Invalid request'), show_alert=True)
+        return
+
+    subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
+    if subscription is None:
+        return
+
+    if not subscription or subscription.is_trial:
+        await callback.answer(
+            texts.t('PAID_FEATURE_ONLY', '⚠ Эта функция доступна только для платных подписок'),
+            show_alert=True,
+        )
+        return
+
+    if is_legacy_subscription(subscription):
+        await callback.answer(
+            texts.t(
+                'LEGACY_ADDONS_UNAVAILABLE',
+                '⚠️ Сначала перейдите на тариф — докупки для этой подписки недоступны',
+            ),
+            show_alert=True,
+        )
+        return
+
+    # Цена без списания — та же формула, что в add_traffic; сам обработчик
+    # пересчитает всё под блокировкой перед оплатой.
+    tariff = None
+    if settings.is_tariffs_mode() and subscription.tariff_id:
+        from app.database.crud.tariff import get_tariff_by_id
+
+        tariff = await get_tariff_by_id(db, subscription.tariff_id)
+        if not tariff or not tariff.can_topup_traffic():
+            await callback.answer(
+                texts.t('TARIFF_TRAFFIC_TOPUP_DISABLED', '⚠️ На вашем тарифе докупка трафика недоступна'),
+                show_alert=True,
+            )
+            return
+        base_price = tariff.get_traffic_topup_price(traffic_gb) or 0
+    else:
+        if settings.is_traffic_topup_blocked():
+            await callback.answer(
+                texts.t(
+                    'TRAFFIC_FIXED_MODE',
+                    '⚠️ В текущем режиме трафик фиксированный и не может быть изменен',
+                ),
+                show_alert=True,
+            )
+            return
+        base_price = settings.get_traffic_topup_price(traffic_gb)
+
+    if base_price == 0 and traffic_gb != 0:
+        await callback.answer('⚠️ Цена для этого пакета не настроена', show_alert=True)
+        return
+
+    period_hint_days = _get_period_hint_from_subscription(subscription)
+    discounted_per_month, _, _ = PricingEngine.calculate_traffic_discount(
+        base_price,
+        db_user,
+        period_hint_days,
+    )
+    is_tariff_mode = settings.is_tariffs_mode() and subscription.tariff_id
+    if is_tariff_mode:
+        price = discounted_per_month
+    elif subscription:
+        price, _ = calculate_prorated_price(discounted_per_month, subscription.end_date)
+    else:
+        price = discounted_per_month
+
+    old_limit = texts.format_traffic(subscription.traffic_limit_gb)
+    new_limit_value = 0 if traffic_gb == 0 else (subscription.traffic_limit_gb or 0) + traffic_gb
+    new_limit = texts.format_traffic(new_limit_value)
+
+    details = _confirm_price_line(texts, price) + texts.t(
+        'TRAFFIC_PURCHASE_HINT',
+        '\n\n<blockquote>Пакет действует 30 дней с момента покупки</blockquote>',
+    )
+    confirm_text = texts.t(
+        'CONFIRM_ADD_TRAFFIC',
+        (
+            '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Подтверждение</b>\n\n'
+            '📊 {old_limit} → {new_limit}{details}'
+        ),
+    ).format(old_limit=old_limit, new_limit=new_limit, details=details)
+
+    await callback.message.edit_text(
+        confirm_text,
+        reply_markup=get_confirm_traffic_purchase_keyboard(
+            db_user.language,
+            confirm_callback=f'confirm_add_traffic_{traffic_gb}',
+            back_callback='ordinary_traffic',
+        ),
+        parse_mode='HTML',
+    )
+    await callback.answer()
+
+
 async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):
     from app.database.crud.tariff import get_tariff_by_id
 
-    traffic_gb = int(callback.data.split('_')[2])
+    traffic_gb = int(callback.data.rsplit('_', 1)[-1])
     texts = get_texts(db_user.language)
     subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
     if subscription is None:
@@ -1029,7 +1141,9 @@ async def _render_premium_traffic_packages(
     remaining_line = ''
     if state is not None:
         remaining_gb = round(state.remaining_bytes / BYTES_IN_GB, 2)
-        remaining_line = f'📊 Остаток: {remaining_gb} ГБ\n'
+        remaining_line = (
+            f'<tg-emoji emoji-id="5454156248813432363">📊</tg-emoji> Остаток: {remaining_gb} ГБ\n'
+        )
 
     hints: list[str] = []
     if state is not None and state.is_limited:
@@ -1056,7 +1170,7 @@ async def _render_premium_traffic_packages(
         (
             '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Премиум-трафик</b>\n\n'
             '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> <b>{squad}</b>\n'
-            '{remaining_line}📈 Общий трафик: {overall}{hints}'
+            '{remaining_line}<tg-emoji emoji-id="5454156248813432363">📈</tg-emoji> Общий трафик: {overall}{hints}'
         ),
     ).format(
         squad=html.escape(row['name']),
@@ -1145,6 +1259,90 @@ async def handle_premium_traffic_squad(
         back_callback='premium_traffic_topup',
         show_ordinary=await _ordinary_traffic_available(db, subscription),
     )
+
+
+async def show_premium_traffic_confirmation(
+    callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None
+):
+    """Экран подтверждения покупки премиум-трафика."""
+    from app.services.premium_traffic_purchase import PremiumTopupError, quote_premium_topup
+
+    texts = get_texts(db_user.language)
+    parts = callback.data.split('_')
+    try:
+        gb = int(parts[-1])
+        idx = int(parts[-2])
+    except (ValueError, IndexError):
+        await callback.answer(texts.t('INVALID_REQUEST', 'Invalid request'), show_alert=True)
+        return
+
+    subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
+    if subscription is None:
+        return
+
+    if not subscription or subscription.is_trial:
+        await callback.answer(
+            texts.t('PAID_FEATURE_ONLY', '⚠ Эта функция доступна только для платных подписок'),
+            show_alert=True,
+        )
+        return
+
+    rows = await _get_purchasable_premium_squads(db, subscription)
+    if idx < 0 or idx >= len(rows):
+        await callback.answer('⚠️ Список серверов изменился, откройте меню заново', show_alert=True)
+        return
+
+    row = rows[idx]
+    try:
+        quote = await quote_premium_topup(db, subscription, row['squad_uuid'], gb)
+    except PremiumTopupError as error:
+        await callback.answer(f'⚠️ {error.message}', show_alert=True)
+        return
+
+    final_price, _, discount_percent = PricingEngine.calculate_traffic_discount(
+        quote.base_price_kopeks,
+        db_user,
+        30,
+    )
+    if discount_percent < 100 and final_price > 0:
+        final_price = max(100, final_price)
+
+    remaining_line = ''
+    premium_state = row['state']
+    if premium_state is not None:
+        old_remaining = round(premium_state.remaining_bytes / BYTES_IN_GB, 2)
+        new_remaining = round(old_remaining + gb, 2)
+        remaining_line = (
+            f'\n<tg-emoji emoji-id="5454156248813432363">📊</tg-emoji> '
+            f'Остаток: {old_remaining} → {new_remaining} ГБ'
+        )
+
+    details = _confirm_price_line(texts, final_price) + texts.t(
+        'PREMIUM_TRAFFIC_PURCHASE_HINT',
+        '\n\n<blockquote>Докупка действует до конца текущего периода</blockquote>',
+    )
+    confirm_text = texts.t(
+        'CONFIRM_PREMIUM_TRAFFIC',
+        (
+            '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Подтверждение</b>\n\n'
+            '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> <b>{squad}</b>{remaining_line}{details}'
+        ),
+    ).format(
+        squad=html.escape(row['name']),
+        remaining_line=remaining_line,
+        details=details,
+    )
+
+    await callback.message.edit_text(
+        confirm_text,
+        reply_markup=get_confirm_traffic_purchase_keyboard(
+            db_user.language,
+            confirm_callback=f'confirm_premium_traffic_{idx}_{gb}',
+            back_callback='premium_traffic_topup',
+        ),
+        parse_mode='HTML',
+    )
+    await callback.answer()
 
 
 async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):

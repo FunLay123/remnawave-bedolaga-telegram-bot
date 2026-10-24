@@ -25,6 +25,8 @@ from app.handlers.subscription.traffic import (
     handle_ordinary_traffic,
     handle_premium_traffic_squad,
     handle_premium_traffic_topup,
+    show_add_traffic_confirmation,
+    show_premium_traffic_confirmation,
 )
 from app.keyboards.inline import (
     get_info_menu_keyboard,
@@ -1762,7 +1764,9 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(handle_add_traffic, F.data == 'buy_traffic')
 
-    dp.callback_query.register(add_traffic, F.data.startswith('add_traffic_'))
+    dp.callback_query.register(show_add_traffic_confirmation, F.data.startswith('add_traffic_'))
+
+    dp.callback_query.register(add_traffic, F.data.startswith('confirm_add_traffic_'))
 
     dp.callback_query.register(handle_premium_traffic_topup, F.data == 'premium_traffic_topup')
 
@@ -1770,6 +1774,8 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(handle_premium_traffic_squad, F.data.startswith('premium_traffic_squad_'))
 
-    dp.callback_query.register(buy_premium_traffic, F.data.startswith('premium_traffic_buy_'))
+    dp.callback_query.register(show_premium_traffic_confirmation, F.data.startswith('premium_traffic_buy_'))
+
+    dp.callback_query.register(buy_premium_traffic, F.data.startswith('confirm_premium_traffic_'))
 
     dp.callback_query.register(handle_activate_button, F.data == 'activate_button')
