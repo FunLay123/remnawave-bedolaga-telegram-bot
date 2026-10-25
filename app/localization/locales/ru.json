@@ -1057,7 +1057,7 @@
   "TARIFF_PURCHASE_YOUR_DISCOUNT": "\n🎁 <b>Ваша скидка: {percent}%</b>\n",
   "TARIFF_RENEW_CART_SAVED_HINT": "\n\n🛒 <i>Корзина сохранена! После пополнения баланса подписка будет продлена автоматически.</i>",
   "TARIFF_RENEW_CHOOSE_TARIFF": "🔄 <b>Выберите тариф для продления</b>\n\nДля продления подписки необходимо выбрать тариф.\nПодписка будет обновлена с параметрами выбранного тарифа.",
-  "TARIFF_RENEW_CONFIRM": "<tg-emoji emoji-id=\"5269616102698163129\">📋</tg-emoji> <b>Подтверждение</b>\n\n<tg-emoji emoji-id=\"5335020345717973061\">💠</tg-emoji> +{period} (До {new_date})\n<tg-emoji emoji-id=\"5449444442056441600\">📊</tg-emoji> {total} · баланс {balance} → {after}",
+  "TARIFF_RENEW_CONFIRM": "<tg-emoji emoji-id=\"5269616102698163129\">📋</tg-emoji> <b>Подтверждение</b>\n\n<tg-emoji emoji-id=\"5335020345717973061\">💠</tg-emoji> +{period} (До {new_date})\n<tg-emoji emoji-id=\"5449444442056441600\">📊</tg-emoji> {total}\n      баланс {balance} → {after}",
   "TARIFF_RENEW_CONFIRM_BUTTON": "Подтвердить",
   "TARIFF_RENEW_INSUFFICIENT": "<tg-emoji emoji-id=\"5269616102698163129\">📋</tg-emoji> <b>Недостаточно средств</b>\n\n<tg-emoji emoji-id=\"5116444615301399317\">💠</tg-emoji> К оплате: {price} ({period})\n<tg-emoji emoji-id=\"5449444442056441600\">📊</tg-emoji> Не хватает: {missing} (баланс: {balance})",
   "TARIFF_RENEW_TOPUP_BUTTON": "Пополнить на {amount}",

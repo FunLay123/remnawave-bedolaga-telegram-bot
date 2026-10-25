@@ -2647,9 +2647,7 @@ def get_tariff_extend_keyboard(
         )
 
     pad_button_labels(buttons, ('tariff_extend:',))
-    buttons.append(
-        [InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription', style='primary')]
-    )
+    buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -2926,7 +2924,8 @@ async def select_tariff_extend_period(
                 (
                     '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Подтверждение</b>\n\n'
                     '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> Продление: +{period} (до {new_date})\n'
-                    '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {total} · баланс {balance} → {after}'
+                    '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {total}\n'
+                    '      баланс {balance} → {after}'
                 ),
             ).format(
                 period=format_period(period),
