@@ -2933,9 +2933,9 @@ async def select_tariff_extend_period(
             ).format(
                 period=format_period(period),
                 new_date=new_end_text,
-                total=format_price_kopeks(final_price),
-                balance=format_price_kopeks(user_balance),
-                after=format_price_kopeks(user_balance - final_price),
+                total=texts.format_price(final_price),
+                balance=texts.format_price(user_balance),
+                after=texts.format_price(user_balance - final_price),
             ),
             reply_markup=get_tariff_extend_confirm_keyboard(subscription.id, tariff_id, period, db_user.language),
             parse_mode='HTML',
@@ -2971,10 +2971,10 @@ async def select_tariff_extend_period(
                     '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Не хватает: {missing} (баланс: {balance})'
                 ),
             ).format(
-                price=format_price_kopeks(final_price),
+                price=texts.format_price(final_price),
                 period=format_period(period),
-                missing=format_price_kopeks(missing),
-                balance=format_price_kopeks(user_balance),
+                missing=texts.format_price(missing),
+                balance=texts.format_price(user_balance),
             ),
             reply_markup=get_tariff_extend_insufficient_balance_keyboard(
                 tariff_id,
