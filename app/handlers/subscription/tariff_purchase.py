@@ -42,6 +42,8 @@ logger = structlog.get_logger(__name__)
 
 # Иконка кнопок выбора периода («30 дней — 300 ₽»).
 PERIOD_BUTTON_ICON_ID = '5334829606220354437'
+# На экране продления выделяем только этот период: primary + иконка.
+PRIMARY_PERIOD_DAYS = 30
 
 
 async def _persist_failed_refund(
@@ -2632,6 +2634,8 @@ def get_tariff_extend_keyboard(
             price_text = format_price_kopeks(price)
 
         button_text = _period_button_text(tariff, period, price_text, texts)
+        # Только 30-дневный период выделяем: primary + кастомная иконка.
+        is_primary_period = period == PRIMARY_PERIOD_DAYS
         # subscription_id ОБЯЗАН быть первым сегментом: иначе резолвер по callback
         # принял бы хвостовой {period} за subscription_id (см. issue #3012 —
         # период совпадал с id чужой подписки и продлевалась не та подписка).
@@ -2640,13 +2644,12 @@ def get_tariff_extend_keyboard(
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'tariff_extend:{subscription_id}:{tariff.id}:{period}',
-                    style='primary',
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                    style='primary' if is_primary_period else None,
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID if is_primary_period else None,
                 )
             ]
         )
 
-    pad_button_labels(buttons, ('tariff_extend:',))
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
