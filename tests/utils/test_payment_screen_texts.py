@@ -126,6 +126,20 @@ def test_amount_error_is_a_compact_blockquote() -> None:
     assert '<blockquote>Допустимая сумма: от 50 до 5000 ₽</blockquote>' in text
 
 
+def test_invoice_keyboard_can_use_callback_pay_button() -> None:
+    keyboard = payment_invoice_keyboard(
+        pay_callback='stars_test_pay|50000|token',
+        amount_kopeks=50_000,
+        pay_text='Оплатить 500 ★',
+    )
+    pay_button = keyboard.inline_keyboard[0][0]
+    assert pay_button.text == 'Оплатить 500 ★'
+    assert pay_button.callback_data == 'stars_test_pay|50000|token'
+    assert pay_button.url is None
+    assert pay_button.style == 'primary'
+    assert pay_button.icon_custom_emoji_id == PAYMENT_PAY_ICON_ID
+
+
 def test_invoice_keyboard_has_primary_pay_button_and_cancel() -> None:
     keyboard = payment_invoice_keyboard(
         pay_url='https://example.com/pay',

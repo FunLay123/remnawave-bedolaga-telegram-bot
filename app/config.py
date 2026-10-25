@@ -632,6 +632,9 @@ class Settings(BaseSettings):
     MAINTENANCE_MESSAGE: str = '🔧 Ведутся технические работы. Сервис временно недоступен. Попробуйте позже.'
 
     TELEGRAM_STARS_ENABLED: bool = True
+    # Dev-only: админы проходят ровно те же экраны Stars, но вместо реального
+    # инвойса кнопка «Оплатить N ★» тестово зачисляет баланс. В продакшене — false.
+    TELEGRAM_STARS_TEST_MODE: bool = False
     # ₽ per 1 ⭐. Matches Telegram's own cash-out rate (~0.95–1.0 ₽/⭐ as of
     # 2026-05) so an integer-ruble top-up round-trips losslessly:
     # rubles_to_stars(150) → 150 ⭐ → stars_to_rubles(150) → 150 ₽.

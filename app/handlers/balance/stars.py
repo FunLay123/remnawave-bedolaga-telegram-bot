@@ -1,8 +1,11 @@
 import html
+import secrets
 
 import structlog
 from aiogram import types
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.database import AsyncSessionLocal
@@ -22,6 +25,7 @@ from app.utils.payment_utils import (
     payment_amount_text,
     payment_invoice_keyboard,
     payment_invoice_text,
+    payment_success_text,
 )
 
 
@@ -36,6 +40,14 @@ async def _get_stars_limits() -> tuple[int, int]:
     except Exception as error:
         logger.warning('Не удалось получить лимиты Stars, использую глобальные', error=error)
         return DEFAULT_TOPUP_MIN_KOPEKS, DEFAULT_TOPUP_MAX_KOPEKS
+
+
+def _is_stars_test_allowed(db_user: User) -> bool:
+    """Тестовый Stars — только при флаге и только администратору."""
+    return bool(
+        settings.TELEGRAM_STARS_TEST_MODE
+        and settings.is_admin(telegram_id=getattr(db_user, 'telegram_id', None))
+    )
 
 
 @error_handler
@@ -122,20 +134,30 @@ async def process_stars_payment_amount(message: types.Message, db_user: User, am
         amount_rubles = amount_kopeks / 100
         stars_amount = TelegramStarsService.calculate_stars_from_rubles(amount_rubles)
         stars_name = settings.get_telegram_stars_display_name()
+        test_mode = _is_stars_test_allowed(db_user)
+        test_token: str | None = None
 
-        payment_service = PaymentService(message.bot)
-        invoice_link = await payment_service.create_stars_invoice(
-            amount_kopeks=amount_kopeks,
-            description=f'Пополнение баланса на {texts.format_price(amount_kopeks)}',
-            payload=f'balance_{db_user.id}_{amount_kopeks}',
-        )
-
-        keyboard = payment_invoice_keyboard(
-            language=db_user.language,
-            pay_url=invoice_link,
-            amount_kopeks=amount_kopeks,
-            pay_text=f'Оплатить {stars_amount} ★',
-        )
+        if test_mode:
+            test_token = secrets.token_urlsafe(8)
+            keyboard = payment_invoice_keyboard(
+                language=db_user.language,
+                pay_callback=f'stars_test_pay|{amount_kopeks}|{test_token}',
+                amount_kopeks=amount_kopeks,
+                pay_text=f'Оплатить {stars_amount} ★',
+            )
+        else:
+            payment_service = PaymentService(message.bot)
+            invoice_link = await payment_service.create_stars_invoice(
+                amount_kopeks=amount_kopeks,
+                description=f'Пополнение баланса на {texts.format_price(amount_kopeks)}',
+                payload=f'balance_{db_user.id}_{amount_kopeks}',
+            )
+            keyboard = payment_invoice_keyboard(
+                language=db_user.language,
+                pay_url=invoice_link,
+                amount_kopeks=amount_kopeks,
+                pay_text=f'Оплатить {stars_amount} ★',
+            )
 
         state_data = await state.get_data()
 
@@ -164,8 +186,87 @@ async def process_stars_payment_amount(message: types.Message, db_user: User, am
             stars_invoice_chat_id=invoice_message.chat.id,
         )
 
+        if test_mode:
+            await state.update_data(
+                stars_test_token=test_token,
+                stars_test_amount_kopeks=amount_kopeks,
+                stars_test_stars_amount=stars_amount,
+            )
+
         await state.set_state(None)
 
     except Exception as e:
         logger.error('Ошибка создания Stars invoice', error=e)
         await message.answer('⚠️ Ошибка создания платежа')
+
+
+@error_handler
+async def confirm_stars_test_payment(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    """Тестовый «Оплатить N ★»: тот же путь зачисления, но без платежа Telegram."""
+    if not _is_stars_test_allowed(db_user):
+        await callback.answer('❌ Тестовый режим недоступен', show_alert=True)
+        return
+
+    try:
+        _, amount_str, token = (callback.data or '').split('|', 2)
+        amount_kopeks = int(amount_str)
+    except (ValueError, AttributeError):
+        await callback.answer('❌ Некорректный тестовый платёж', show_alert=True)
+        return
+
+    data = await state.get_data()
+    if (
+        not data.get('stars_test_token')
+        or token != data.get('stars_test_token')
+        or amount_kopeks != data.get('stars_test_amount_kopeks')
+    ):
+        await callback.answer('Тестовая сессия устарела. Начните заново.', show_alert=True)
+        return
+
+    stars_amount = data.get('stars_test_stars_amount') or settings.rubles_to_stars(amount_kopeks / 100)
+
+    # Снимаем «часики» до похода в сервис: зачисление с побочками может идти
+    # секунды, а Telegram ждёт ответ на нажатие недолго.
+    await callback.answer()
+
+    payment_service = PaymentService(callback.bot)
+    result = await payment_service.process_stars_payment(
+        db=db,
+        user_id=db_user.id,
+        stars_amount=stars_amount,
+        payload=f'balance_{db_user.id}_{amount_kopeks}',
+        telegram_payment_charge_id=f'stars_test_{token}',
+    )
+
+    if not result.success:
+        await callback.message.answer('❌ Не удалось зачислить тестовый платёж')
+        return
+
+    await state.update_data(
+        stars_test_token=None,
+        stars_test_amount_kopeks=None,
+        stars_test_stars_amount=None,
+    )
+
+    if result.already_processed:
+        await callback.message.answer('ℹ️ Этот тестовый платёж уже зачислен')
+        return
+
+    try:
+        await db.refresh(db_user)
+    except Exception:  # pragma: no cover - защитный код
+        pass
+
+    amount_credited = result.amount_kopeks or amount_kopeks
+    keyboard = await payment_service.build_topup_success_keyboard(db_user)
+    text = payment_success_text(amount_credited, result.new_balance_kopeks, result.old_balance_kopeks)
+
+    try:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+    except TelegramBadRequest:  # pragma: no cover - сообщение могло быть удалено
+        await callback.message.answer(text, reply_markup=keyboard, parse_mode='HTML')

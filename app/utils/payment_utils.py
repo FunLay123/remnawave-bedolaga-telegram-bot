@@ -157,6 +157,7 @@ def payment_invoice_keyboard(
     *,
     language: str = 'ru',
     pay_url: str | None = None,
+    pay_callback: str | None = None,
     amount_kopeks: int = 0,
     pay_text: str | None = None,
     status_callback: str | None = None,
@@ -172,6 +173,17 @@ def payment_invoice_keyboard(
                 InlineKeyboardButton(
                     text=pay_text or f'Оплатить {format_whole_rubles(amount_kopeks)}',
                     url=pay_url,
+                    style='primary',
+                    icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                )
+            ]
+        )
+    elif pay_callback:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=pay_text or f'Оплатить {format_whole_rubles(amount_kopeks)}',
+                    callback_data=pay_callback,
                     style='primary',
                     icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
                 )

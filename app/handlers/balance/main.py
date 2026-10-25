@@ -750,9 +750,10 @@ def register_balance_handlers(dp: Dispatcher):
 
     dp.callback_query.register(show_payment_methods, F.data == 'balance_topup')
 
-    from .stars import start_stars_payment
+    from .stars import confirm_stars_test_payment, start_stars_payment
 
     dp.callback_query.register(start_stars_payment, F.data == 'topup_stars')
+    dp.callback_query.register(confirm_stars_test_payment, F.data.startswith('stars_test_pay|'))
 
     from .yookassa import start_yookassa_payment
 
