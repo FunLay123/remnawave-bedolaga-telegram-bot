@@ -12,7 +12,7 @@ from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
 from app.services.cloudpayments_service import CloudPaymentsAPIError
 from app.utils.payment_logger import payment_logger as logger
-from app.utils.user_utils import format_referrer_info
+from app.utils.payment_utils import payment_success_text
 
 
 class CloudPaymentsPaymentMixin:
@@ -465,35 +465,18 @@ class CloudPaymentsPaymentMixin:
             return
 
         from app.bot_factory import create_bot
-        from app.localization.texts import get_texts
 
         # Skip email-only users (no telegram_id)
         if not user.telegram_id:
             logger.debug('Skipping CloudPayments notification for email-only user', user_id=user.id)
             return
 
-        texts = get_texts(user.language)
         keyboard = await self.build_topup_success_keyboard(user)
-
-        referrer_info = format_referrer_info(user)
-
-        amount_rub = amount_kopeks / 100
-        new_balance = user.balance_kopeks / 100
-
-        message = texts.t(
-            'PAYMENT_SUCCESS_CLOUDPAYMENTS',
-            '✅ <b>Оплата получена!</b>\n\n'
-            '💰 Сумма: {amount}₽\n'
-            '💳 Способ: CloudPayments\n'
-            '💵 Баланс: {balance}₽\n\n'
-            'Спасибо за пополнение!',
-        ).format(
-            amount=f'{amount_rub:.2f}',
-            balance=f'{new_balance:.2f}',
+        message = payment_success_text(
+            amount_kopeks,
+            user.balance_kopeks,
+            user.balance_kopeks - amount_kopeks,
         )
-
-        if referrer_info:
-            message += f'\n\n{referrer_info}'
 
         async with create_bot() as bot:
             try:

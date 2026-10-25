@@ -13,6 +13,7 @@ from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
 from app.services.kassa_ai_service import kassa_ai_service
 from app.utils.payment_logger import payment_logger as logger
+from app.utils.payment_utils import payment_success_text
 from app.utils.user_utils import format_referrer_info
 
 
@@ -381,20 +382,14 @@ class KassaAiPaymentMixin:
         # Отправка уведомления пользователю (только Telegram-пользователям)
         if getattr(self, 'bot', None) and user.telegram_id and settings.is_notifications_enabled():
             try:
-                display_name = settings.get_kassa_ai_display_name()
-
                 keyboard = await self.build_topup_success_keyboard(user)
-                message = (
-                    '✅ <b>Пополнение успешно!</b>\n\n'
-                    f'💰 Сумма: {settings.format_price(payment.amount_kopeks)}\n'
-                    f'💳 Способ: {display_name}\n'
-                    f'🆔 Транзакция: {transaction.id}\n\n'
-                    'Баланс пополнен автоматически!'
-                )
-
                 await self.bot.send_message(
                     user.telegram_id,
-                    message,
+                    payment_success_text(
+                        payment.amount_kopeks,
+                        old_balance + payment.amount_kopeks,
+                        old_balance,
+                    ),
                     parse_mode='HTML',
                     reply_markup=keyboard,
                 )

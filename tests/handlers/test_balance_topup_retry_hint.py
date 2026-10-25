@@ -22,6 +22,7 @@ def payment_environment(monkeypatch):
         YOOKASSA_MAX_AMOUNT_KOPEKS=10000,
         YOOKASSA_SBP_ENABLED=True,
         is_yookassa_enabled=lambda: True,
+        get_yookassa_display_name=lambda: 'YooKassa',
         get_balance_payment_description=lambda *_args, **_kwargs: 'Balance top-up',
         format_price=lambda amount: f'{amount / 100:.2f} ₽',
         get_support_contact_display_html=lambda: 'support',
@@ -83,9 +84,10 @@ async def test_rejected_purchase_topup_keeps_input_open_until_user_retries(payme
     await balance_main.handle_topup_amount_callback(callback, user, state)
 
     hint = message.answer.await_args.args[0]
-    assert 'отправьте боту сообщение' in hint
-    assert 'не меньше 50 ₽' in hint
-    assert 'Например, отправьте: 50' in hint
+    assert 'Допустимая сумма' in hint
+    assert '50 ₽' in hint
+    assert '100 ₽' in hint
+    assert 'Например' not in hint
     callback.answer.assert_awaited_once()
     payment_environment.factory.assert_not_called()
     assert await state.get_state() == BalanceStates.waiting_for_amount.state
@@ -95,8 +97,8 @@ async def test_rejected_purchase_topup_keeps_input_open_until_user_retries(payme
     too_large = _message('101')
     await balance_main.process_topup_amount(too_large, user, state)
     maximum_hint = too_large.answer.await_args.args[0]
-    assert 'отправьте боту сообщение' in maximum_hint
-    assert 'не больше 100 ₽' in maximum_hint
+    assert 'Допустимая сумма' in maximum_hint
+    assert '100 ₽' in maximum_hint
     payment_environment.factory.assert_not_called()
     assert await state.get_state() == BalanceStates.waiting_for_amount.state
     assert (await state.get_data())['saved_cart'] == cart
@@ -122,16 +124,14 @@ async def test_rejected_purchase_topup_keeps_input_open_until_user_retries(payme
 @pytest.mark.asyncio
 @pytest.mark.parametrize('entry', ['manual', 'card', 'sbp'])
 @pytest.mark.parametrize(
-    ('minimum', 'maximum', 'displayed_minimum', 'example'),
+    ('minimum', 'maximum', 'displayed_minimum', 'displayed_maximum'),
     [
-        pytest.param(5055, 10000, '50.55', '51', id='fractional-minimum'),
-        pytest.param(4999999, 5000000, '49999.99', '50000', id='manual-input-ceiling'),
-        pytest.param(5055, 5099, '50.55', None, id='no-valid-whole-ruble-example'),
-        pytest.param(5000001, 6000000, '50000.01', None, id='minimum-exceeds-manual-input-ceiling'),
+        pytest.param(5055, 10000, '51', '100', id='fractional-minimum'),
+        pytest.param(4999999, 5000000, '50000', '50000', id='manual-input-ceiling'),
     ],
 )
-async def test_minimum_hint_only_suggests_an_accepted_whole_ruble_amount(
-    payment_environment, state, user, entry, minimum, maximum, displayed_minimum, example
+async def test_amount_error_is_compact_and_shows_whole_ruble_limits(
+    payment_environment, state, user, entry, minimum, maximum, displayed_minimum, displayed_maximum
 ):
     payment_environment.settings.YOOKASSA_MIN_AMOUNT_KOPEKS = minimum
     payment_environment.settings.YOOKASSA_MAX_AMOUNT_KOPEKS = maximum
@@ -150,11 +150,49 @@ async def test_minimum_hint_only_suggests_an_accepted_whole_ruble_amount(
         await handler(message, user, AsyncMock(), 4000, state)
 
     hint = message.answer.await_args.args[0]
-    assert 'отправьте боту сообщение' in hint
-    assert f'не меньше {displayed_minimum} ₽' in hint
-    if example is None:
-        assert 'Например' not in hint
+    assert 'Допустимая сумма' in hint
+    assert f'{displayed_minimum} ₽' in hint
+    assert f'{displayed_maximum} ₽' in hint
+    assert '<blockquote>' in hint
+    assert 'Например' not in hint
+    payment_environment.factory.assert_not_called()
+    assert await state.get_state() == BalanceStates.waiting_for_amount.state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('entry', ['manual', 'card', 'sbp'])
+async def test_minimum_above_global_input_ceiling_reports_unavailable(payment_environment, state, user, entry):
+    payment_environment.settings.YOOKASSA_MIN_AMOUNT_KOPEKS = 5_000_001
+    payment_environment.settings.YOOKASSA_MAX_AMOUNT_KOPEKS = 6_000_000
+    await state.set_state(BalanceStates.waiting_for_amount)
+    await state.set_data({'payment_method': 'yookassa'})
+    message = _message('40')
+
+    if entry == 'manual':
+        await balance_main.process_topup_amount(message, user, state)
     else:
-        assert hint.split('Например, отправьте: ')[1] == example
+        handler = (
+            yookassa.process_yookassa_payment_amount
+            if entry == 'card'
+            else yookassa.process_yookassa_sbp_payment_amount
+        )
+        await handler(message, user, AsyncMock(), 4000, state)
+
+    hint = message.answer.await_args.args[0]
+    assert 'недоступно' in hint.lower()
+    assert '50001' not in hint
+
+
+@pytest.mark.asyncio
+async def test_finite_but_huge_amount_is_rejected_instead_of_crashing(payment_environment, state, user):
+    """Конечное число, у которого *100 переполняет float, не должно ронять хендлер."""
+    await state.set_state(BalanceStates.waiting_for_amount)
+    await state.set_data({'payment_method': 'yookassa'})
+    message = _message('1' + '0' * 307)
+
+    await balance_main.process_topup_amount(message, user, state)
+
+    hint = message.answer.await_args.args[0]
+    assert 'Введите сумму числом' in hint
     payment_environment.factory.assert_not_called()
     assert await state.get_state() == BalanceStates.waiting_for_amount.state

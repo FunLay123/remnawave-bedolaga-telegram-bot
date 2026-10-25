@@ -30,7 +30,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton
 
 from app.config import settings
 from app.utils.miniapp_buttons import (
@@ -193,31 +193,6 @@ def test_build_main_menu_button_body_does_not_reference_cabinet_mode() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_topup_success_keyboard_main_menu_button_is_callback() -> None:
-    """Source-level pin: ``app/services/payment/common.py`` must use
-    ``build_main_menu_button(texts.MAIN_MENU_BUTTON)`` for the Main
-    Menu row, NOT ``build_miniapp_or_callback_button``.
-
-    Whitespace-robust positive assertion only — the previous version
-    had a literal-string negative match keyed to a specific 20-space
-    indent, which would silently pass after any reformat that changed
-    the indentation. We rely on the AST-based scan in
-    ``test_no_other_callsite_wraps_back_to_menu_in_miniapp_helper``
-    to catch the buggy pattern (it's resilient to formatting).
-    """
-    from pathlib import Path
-
-    common_path = Path(__file__).resolve().parents[2] / 'app' / 'services' / 'payment' / 'common.py'
-    source = common_path.read_text(encoding='utf-8')
-
-    # The corrected form must be present.
-    assert 'build_main_menu_button(texts.MAIN_MENU_BUTTON)' in source, (
-        'build_topup_success_keyboard must call build_main_menu_button() for '
-        'the Главное меню row to guarantee bot-callback semantics regardless '
-        'of MAIN_MENU_MODE. AST scan below catches the buggy pattern.'
-    )
-
-
 # ---------------------------------------------------------------------------
 # Convention pin: no other call site secretly wraps back_to_menu through
 # build_miniapp_or_callback_button.
@@ -339,45 +314,29 @@ def test_home_button_key_is_not_in_cabinet_miniapp_button_keys() -> None:
 # by the test-automator review.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# New top-up success keyboard contract: one action button, no main-menu row.
+# ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
-async def test_topup_success_keyboard_renders_callback_main_menu_button_in_cabinet_mode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """REGRESSION (behavioural): ``build_topup_success_keyboard``,
-    invoked in cabinet mode with cabinet URL configured, must produce
-    an ``InlineKeyboardMarkup`` whose LAST row contains a callback
-    button with ``callback_data='back_to_menu'`` and ``web_app is None``.
+async def test_topup_success_keyboard_without_cart_points_to_subscription() -> None:
+    """No saved cart/draft -> a single subscription button.
 
-    This is the keyboard the user actually receives in the
-    "💸 Пополнение успешно" notification. Source-level pins protect
-    against the literal anti-pattern; this test protects against any
-    refactor that breaks the user-visible outcome regardless of how
-    the keyboard is assembled internally.
+    The minimal top-up success screen intentionally has no "Мой баланс" or
+    "Главное меню" rows: one clear next step is enough.
     """
-    monkeypatch.setattr(settings, 'MAIN_MENU_MODE', 'cabinet', raising=False)
-    monkeypatch.setattr(settings, 'MINIAPP_CUSTOM_URL', 'https://cabinet.example.com', raising=False)
-
     from types import SimpleNamespace
 
     from app.services.payment.common import PaymentCommonMixin
 
-    # Minimal user stub. No active subscription = simplest branch
-    # (no subscription-extend row), no saved cart, no checkout draft.
-    user = SimpleNamespace(
-        id=42,
-        language='ru',
-        subscription=None,
-    )
-
-    # Mock cart-helpers so the test does not hit Redis / DB. These are
-    # decorations on the keyboard, not the Main Menu row we care about.
+    user = SimpleNamespace(id=42, language='ru', subscription=None)
     mixin_instance = type('_TestMixin', (PaymentCommonMixin,), {})()
 
     with (
         patch(
-            'app.services.payment.common.user_cart_service.has_user_cart',
-            AsyncMock(return_value=False),
+            'app.services.payment.common.user_cart_service.get_user_cart',
+            AsyncMock(return_value=None),
         ),
         patch(
             'app.services.payment.common.has_subscription_checkout_draft',
@@ -386,23 +345,7 @@ async def test_topup_success_keyboard_renders_callback_main_menu_button_in_cabin
     ):
         keyboard = await mixin_instance.build_topup_success_keyboard(user)
 
-    assert isinstance(keyboard, InlineKeyboardMarkup)
-    assert keyboard.inline_keyboard, 'Keyboard must contain at least one row'
-
-    # The Main Menu button is the LAST row of the keyboard
-    # (after first_button, optional cart-restore row, and balance row).
-    last_row = keyboard.inline_keyboard[-1]
-    assert len(last_row) == 1, f'Main Menu row should contain exactly one button, got {last_row}'
-
-    main_menu_button = last_row[0]
-    assert main_menu_button.callback_data == 'back_to_menu', (
-        f'LAST button must have callback_data="back_to_menu", got '
-        f'callback_data={main_menu_button.callback_data!r}, web_app={main_menu_button.web_app!r}. '
-        'If web_app is set, the user is stuck in cabinet root — the exact bug '
-        'reported on 2026-05-18.'
-    )
-    assert main_menu_button.web_app is None, (
-        f'LAST button MUST NOT have a WebAppInfo attached, got web_app={main_menu_button.web_app!r}. '
-        'In MAIN_MENU_MODE=cabinet with MINIAPP_CUSTOM_URL configured, the previous '
-        'buggy code produced a WebApp launcher here — the user-visible regression.'
-    )
+    assert len(keyboard.inline_keyboard) == 1
+    button = keyboard.inline_keyboard[0][0]
+    assert button.callback_data == 'menu_subscription'
+    assert button.web_app is None

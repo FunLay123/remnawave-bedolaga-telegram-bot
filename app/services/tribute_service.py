@@ -17,6 +17,7 @@ from app.database.database import get_db
 from app.database.models import PaymentMethod, TransactionType
 from app.external.tribute import TributeService as TributeAPI
 from app.services.payment_service import PaymentService
+from app.utils.payment_utils import payment_success_text
 from app.utils.user_utils import format_referrer_info
 
 
@@ -360,8 +361,6 @@ class TributeService:
             return
 
         try:
-            amount_rubles = amount_kopeks / 100
-
             async for session in get_db():
                 user = await get_user_by_telegram_id(session, user_id)
                 if not user:
@@ -372,15 +371,13 @@ class TributeService:
                 payment_service = PaymentService(self.bot)
                 keyboard = await payment_service.build_topup_success_keyboard(user)
 
-                text = (
-                    f'✅ **Платеж успешно получен!**\n\n'
-                    f'💰 Сумма: {int(amount_rubles)} ₽\n'
-                    f'💳 Способ оплаты: Tribute\n'
-                    f'🎉 Средства зачислены на баланс!\n\n'
-                    f'Спасибо за оплату! 🙏'
+                text = payment_success_text(
+                    amount_kopeks,
+                    user.balance_kopeks,
+                    user.balance_kopeks - amount_kopeks,
                 )
 
-                await self.bot.send_message(user_id, text, reply_markup=keyboard, parse_mode='Markdown')
+                await self.bot.send_message(user_id, text, reply_markup=keyboard, parse_mode='HTML')
 
                 # Проверяем наличие сохраненной корзины для возврата к оформлению подписки
                 from app.services.payment.common import send_cart_notification_after_topup

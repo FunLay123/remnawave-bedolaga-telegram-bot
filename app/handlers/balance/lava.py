@@ -16,6 +16,12 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -103,29 +109,13 @@ async def _create_lava_payment_and_respond(
     name = display_name or settings.get_lava_display_name()
 
     # Без URL mixin вернул бы None ещё до этого блока; здесь URL гарантирован.
-    pay_button_text = texts.t('PAY_BUTTON', '\U0001f4b3 Оплатить {amount}₽').format(
-        amount=f'{amount_rub:.0f}',
+    keyboard = payment_invoice_keyboard(
+        language=db_user.language,
+        pay_url=payment_url,
+        amount_kopeks=amount_kopeks,
     )
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=pay_button_text, url=payment_url)],
-            [
-                InlineKeyboardButton(
-                    text=texts.t('BACK_BUTTON', '◀️ Назад'),
-                    callback_data='menu_balance',
-                )
-            ],
-        ]
-    )
-
-    response_text = texts.t(
-        'LAVA_PAYMENT_CREATED',
-        '\U0001f4b3 <b>Оплата через {name}</b>\n\n'
-        'Сумма: <b>{amount}₽</b>\n\n'
-        'Нажмите кнопку ниже для перехода к оплате.\n'
-        'После подтверждения платежа баланс будет пополнен автоматически.',
-    ).format(name=name, amount=f'{amount_rub:.2f}')
+    response_text = payment_invoice_text(name, amount_kopeks)
 
     if edit_message:
         await message_or_callback.edit_text(response_text, reply_markup=keyboard, parse_mode='HTML')
@@ -160,24 +150,10 @@ async def process_lava_payment_amount(
     min_amount = settings.LAVA_MIN_AMOUNT_KOPEKS
     max_amount = settings.LAVA_MAX_AMOUNT_KOPEKS
 
-    if amount_kopeks < min_amount:
+    if amount_kopeks < min_amount or amount_kopeks > max_amount:
         await message.answer(
-            texts.t(
-                'PAYMENT_AMOUNT_TOO_LOW',
-                'Минимальная сумма пополнения: {min_amount}₽',
-            ).format(min_amount=min_amount // 100),
-            reply_markup=get_back_keyboard(db_user.language),
-            parse_mode='HTML',
-        )
-        return
-
-    if amount_kopeks > max_amount:
-        await message.answer(
-            texts.t(
-                'PAYMENT_AMOUNT_TOO_HIGH',
-                'Максимальная сумма пополнения: {max_amount}₽',
-            ).format(max_amount=max_amount // 100),
-            reply_markup=get_back_keyboard(db_user.language),
+            payment_amount_range_error(min_amount, max_amount),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
             parse_mode='HTML',
         )
         return
@@ -230,17 +206,7 @@ async def _start_lava_topup_impl(
     keyboard = await get_topup_amount_keyboard(payment_method, db_user.language)
 
     await callback.message.edit_text(
-        texts.t(
-            'LAVA_ENTER_AMOUNT',
-            '\U0001f4b3 <b>Пополнение через {name}</b>\n\n'
-            'Введите сумму пополнения в рублях.\n\n'
-            'Минимум: {min_amount}₽\n'
-            'Максимум: {max_amount}₽',
-        ).format(
-            name=display_name,
-            min_amount=min_amount,
-            max_amount=f'{max_amount:,}'.replace(',', ' '),
-        ),
+        payment_amount_text(display_name, min_amount * 100, max_amount * 100),
         parse_mode='HTML',
         reply_markup=keyboard,
     )

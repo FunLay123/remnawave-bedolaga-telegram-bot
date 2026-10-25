@@ -16,6 +16,13 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    payment_amount_error_text,
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -78,34 +85,13 @@ async def _create_cloudpayments_payment_and_respond(
 
     payment_url = result.get('payment_url')
 
-    # Create keyboard with payment button
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=texts.t(
-                        'PAY_BUTTON',
-                        '💳 Оплатить {amount}₽',
-                    ).format(amount=f'{amount_rub:.0f}'),
-                    url=payment_url,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=texts.t('BACK_BUTTON', '◀️ Назад'),
-                    callback_data='menu_balance',
-                )
-            ],
-        ]
+    keyboard = payment_invoice_keyboard(
+        language=db_user.language,
+        pay_url=payment_url,
+        amount_kopeks=amount_kopeks,
     )
 
-    response_text = texts.t(
-        'CLOUDPAYMENTS_PAYMENT_CREATED',
-        '💳 <b>Оплата банковской картой</b>\n\n'
-        'Сумма: <b>{amount}₽</b>\n\n'
-        'Нажмите кнопку ниже для оплаты.\n'
-        'После успешной оплаты баланс будет пополнен автоматически.',
-    ).format(amount=f'{amount_rub:.2f}')
+    response_text = payment_invoice_text(settings.get_cloudpayments_display_name(), amount_kopeks)
 
     if edit_message:
         await message_or_callback.edit_text(
@@ -163,29 +149,17 @@ async def process_cloudpayments_payment_amount(
         return
 
     # Validate amount
-    if amount_kopeks < settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS:
-        min_rub = settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS / 100
+    if (
+        amount_kopeks < settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS
+        or amount_kopeks > settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS
+    ):
         await message.answer(
-            texts.t(
-                'AMOUNT_TOO_LOW',
-                'Минимальная сумма пополнения: {min_amount:.0f}₽',
-            ).format(min_amount=min_rub),
-            reply_markup=get_back_keyboard(db_user.language),
+            payment_amount_range_error(settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS, settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
         )
         return
 
-    if amount_kopeks > settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS:
-        max_rub = settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS / 100
-        await message.answer(
-            texts.t(
-                'AMOUNT_TOO_HIGH',
-                'Максимальная сумма пополнения: {max_amount:,.0f}₽',
-            ).format(max_amount=max_rub),
-            reply_markup=get_back_keyboard(db_user.language),
-        )
-        return
-
-    # Clear state
     await state.clear()
 
     await _create_cloudpayments_payment_and_respond(message, db_user, db, amount_kopeks, edit_message=False)
@@ -228,16 +202,13 @@ async def start_cloudpayments_payment(
         )
         return
 
-    min_amount_rub = settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS / 100
-    max_amount_rub = settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS / 100
+    message_text = payment_amount_text(
+        settings.get_cloudpayments_display_name(),
+        settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS,
+        settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS,
+    )
 
-    message_text = texts.t(
-        'CLOUDPAYMENTS_ENTER_AMOUNT',
-        '💳 <b>Оплата банковской картой (CloudPayments)</b>\n\n'
-        'Введите сумму для пополнения от {min_amount:.0f} до {max_amount:,.0f} рублей:',
-    ).format(min_amount=min_amount_rub, max_amount=max_amount_rub)
-
-    keyboard = await get_topup_amount_keyboard('cloudpayments', db_user.language, back_callback='back_to_menu')
+    keyboard = await get_topup_amount_keyboard('cloudpayments', db_user.language, back_callback='balance_topup')
 
     await callback.message.edit_text(
         message_text,
@@ -282,37 +253,24 @@ async def process_cloudpayments_amount(
         amount_kopeks = int(amount_rub * 100)
     except (ValueError, TypeError):
         await message.answer(
-            texts.t('INVALID_AMOUNT', 'Введите корректную сумму числом'),
+            payment_amount_error_text('Введите сумму числом, например 500'),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
             parse_mode='HTML',
         )
         return
 
     # Validate amount
-    if amount_kopeks < settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS:
-        min_rub = settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS / 100
+    if (
+        amount_kopeks < settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS
+        or amount_kopeks > settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS
+    ):
         await message.answer(
-            texts.t(
-                'AMOUNT_TOO_LOW',
-                'Минимальная сумма пополнения: {min_amount:.0f}₽',
-            ).format(min_amount=min_rub),
-            reply_markup=get_back_keyboard(db_user.language),
+            payment_amount_range_error(settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS, settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
             parse_mode='HTML',
         )
         return
 
-    if amount_kopeks > settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS:
-        max_rub = settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS / 100
-        await message.answer(
-            texts.t(
-                'AMOUNT_TOO_HIGH',
-                'Максимальная сумма пополнения: {max_amount:,.0f}₽',
-            ).format(max_amount=max_rub),
-            reply_markup=get_back_keyboard(db_user.language),
-            parse_mode='HTML',
-        )
-        return
-
-    # Clear state
     await state.clear()
 
     # Create payment
@@ -344,35 +302,14 @@ async def process_cloudpayments_amount(
 
     payment_url = result.get('payment_url')
 
-    # Create keyboard with payment button
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=texts.t(
-                        'PAY_BUTTON',
-                        '💳 Оплатить {amount}₽',
-                    ).format(amount=f'{amount_rub:.0f}'),
-                    url=payment_url,
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text=texts.t('BACK_BUTTON', '◀️ Назад'),
-                    callback_data='menu_balance',
-                )
-            ],
-        ]
+    keyboard = payment_invoice_keyboard(
+        language=db_user.language,
+        pay_url=payment_url,
+        amount_kopeks=amount_kopeks,
     )
 
     await message.answer(
-        texts.t(
-            'CLOUDPAYMENTS_PAYMENT_CREATED',
-            '💳 <b>Оплата банковской картой</b>\n\n'
-            'Сумма: <b>{amount}₽</b>\n\n'
-            'Нажмите кнопку ниже для оплаты.\n'
-            'После успешной оплаты баланс будет пополнен автоматически.',
-        ).format(amount=f'{amount_rub:.2f}'),
+        payment_invoice_text(settings.get_cloudpayments_display_name(), amount_kopeks),
         reply_markup=keyboard,
         parse_mode='HTML',
     )

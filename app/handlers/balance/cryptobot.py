@@ -13,6 +13,13 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    payment_amount_error_text,
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+)
 from app.utils.timezone import format_local_datetime
 
 
@@ -48,26 +55,13 @@ async def start_cryptobot_payment(callback: types.CallbackQuery, db_user: User, 
 
     try:
         current_rate = await currency_converter.get_usd_to_rub_rate()
-        rate_text = f'💱 Текущий курс: 1 USD = {current_rate:.2f} ₽'
     except Exception as e:
         logger.warning('Не удалось получить курс валют', error=e)
         current_rate = 95.0
-        rate_text = f'💱 Курс: 1 USD ≈ {current_rate:.0f} ₽'
 
-    available_assets = settings.get_cryptobot_assets()
-    assets_text = ', '.join(available_assets)
+    message_text = payment_amount_text(settings.get_cryptobot_display_name(), 100_00, 100_000_00)
 
-    message_text = (
-        f'🪙 <b>Пополнение криптовалютой</b>\n\n'
-        f'Введите сумму для пополнения от 100 до 100,000 ₽:\n\n'
-        f'💰 Доступные активы: {assets_text}\n'
-        f'⚡ Мгновенное зачисление на баланс\n'
-        f'🔒 Безопасная оплата через CryptoBot\n\n'
-        f'{rate_text}\n'
-        f'Сумма будет автоматически конвертирована в USD для оплаты.'
-    )
-
-    keyboard = await get_topup_amount_keyboard('cryptobot', db_user.language, back_callback='back_to_menu')
+    keyboard = await get_topup_amount_keyboard('cryptobot', db_user.language, back_callback='balance_topup')
 
     await callback.message.edit_text(message_text, reply_markup=keyboard, parse_mode='HTML')
 
@@ -113,17 +107,11 @@ async def process_cryptobot_payment_amount(
 
     amount_rubles = amount_kopeks / 100
 
-    if amount_rubles < 100:
+    if amount_rubles < 100 or amount_rubles > 100000:
         await message.answer(
-            'Минимальная сумма пополнения: 100 ₽\n\nОтправьте новую сумму пополнения числом в сообщении.',
-            reply_markup=get_back_keyboard(db_user.language),
-        )
-        return
-
-    if amount_rubles > 100000:
-        await message.answer(
-            'Максимальная сумма пополнения: 100,000 ₽\n\nОтправьте новую сумму пополнения числом в сообщении.',
-            reply_markup=get_back_keyboard(db_user.language),
+            payment_amount_range_error(100_00, 100_000_00),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
         )
         return
 
@@ -140,19 +128,11 @@ async def process_cryptobot_payment_amount(
 
         amount_usd = round(amount_usd, 2)
 
-        if amount_usd < 1:
+        if amount_usd < 1 or amount_usd > 1000:
             await message.answer(
-                '❌ Минимальная сумма для оплаты в USD: 1.00 USD\n\n'
-                'Отправьте новую сумму пополнения в рублях числом в сообщении.',
-                reply_markup=get_back_keyboard(db_user.language),
-            )
-            return
-
-        if amount_usd > 1000:
-            await message.answer(
-                '❌ Максимальная сумма для оплаты в USD: 1,000 USD\n\n'
-                'Отправьте новую сумму пополнения в рублях числом в сообщении.',
-                reply_markup=get_back_keyboard(db_user.language),
+                payment_amount_error_text('Сумма должна быть в пределах 1–1000 USD'),
+                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                parse_mode='HTML',
             )
             return
 
@@ -182,17 +162,11 @@ async def process_cryptobot_payment_amount(
             await state.clear()
             return
 
-        keyboard = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text='🪙 Оплатить', url=payment_url)],
-                [
-                    types.InlineKeyboardButton(
-                        text='📊 Проверить статус',
-                        callback_data=f'check_cryptobot_{payment_result["local_payment_id"]}',
-                    )
-                ],
-                [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-            ]
+        keyboard = payment_invoice_keyboard(
+            language=db_user.language,
+            pay_url=payment_url,
+            amount_kopeks=amount_kopeks,
+            status_callback=f'check_cryptobot_{payment_result["local_payment_id"]}',
         )
 
         state_data = await state.get_data()
@@ -210,21 +184,13 @@ async def process_cryptobot_payment_amount(
             except Exception as delete_error:  # pragma: no cover - diagnostics
                 logger.warning('Не удалось удалить сообщение с запросом суммы CryptoBot', delete_error=delete_error)
 
+        asset = payment_result.get('asset') or settings.CRYPTOBOT_DEFAULT_ASSET
         invoice_message = await message.answer(
-            f'🪙 <b>Оплата криптовалютой</b>\n\n'
-            f'💰 Сумма к зачислению: {amount_rubles:.0f} ₽\n'
-            f'💵 К оплате: {amount_usd:.2f} USD\n'
-            f'🪙 Актив: {payment_result["asset"]}\n'
-            f'💱 Курс: 1 USD = {current_rate:.2f} ₽\n'
-            f'🆔 ID платежа: {payment_result["invoice_id"][:8]}...\n\n'
-            f'📱 <b>Инструкция:</b>\n'
-            f"1. Нажмите кнопку 'Оплатить'\n"
-            f'2. Выберите удобный актив\n'
-            f'3. Переведите указанную сумму\n'
-            f'4. Деньги поступят на баланс автоматически\n\n'
-            f'🔒 Оплата проходит через защищенную систему CryptoBot\n'
-            f'⚡ Поддерживаемые активы: USDT, TON, BTC, ETH\n\n'
-            f'❓ Если возникнут проблемы, обратитесь в {settings.get_support_contact_display_html()}',
+            payment_invoice_text(
+                settings.get_cryptobot_display_name(),
+                amount_kopeks,
+                amount_note=f'≈ {amount_usd:.2f} USD · {asset}',
+            ),
             reply_markup=keyboard,
             parse_mode='HTML',
         )

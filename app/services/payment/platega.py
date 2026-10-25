@@ -15,6 +15,7 @@ from app.database.models import PaymentMethod, Subscription, TransactionType
 from app.services.payment.payer_identity import PayerIdentity, payer_from_guest, resolve_user_payer
 from app.services.platega_service import PlategaService
 from app.utils.payment_logger import payment_logger as logger
+from app.utils.payment_utils import payment_success_text
 from app.utils.user_utils import format_referrer_info
 
 
@@ -1057,19 +1058,15 @@ class PlategaPaymentMixin:
             except Exception as error:
                 logger.error('Ошибка отправки админ уведомления Platega', error=error)
 
-        method_title = settings.get_platega_method_display_title(payment.payment_method_code)
-
         if getattr(self, 'bot', None) and user.telegram_id and settings.is_notifications_enabled():
             try:
                 keyboard = await self.build_topup_success_keyboard(user)
                 await self.bot.send_message(
                     user.telegram_id,
-                    (
-                        '✅ <b>Пополнение успешно!</b>\n\n'
-                        f'💰 Сумма: {settings.format_price(payment.amount_kopeks)}\n'
-                        f'🦊 Способ: {method_title}\n'
-                        f'🆔 Транзакция: {transaction.id}\n\n'
-                        'Баланс пополнен автоматически!'
+                    payment_success_text(
+                        payment.amount_kopeks,
+                        old_balance + payment.amount_kopeks,
+                        old_balance,
                     ),
                     parse_mode='HTML',
                     reply_markup=keyboard,

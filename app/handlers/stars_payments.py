@@ -12,6 +12,7 @@ from app.external.telegram_stars import TelegramStarsService
 from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import Texts, get_texts
 from app.services.payment_service import PaymentService
+from app.utils.payment_utils import payment_success_text
 
 
 logger = structlog.get_logger(__name__)
@@ -594,7 +595,7 @@ async def handle_successful_payment(message: types.Message, db: AsyncSession, st
                         'Не удалось удалить сообщение после оплаты Stars', label=label, delete_error=delete_error
                     )
 
-        success = await payment_service.process_stars_payment(
+        result = await payment_service.process_stars_payment(
             db=db,
             user_id=user.id,
             stars_amount=payment.total_amount,
@@ -609,27 +610,50 @@ async def handle_successful_payment(message: types.Message, db: AsyncSession, st
             stars_invoice_chat_id=None,
         )
 
-        if success:
-            rubles_amount = TelegramStarsService.calculate_rubles_from_stars(payment.total_amount)
-            amount_kopeks = int((rubles_amount * Decimal(100)).to_integral_value(rounding=ROUND_HALF_UP))
-            amount_text = settings.format_price(amount_kopeks).replace(' ₽', '')
+        if result.success:
+            # Повторная доставка successful_payment: сервис уже зачислил платёж,
+            # второй экран «Баланс пополнен» показывал бы переход, которого сейчас
+            # не было (и мог бы показать неверные «до → после»).
+            if result.already_processed:
+                logger.info(
+                    'ℹ️ Stars платёж уже обработан ранее — экран успеха не дублирую',
+                    user_id=user.id,
+                    telegram_payment_charge_id=payment.telegram_payment_charge_id,
+                )
+                return
+
+            # simple_sub_ — оплата подписки, а не пополнение баланса. Свой экран
+            # «Подписка активирована» уже отправил process_stars_payment; второй,
+            # «Баланс пополнен», здесь был бы ложью и дублем.
+            if (payment.invoice_payload or '').startswith('simple_sub_'):
+                logger.info(
+                    '✅ Stars платёж за подписку обработан',
+                    user_id=user.id,
+                    total_amount=payment.total_amount,
+                )
+                return
+
+            amount_kopeks = result.amount_kopeks
+            if amount_kopeks <= 0:
+                # Защитный фолбэк: старый/сторонний результат без суммы.
+                rubles_amount = TelegramStarsService.calculate_rubles_from_stars(payment.total_amount)
+                amount_kopeks = int((rubles_amount * Decimal(100)).to_integral_value(rounding=ROUND_HALF_UP))
+
+            # Обновляем пользователя для клавиатуры (после коммитов сервиса его
+            # атрибуты могли истечь). Баланс для экрана берём из результата:
+            # сервис фиксирует его в момент зачисления, до автопродления/автопокупки.
+            try:
+                await db.refresh(user)
+            except Exception:
+                pass
 
             keyboard = await payment_service.build_topup_success_keyboard(user)
 
-            transaction_id_short = payment.telegram_payment_charge_id[:8]
-
             await message.answer(
-                texts.t(
-                    'STARS_PAYMENT_SUCCESS',
-                    '🎉 <b>Платеж успешно обработан!</b>\n\n'
-                    '⭐ Потрачено звезд: {stars_spent}\n'
-                    '💰 Зачислено на баланс: {amount} ₽\n'
-                    '🆔 ID транзакции: {transaction_id}...\n\n'
-                    'Спасибо за пополнение! 🚀',
-                ).format(
-                    stars_spent=payment.total_amount,
-                    amount=amount_text,
-                    transaction_id=transaction_id_short,
+                payment_success_text(
+                    amount_kopeks,
+                    result.new_balance_kopeks,
+                    result.old_balance_kopeks,
                 ),
                 parse_mode='HTML',
                 reply_markup=keyboard,

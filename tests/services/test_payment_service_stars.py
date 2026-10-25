@@ -358,7 +358,8 @@ async def test_process_stars_payment_simple_subscription_success(
         telegram_payment_charge_id='charge12345',
     )
 
-    assert result is True
+    assert result.success is True
+    assert bool(result) is True
     assert user.balance_kopeks == 0, 'Баланс не должен меняться при оплате подписки'
     assert subscription_service_stub.calls == [(db, activated_subscription)]
     assert len(admin_calls) == 1

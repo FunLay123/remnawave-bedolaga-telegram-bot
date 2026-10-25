@@ -27,6 +27,26 @@ from app.utils.user_utils import format_referrer_info
 
 
 @dataclass(slots=True)
+class StarsPaymentResult:
+    """Итог обработки Stars-платежа.
+
+    Балансы фиксируются в момент зачисления. После коммита сервис может сразу
+    списать деньги на автопродление суточной подписки или автопокупку корзины,
+    поэтому текущий баланс пользователя уже не отражает фактический переход
+    «до → после пополнения».
+    """
+
+    success: bool
+    amount_kopeks: int = 0
+    old_balance_kopeks: int | None = None
+    new_balance_kopeks: int | None = None
+    already_processed: bool = False
+
+    def __bool__(self) -> bool:
+        return self.success
+
+
+@dataclass(slots=True)
 class _SimpleSubscriptionPayload:
     """Данные для простой подписки, извлечённые из payload звёздного платежа."""
 
@@ -86,7 +106,7 @@ class TelegramStarsMixin:
         stars_amount: int,
         payload: str,
         telegram_payment_charge_id: str,
-    ) -> bool:
+    ) -> StarsPaymentResult:
         """Финализирует платеж, пришедший из Telegram Stars, и обновляет баланс пользователя.
 
         Credit derivation order:
@@ -116,7 +136,11 @@ class TelegramStarsMixin:
                     'Stars платёж уже обработан — пропускаю повторную обработку',
                     telegram_payment_charge_id=telegram_payment_charge_id,
                 )
-                return True
+                return StarsPaymentResult(
+                    success=True,
+                    amount_kopeks=existing_transaction.amount_kopeks,
+                    already_processed=True,
+                )
 
             rubles_amount = TelegramStarsService.calculate_rubles_from_stars(stars_amount)
             reconstructed_kopeks = int((rubles_amount * Decimal(100)).to_integral_value(rounding=ROUND_HALF_UP))
@@ -169,10 +193,10 @@ class TelegramStarsMixin:
             if not user:
                 logger.error('Пользователь с ID не найден при обработке Stars платежа', user_id=user_id)
                 await db.rollback()
-                return False
+                return StarsPaymentResult(success=False)
 
             if simple_payload:
-                return await self._finalize_simple_subscription_stars_payment(
+                simple_success = await self._finalize_simple_subscription_stars_payment(
                     db=db,
                     user=user,
                     transaction=transaction,
@@ -180,6 +204,10 @@ class TelegramStarsMixin:
                     stars_amount=stars_amount,
                     payload_data=simple_payload,
                     telegram_payment_charge_id=telegram_payment_charge_id,
+                )
+                return StarsPaymentResult(
+                    success=simple_success,
+                    amount_kopeks=amount_kopeks,
                 )
 
             return await self._finalize_stars_balance_topup(
@@ -199,7 +227,7 @@ class TelegramStarsMixin:
                 await db.rollback()
             except Exception:
                 pass
-            return False
+            return StarsPaymentResult(success=False)
 
     @staticmethod
     def _parse_balance_topup_kopeks(payload: str) -> int | None:
@@ -565,7 +593,7 @@ class TelegramStarsMixin:
         amount_kopeks: int,
         stars_amount: int,
         telegram_payment_charge_id: str,
-    ) -> bool:
+    ) -> StarsPaymentResult:
         """Начисляет баланс пользователю после оплаты Stars и запускает автопокупку."""
 
         # Lock user row to prevent concurrent balance race conditions
@@ -636,6 +664,11 @@ class TelegramStarsMixin:
 
         await db.refresh(user)
 
+        # Фиксируем баланс сразу после зачисления: ниже срабатывают пост-топапные
+        # действия (авто-возобновление суточной подписки, автопокупка корзины),
+        # которые могут списать деньги, и текущий баланс уже не покажет переход.
+        new_balance_kopeks = user.balance_kopeks
+
         logger.info(
             '💰 Баланс пользователя изменен: → (Δ +)',
             telegram_id=user.telegram_id,
@@ -678,4 +711,9 @@ class TelegramStarsMixin:
             stars_amount=stars_amount,
             format_price=settings.format_price(amount_kopeks),
         )
-        return True
+        return StarsPaymentResult(
+            success=True,
+            amount_kopeks=amount_kopeks,
+            old_balance_kopeks=old_balance,
+            new_balance_kopeks=new_balance_kopeks,
+        )

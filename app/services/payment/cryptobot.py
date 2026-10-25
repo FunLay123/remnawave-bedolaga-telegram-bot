@@ -25,6 +25,7 @@ from app.services.subscription_renewal_service import (
 )
 from app.utils.currency_converter import currency_converter
 from app.utils.payment_logger import payment_logger as logger
+from app.utils.payment_utils import payment_success_text
 from app.utils.user_utils import format_referrer_info
 
 
@@ -361,13 +362,10 @@ class CryptoBotPaymentMixin:
 
                     try:
                         keyboard = await self.build_topup_success_keyboard(user)
-                        message_text = (
-                            '✅ <b>Пополнение успешно!</b>\n\n'
-                            f'💰 Сумма: {settings.format_price(amount_kopeks)}\n'
-                            f'🪙 Платеж: {updated_payment.amount} {updated_payment.asset}\n'
-                            f'💱 Курс: 1 USD = {conversion_rate:.2f}₽\n'
-                            f'🆔 Транзакция: {invoice_id[:8]}...\n\n'
-                            'Баланс пополнен автоматически!'
+                        message_text = payment_success_text(
+                            amount_kopeks,
+                            old_balance + amount_kopeks,
+                            old_balance,
                         )
                         if settings.is_notifications_enabled():
                             user_notification = _UserNotificationPayload(

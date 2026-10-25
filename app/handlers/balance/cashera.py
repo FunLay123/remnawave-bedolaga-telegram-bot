@@ -15,6 +15,13 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+    payment_submethod_text,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -42,7 +49,6 @@ def _restriction_text(db_user: User) -> str:
 
 
 async def _prompt_amount(message: types.Message, db_user: User, state: FSMContext, method_code: str) -> None:
-    texts = get_texts(db_user.language)
     method_name = settings.get_cashera_method_display_title(method_code)
 
     await state.update_data(payment_method='cashera', cashera_method=method_code)
@@ -60,23 +66,14 @@ async def _prompt_amount(message: types.Message, db_user: User, state: FSMContex
             await process_cashera_payment_amount(message, db_user, db, pending_amount, state)
         return
 
-    min_amount_label = settings.format_price(settings.CASHERA_MIN_AMOUNT_KOPEKS)
-    max_amount_label = settings.format_price(settings.CASHERA_MAX_AMOUNT_KOPEKS)
-    keyboard = await get_topup_amount_keyboard('cashera', db_user.language, back_callback='back_to_menu')
-
-    await message.edit_text(
-        texts.t(
-            'CASHERA_ENTER_AMOUNT',
-            '💳 <b>Оплата через {name} ({method})</b>\n\nВведите сумму для пополнения от {min_amount} до {max_amount}.',
-        ).format(
-            name=settings.get_cashera_display_name_html(),
-            method=method_name,
-            min_amount=min_amount_label,
-            max_amount=max_amount_label,
-        ),
-        reply_markup=keyboard,
-        parse_mode='HTML',
+    message_text = payment_amount_text(
+        f'{settings.get_cashera_display_name()} · {method_name}',
+        settings.CASHERA_MIN_AMOUNT_KOPEKS,
+        settings.CASHERA_MAX_AMOUNT_KOPEKS,
     )
+    keyboard = await get_topup_amount_keyboard('cashera', db_user.language, back_callback='balance_topup')
+
+    await message.edit_text(message_text, reply_markup=keyboard, parse_mode='HTML')
 
     await state.set_state(BalanceStates.waiting_for_amount)
     await state.update_data(cashera_prompt_message_id=message.message_id, cashera_prompt_chat_id=message.chat.id)
@@ -127,9 +124,7 @@ async def start_cashera_payment(callback: types.CallbackQuery, db_user: User, st
     buttons.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')])
 
     await callback.message.edit_text(
-        texts.t('CASHERA_SELECT_PAYMENT_METHOD', 'Выберите способ оплаты {name}:').format(
-            name=settings.get_cashera_display_name_html()
-        ),
+        payment_submethod_text(settings.get_cashera_display_name()),
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=buttons),
         parse_mode='HTML',
     )
@@ -193,22 +188,11 @@ async def process_cashera_payment_amount(
         await state.set_state(BalanceStates.waiting_for_cashera_method)
         return
 
-    if amount_kopeks < settings.CASHERA_MIN_AMOUNT_KOPEKS:
+    if amount_kopeks < settings.CASHERA_MIN_AMOUNT_KOPEKS or amount_kopeks > settings.CASHERA_MAX_AMOUNT_KOPEKS:
         await message.answer(
-            texts.t('PAYMENT_AMOUNT_TOO_LOW', 'Минимальная сумма пополнения: {min_amount}₽').format(
-                min_amount=settings.CASHERA_MIN_AMOUNT_KOPEKS // 100
-            ),
+            payment_amount_range_error(settings.CASHERA_MIN_AMOUNT_KOPEKS, settings.CASHERA_MAX_AMOUNT_KOPEKS),
             reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
-        )
-        await state.set_state(BalanceStates.waiting_for_amount)
-        return
-
-    if amount_kopeks > settings.CASHERA_MAX_AMOUNT_KOPEKS:
-        await message.answer(
-            texts.t('PAYMENT_AMOUNT_TOO_HIGH', 'Максимальная сумма пополнения: {max_amount}₽').format(
-                max_amount=settings.CASHERA_MAX_AMOUNT_KOPEKS // 100
-            ),
-            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
         )
         await state.set_state(BalanceStates.waiting_for_amount)
         return
@@ -239,22 +223,11 @@ async def process_cashera_payment_amount(
 
     method_title = settings.get_cashera_method_display_title(method_code)
     local_payment_id = result.get('local_payment_id')
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=texts.t('CASHERA_PAY_BUTTON', '💳 Оплатить через {method}').format(method=method_title),
-                    url=result['payment_url'],
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text=texts.t('CHECK_STATUS_BUTTON', '📊 Проверить статус'),
-                    callback_data=f'check_cashera_{local_payment_id}',
-                )
-            ],
-            [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-        ]
+    keyboard = payment_invoice_keyboard(
+        language=db_user.language,
+        pay_url=result['payment_url'],
+        amount_kopeks=amount_kopeks,
+        status_callback=f'check_cashera_{local_payment_id}',
     )
 
     prompt_message_id = data.get('cashera_prompt_message_id')
@@ -269,17 +242,7 @@ async def process_cashera_payment_amount(
         except Exception as delete_error:  # pragma: no cover - диагностический лог
             logger.warning('Не удалось удалить сообщение с запросом суммы Cashera', delete_error=delete_error)
 
-    caption = texts.t(
-        'CASHERA_PAYMENT_CREATED',
-        '💳 <b>Оплата через {name} ({method})</b>\n\n'
-        'Сумма: <b>{amount}</b>\n\n'
-        'Нажмите кнопку ниже для оплаты.\n'
-        'После успешной оплаты баланс будет пополнен автоматически.',
-    ).format(
-        name=settings.get_cashera_display_name_html(),
-        method=method_title,
-        amount=settings.format_price(amount_kopeks),
-    )
+    caption = payment_invoice_text(f'{settings.get_cashera_display_name()} · {method_title}', amount_kopeks)
 
     # Свой экран оплаты: QR прямо в чате. Без реквизитов — обычная ссылка ниже.
     h2h = await PaymentService(message.bot).get_cashera_h2h(result.get('payment_id'), method_code)
@@ -297,17 +260,7 @@ async def process_cashera_payment_amount(
         return
 
     await message.answer(
-        texts.t(
-            'CASHERA_PAYMENT_CREATED',
-            '💳 <b>Оплата через {name} ({method})</b>\n\n'
-            'Сумма: <b>{amount}</b>\n\n'
-            'Нажмите кнопку ниже для оплаты.\n'
-            'После успешной оплаты баланс будет пополнен автоматически.',
-        ).format(
-            name=settings.get_cashera_display_name_html(),
-            method=method_title,
-            amount=settings.format_price(amount_kopeks),
-        ),
+        caption,
         reply_markup=keyboard,
         parse_mode='HTML',
     )

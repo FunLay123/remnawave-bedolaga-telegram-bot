@@ -33,6 +33,7 @@ from app.database.crud.transaction import (
 )
 from app.database.crud.user import get_user_by_id, lock_user_for_update
 from app.database.models import PaymentMethod, Transaction, TransactionType, User
+from app.utils.payment_utils import payment_success_text
 
 
 logger = structlog.get_logger(__name__)
@@ -321,11 +322,10 @@ async def _notify_user(
         try:
             await bot.send_message(
                 user.telegram_id,
-                (
-                    '✅ <b>Баланс пополнен</b>\n\n'
-                    f'💰 Сумма: {settings.format_price(amount_kopeks)}\n'
-                    f'💳 Текущий баланс: {settings.format_price(user.balance_kopeks)}\n'
-                    f'🆔 Транзакция: {transaction.id}'
+                payment_success_text(
+                    amount_kopeks,
+                    user.balance_kopeks,
+                    user.balance_kopeks - amount_kopeks,
                 ),
                 parse_mode='HTML',
                 reply_markup=keyboard,

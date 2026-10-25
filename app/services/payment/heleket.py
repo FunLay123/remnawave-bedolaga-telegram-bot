@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
 from app.utils.payment_logger import payment_logger as logger
+from app.utils.payment_utils import payment_success_text
 from app.utils.user_utils import format_referrer_info
 
 
@@ -429,28 +430,13 @@ class HeleketPaymentMixin:
                 try:
                     keyboard = await self.build_topup_success_keyboard(user)
 
-                    exchange_rate_value = updated_payment.exchange_rate or 0
-                    rate_text = (
-                        f'💱 Курс: 1 RUB = {1 / exchange_rate_value:.4f} {updated_payment.payer_currency}'
-                        if exchange_rate_value and updated_payment.payer_currency
-                        else None
-                    )
-
-                    message_lines = [
-                        '✅ <b>Пополнение успешно!</b>',
-                        f'💰 Сумма: {settings.format_price(amount_kopeks)}',
-                        '💳 Способ: Heleket',
-                    ]
-                    if updated_payment.payer_amount and updated_payment.payer_currency:
-                        message_lines.append(
-                            f'🪙 Оплата: {updated_payment.payer_amount} {updated_payment.payer_currency}'
-                        )
-                    if rate_text:
-                        message_lines.append(rate_text)
-
                     await self.bot.send_message(
-                        chat_id=user.telegram_id,
-                        text='\n'.join(message_lines),
+                        user.telegram_id,
+                        payment_success_text(
+                            amount_kopeks,
+                            old_balance + amount_kopeks,
+                            old_balance,
+                        ),
                         parse_mode='HTML',
                         reply_markup=keyboard,
                     )

@@ -62,14 +62,14 @@ def _get_method_defaults() -> dict:
         'cryptobot': {
             'default_display_name': settings.get_cryptobot_display_name(),
             'is_configured': settings.is_cryptobot_enabled(),
-            'default_min': 1000,
+            'default_min': 10000,
             'default_max': 10000000,
             'available_sub_options': None,
         },
         'heleket': {
             'default_display_name': settings.get_heleket_display_name(),
             'is_configured': settings.is_heleket_enabled(),
-            'default_min': 1000,
+            'default_min': 10000,
             'default_max': 10000000,
             'available_sub_options': None,
         },
@@ -379,7 +379,7 @@ DEFAULT_METHOD_ORDER = [
 ]
 
 
-DEFAULT_QUICK_AMOUNTS = [10000, 30000, 50000, 100000]
+DEFAULT_QUICK_AMOUNTS = [5000, 10000, 15000, 30000, 50000]
 MAX_QUICK_AMOUNTS = 10
 MAX_QUICK_AMOUNT_KOPEKS = 100_000_000
 
@@ -414,6 +414,18 @@ def get_effective_quick_amounts(
     # None → дефолты; [] → админ отключил кнопки быстрых сумм (пустой результат)
     source = DEFAULT_QUICK_AMOUNTS if quick_amounts is None else quick_amounts
     return [amount for amount in source if min_amount_kopeks <= amount <= max_amount_kopeks]
+
+
+async def get_method_amount_limits(db: AsyncSession, method_id: str) -> tuple[int, int]:
+    """Эффективные min/max метода: настройка кабинета, иначе дефолт из env."""
+    config = await get_config_by_method_id(db, method_id)
+    method_def = _get_method_defaults().get(method_id, {})
+    default_min = int(method_def.get('default_min', 1000))
+    default_max = int(method_def.get('default_max', 10_000_000))
+
+    min_amount = config.min_amount_kopeks if config and config.min_amount_kopeks is not None else default_min
+    max_amount = config.max_amount_kopeks if config and config.max_amount_kopeks is not None else default_max
+    return int(min_amount), int(max_amount)
 
 
 # ============ Initialization ============

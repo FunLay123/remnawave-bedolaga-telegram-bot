@@ -1,5 +1,209 @@
+import html
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
 from app.config import settings
 from app.localization.texts import get_texts
+
+
+# Единый визуальный язык экранов пополнения. Шапка — тот же кастомный эмодзи,
+# что и на экранах подписки/продления; буллиты — ⚪️ и ▫️.
+PAYMENT_SCREEN_HEADER = '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji>'
+PAYMENT_BULLET = '⚪️'
+PAYMENT_SUB_BULLET = '▫️'
+PAYMENT_PAY_ICON_ID = '5334552404736104314'
+PAYMENT_SUPPORT_ICON_ID = '5988023995125993550'
+
+DEFAULT_TOPUP_MIN_KOPEKS = 1_00
+DEFAULT_TOPUP_MAX_KOPEKS = 50_000_00
+
+
+def format_whole_rubles(amount_kopeks: int | None) -> str:
+    """Сумма строго в целых рублях: 18 699 копеек → «186 ₽»."""
+    return f'{int(amount_kopeks or 0) // 100} ₽'
+
+
+def format_min_rubles(amount_kopeks: int | None) -> str:
+    """Минимум округляется вверх: показанная граница должна проходить валидацию."""
+    return f'{(int(amount_kopeks or 0) + 99) // 100} ₽'
+
+
+def format_max_rubles(amount_kopeks: int | None) -> str:
+    """Максимум округляется вниз по той же причине."""
+    return f'{int(amount_kopeks or 0) // 100} ₽'
+
+
+def _format_exact_rubles(amount_kopeks: int) -> str:
+    """Точная сумма без округления — для диапазонов уже одного рубля."""
+    rubles, kopeks = divmod(max(int(amount_kopeks), 0), 100)
+    if kopeks == 0:
+        return f'{rubles} ₽'
+    return f'{rubles}.{kopeks:02d}'.rstrip('0').rstrip('.') + ' ₽'
+
+
+def payment_methods_text(balance_kopeks: int) -> str:
+    return (
+        f'{PAYMENT_SCREEN_HEADER} <b>Пополнение баланса</b>\n\n'
+        f'{PAYMENT_BULLET} Баланс: <b>{format_whole_rubles(balance_kopeks)}</b>\n'
+        f'{PAYMENT_SUB_BULLET} Выберите способ оплаты:'
+    )
+
+
+def payment_methods_unavailable_text(reason: str) -> str:
+    return f'{PAYMENT_SCREEN_HEADER} <b>Пополнение баланса</b>\n\n<blockquote>{html.escape(reason)}</blockquote>'
+
+
+def payment_amount_text(provider_name: str, min_amount_kopeks: int, max_amount_kopeks: int) -> str:
+    return (
+        f'{PAYMENT_SCREEN_HEADER} <b>Сумма пополнения</b>\n\n'
+        f'{PAYMENT_BULLET} Способ: {html.escape(provider_name)}\n'
+        f'{PAYMENT_SUB_BULLET} Выберите сумму или отправьте число в чат '
+        f'(от {format_min_rubles(min_amount_kopeks)} до {format_max_rubles(max_amount_kopeks)}):'
+    )
+
+
+def payment_invoice_text(
+    provider_name: str,
+    amount_kopeks: int | None,
+    stars_amount: int | None = None,
+    amount_note: str | None = None,
+) -> str:
+    if amount_kopeks is None:
+        amount_line = 'Сумму укажете на странице оплаты'
+    else:
+        amount = format_whole_rubles(amount_kopeks)
+        if stars_amount is not None:
+            amount = f'{amount} ({stars_amount} ★)'
+        elif amount_note:
+            amount = f'{amount} ({html.escape(amount_note)})'
+        amount_line = f'К оплате: <b>{amount}</b>'
+    return (
+        f'{PAYMENT_SCREEN_HEADER} <b>Счёт на оплату</b>\n\n'
+        f'{PAYMENT_BULLET} Способ: {html.escape(provider_name)}\n'
+        f'{PAYMENT_SUB_BULLET} {amount_line}'
+    )
+
+
+def payment_success_text(
+    amount_kopeks: int,
+    new_balance_kopeks: int | None,
+    old_balance_kopeks: int | None = None,
+) -> str:
+    lines = [
+        f'{PAYMENT_SCREEN_HEADER} <b>Баланс пополнен</b>',
+        '',
+        f'{PAYMENT_BULLET} Зачислено: <b>+{format_whole_rubles(amount_kopeks)}</b>',
+    ]
+
+    # Если баланс не удалось получить, не показываем выдуманное «0 → сумма».
+    if new_balance_kopeks is not None:
+        if old_balance_kopeks is None:
+            balance_line = f'Баланс: {format_whole_rubles(new_balance_kopeks)}'
+        else:
+            balance_line = (
+                f'Баланс: {format_whole_rubles(old_balance_kopeks)} → {format_whole_rubles(new_balance_kopeks)}'
+            )
+        lines.append(f'{PAYMENT_SUB_BULLET} {balance_line}')
+
+    return '\n'.join(lines)
+
+
+def payment_support_text(user_id: str) -> str:
+    return (
+        f'{PAYMENT_SCREEN_HEADER} <b>Через поддержку</b>\n\n'
+        f'{PAYMENT_BULLET} Ваш ID: <code>{html.escape(str(user_id))}</code>\n'
+        f'{PAYMENT_SUB_BULLET} Напишите в поддержку сумму пополнения — выдадим реквизиты и зачислим баланс.'
+    )
+
+
+def payment_amount_error_text(reason: str) -> str:
+    return f'{PAYMENT_SCREEN_HEADER} <b>Сумма пополнения</b>\n\n<blockquote>{html.escape(reason)}</blockquote>'
+
+
+def payment_amount_range_error(min_amount_kopeks: int, max_amount_kopeks: int) -> str:
+    """Компактная ошибка с границами, которые действительно пройдут валидацию.
+
+    Показываем пересечение лимитов провайдера с глобальным диапазоном ручного
+    ввода: иначе сообщение может обещать суммы, которые бот отвергнет раньше.
+    """
+    lower = max(int(min_amount_kopeks), DEFAULT_TOPUP_MIN_KOPEKS)
+    upper = min(int(max_amount_kopeks), DEFAULT_TOPUP_MAX_KOPEKS)
+
+    if lower > upper:
+        return payment_amount_error_text(
+            'Пополнение этим способом сейчас недоступно: лимиты провайдера не пересекаются '
+            'с допустимым диапазоном'
+        )
+
+    whole_min = (lower + 99) // 100
+    whole_max = upper // 100
+    if whole_min <= whole_max:
+        return payment_amount_error_text(f'Допустимая сумма: от {whole_min} ₽ до {whole_max} ₽')
+
+    return payment_amount_error_text(
+        f'Допустимая сумма: от {_format_exact_rubles(lower)} до {_format_exact_rubles(upper)}'
+    )
+
+
+def payment_submethod_text(provider_name: str) -> str:
+    return (
+        f'{PAYMENT_SCREEN_HEADER} <b>Способ оплаты</b>\n\n'
+        f'{PAYMENT_BULLET} {html.escape(provider_name)}\n'
+        f'{PAYMENT_SUB_BULLET} Выберите вариант:'
+    )
+
+
+def payment_invoice_keyboard(
+    *,
+    language: str = 'ru',
+    pay_url: str | None = None,
+    amount_kopeks: int = 0,
+    pay_text: str | None = None,
+    status_callback: str | None = None,
+    back_callback: str = 'balance_topup',
+    extra_rows: list[list[InlineKeyboardButton]] | None = None,
+) -> InlineKeyboardMarkup:
+    texts = get_texts(language)
+    rows: list[list[InlineKeyboardButton]] = []
+
+    if pay_url:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=pay_text or f'Оплатить {format_whole_rubles(amount_kopeks)}',
+                    url=pay_url,
+                    style='primary',
+                    icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                )
+            ]
+        )
+
+    if extra_rows:
+        rows.extend(extra_rows)
+
+    if status_callback:
+        rows.append([InlineKeyboardButton(text='Проверить статус', callback_data=status_callback)])
+
+    rows.append([InlineKeyboardButton(text=texts.CANCEL, callback_data=back_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def payment_support_keyboard(language: str, support_url: str | None) -> InlineKeyboardMarkup:
+    texts = get_texts(language)
+    rows: list[list[InlineKeyboardButton]] = []
+    if support_url:
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text='Написать в поддержку',
+                    url=support_url,
+                    style='primary',
+                    icon_custom_emoji_id=PAYMENT_SUPPORT_ICON_ID,
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def verify_payment_amount(
@@ -557,79 +761,27 @@ def get_available_payment_methods() -> list[dict[str, str]]:
     return methods
 
 
-def get_payment_methods_text(language: str) -> str:
+def get_payment_methods_text(
+    language: str,
+    balance_kopeks: int = 0,
+    *,
+    has_direct_methods: bool = True,
+) -> str:
+    """Текст экрана «Пополнение баланса».
+
+    ``has_direct_methods`` считает вызывающий хэндлер по фактической клавиатуре:
+    список способов в тексте больше не дублируется, а от наличия автоматических
+    методов зависит только короткая подсказка.
     """
-    Генерирует текст с описанием доступных способов оплаты
-    """
-    texts = get_texts(language)
-    methods = get_available_payment_methods()
+    if has_direct_methods:
+        return payment_methods_text(balance_kopeks)
 
-    if not methods:
-        return texts.t(
-            'PAYMENT_METHODS_NONE_AVAILABLE',
-            """💳 <b>Способы пополнения баланса</b>
+    if settings.is_support_topup_enabled():
+        reason = 'Автоматические способы оплаты недоступны. Напишите в поддержку.'
+    else:
+        reason = 'Способы оплаты временно недоступны.'
 
-⚠️ В данный момент способы оплаты временно недоступны.
-Попробуйте позже.
-
-Выберите способ пополнения:""",
-        )
-
-    if len(methods) == 1 and methods[0]['id'] == 'support':
-        return texts.t(
-            'PAYMENT_METHODS_ONLY_SUPPORT',
-            """💳 <b>Способы пополнения баланса</b>
-
-⚠️ В данный момент автоматические способы оплаты временно недоступны.
-Обратитесь в техподдержку для пополнения баланса.
-
-Выберите способ пополнения:""",
-        )
-
-    text = (
-        texts.t(
-            'PAYMENT_METHODS_TITLE',
-            '💳 <b>Способы пополнения баланса</b>',
-        )
-        + '\n\n'
-    )
-    text += (
-        texts.t(
-            'PAYMENT_METHODS_PROMPT',
-            'Выберите удобный для вас способ оплаты:',
-        )
-        + '\n\n'
-    )
-
-    for method in methods:
-        method_id = method['id'].upper()
-        name = texts.t(
-            f'PAYMENT_METHOD_{method_id}_NAME',
-            f'{method["icon"]} <b>{method["name"]}</b>',
-        )
-        description = texts.t(
-            f'PAYMENT_METHOD_{method_id}_DESCRIPTION',
-            method['description'],
-        )
-        if method_id == 'MULENPAY':
-            mulenpay_name = settings.get_mulenpay_display_name()
-            mulenpay_name_html = settings.get_mulenpay_display_name_html()
-            name = name.format(mulenpay_name=mulenpay_name_html)
-            description = description.format(mulenpay_name=mulenpay_name)
-        elif method_id == 'PLATEGA':
-            platega_name = settings.get_platega_display_name()
-            platega_name_html = settings.get_platega_display_name_html()
-            name = name.format(platega_name=platega_name_html)
-            description = description.format(platega_name=platega_name)
-
-        text += f'{name} - {description}\n'
-
-    text += '\n' + texts.t(
-        'PAYMENT_METHODS_FOOTER',
-        'Выберите способ пополнения:',
-    )
-
-    return text
+    return payment_methods_unavailable_text(reason)
 
 
 def is_payment_method_available(method_id: str) -> bool:

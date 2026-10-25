@@ -15,6 +15,12 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -49,36 +55,11 @@ async def start_heleket_payment(
         await callback.answer('❌ Оплата через Heleket недоступна', show_alert=True)
         return
 
-    markup = settings.get_heleket_markup_percent()
-    markup_text: str | None
-    if markup > 0:
-        label = texts.t('PAYMENT_HELEKET_MARKUP_LABEL', 'Наценка провайдера')
-        markup_text = f'{label}: {markup:.0f}%'
-    elif markup < 0:
-        label = texts.t('PAYMENT_HELEKET_DISCOUNT_LABEL', 'Скидка провайдера')
-        markup_text = f'{label}: {abs(markup):.0f}%'
-    else:
-        markup_text = None
+    message_text = payment_amount_text(settings.get_heleket_display_name(), 100_00, 100_000_00)
 
-    message_lines = [
-        '🪙 <b>Пополнение через Heleket</b>',
-        '\n',
-        'Введите сумму пополнения от 100 до 100,000 ₽:',
-        '',
-        '⚡ Мгновенное зачисление',
-        '🔒 Безопасная оплата',
-    ]
+    keyboard = await get_topup_amount_keyboard('heleket', db_user.language, back_callback='balance_topup')
 
-    if markup_text:
-        message_lines.extend(['', markup_text])
-
-    keyboard = await get_topup_amount_keyboard('heleket', db_user.language, back_callback='back_to_menu')
-
-    await callback.message.edit_text(
-        '\n'.join(filter(None, message_lines)),
-        reply_markup=keyboard,
-        parse_mode='HTML',
-    )
+    await callback.message.edit_text(message_text, reply_markup=keyboard, parse_mode='HTML')
 
     await state.set_state(BalanceStates.waiting_for_amount)
     await state.update_data(
@@ -123,17 +104,11 @@ async def process_heleket_payment_amount(
 
     amount_rubles = amount_kopeks / 100
 
-    if amount_rubles < 100:
+    if amount_rubles < 100 or amount_rubles > 100000:
         await message.answer(
-            'Минимальная сумма пополнения: 100 ₽\n\nОтправьте новую сумму пополнения числом в сообщении.',
-            reply_markup=get_back_keyboard(db_user.language),
-        )
-        return
-
-    if amount_rubles > 100000:
-        await message.answer(
-            'Максимальная сумма пополнения: 100,000 ₽\n\nОтправьте новую сумму пополнения числом в сообщении.',
-            reply_markup=get_back_keyboard(db_user.language),
+            payment_amount_range_error(100_00, 100_000_00),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
         )
         return
 
@@ -158,68 +133,11 @@ async def process_heleket_payment_amount(
         await state.clear()
         return
 
-    payer_amount = result.get('payer_amount')
-    payer_currency = result.get('payer_currency')
-    result.get('exchange_rate')
-    discount_percent = result.get('discount_percent')
-
-    details = [
-        '🪙 <b>Оплата через Heleket</b>',
-        '',
-        f'💰 Сумма к зачислению: {amount_rubles:.0f} ₽',
-    ]
-
-    if payer_amount and payer_currency:
-        details.append(f'🪙 К оплате: {payer_amount} {payer_currency}')
-
-    markup_percent: float | None = None
-    if discount_percent is not None:
-        try:
-            discount_int = int(discount_percent)
-            markup_percent = -discount_int
-        except (TypeError, ValueError):
-            markup_percent = None
-
-    if markup_percent:
-        label_markup = texts.t('PAYMENT_HELEKET_MARKUP_LABEL', 'Наценка провайдера')
-        label_discount = texts.t('PAYMENT_HELEKET_DISCOUNT_LABEL', 'Скидка провайдера')
-        absolute = abs(markup_percent)
-        if markup_percent > 0:
-            details.append(f'📈 {label_markup}: +{absolute}%')
-        else:
-            details.append(f'📉 {label_discount}: {absolute}%')
-
-    if payer_amount and payer_currency:
-        try:
-            payer_amount_float = float(payer_amount)
-            if payer_amount_float > 0:
-                rub_per_currency = amount_rubles / payer_amount_float
-                details.append(f'💱 Курс: 1 {payer_currency} ≈ {rub_per_currency:.2f} ₽')
-        except (TypeError, ValueError, ZeroDivisionError):
-            pass
-
-    details.extend(
-        [
-            '',
-            '📱 Инструкция:',
-            "1. Нажмите кнопку 'Оплатить'",
-            '2. Перейдите на страницу Heleket',
-            '3. Оплатите указанную сумму',
-            '4. Баланс пополнится автоматически',
-        ]
-    )
-
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [types.InlineKeyboardButton(text=texts.t('PAY_WITH_COINS_BUTTON', '🪙 Оплатить'), url=payment_url)],
-            [
-                types.InlineKeyboardButton(
-                    text=texts.t('CHECK_STATUS_BUTTON', '📊 Проверить статус'),
-                    callback_data=f'check_heleket_{result["local_payment_id"]}',
-                )
-            ],
-            [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-        ]
+    keyboard = payment_invoice_keyboard(
+        language=db_user.language,
+        pay_url=payment_url,
+        amount_kopeks=amount_kopeks,
+        status_callback=f'check_heleket_{result["local_payment_id"]}',
     )
 
     state_data = await state.get_data()
@@ -237,7 +155,15 @@ async def process_heleket_payment_amount(
         except Exception as delete_error:  # pragma: no cover - diagnostic
             logger.warning('Не удалось удалить сообщение с запросом суммы Heleket', delete_error=delete_error)
 
-    invoice_message = await message.answer('\n'.join(details), parse_mode='HTML', reply_markup=keyboard)
+    payer_amount = result.get('payer_amount')
+    payer_currency = result.get('payer_currency')
+    amount_note = f'≈ {payer_amount} {payer_currency}' if payer_amount and payer_currency else None
+
+    invoice_message = await message.answer(
+        payment_invoice_text(settings.get_heleket_display_name(), amount_kopeks, amount_note=amount_note),
+        parse_mode='HTML',
+        reply_markup=keyboard,
+    )
 
     try:
         from app.services import payment_service as payment_module

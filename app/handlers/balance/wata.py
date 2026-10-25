@@ -15,6 +15,13 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService, get_user_by_id as fetch_user_by_id
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    format_whole_rubles,
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+)
 from app.utils.timezone import format_local_datetime
 
 
@@ -50,19 +57,13 @@ async def start_wata_payment(
         await callback.answer('❌ Оплата через WATA временно недоступна', show_alert=True)
         return
 
-    message_text = texts.t(
-        'WATA_TOPUP_PROMPT',
-        (
-            '💳 <b>Оплата через WATA</b>\n\n'
-            'Введите сумму пополнения. Минимальная сумма — {min_amount}, максимальная — {max_amount}.\n'
-            'Оплата происходит через защищенную форму WATA.'
-        ),
-    ).format(
-        min_amount=settings.format_price(settings.WATA_MIN_AMOUNT_KOPEKS),
-        max_amount=settings.format_price(settings.WATA_MAX_AMOUNT_KOPEKS),
+    message_text = payment_amount_text(
+        settings.get_wata_display_name(),
+        settings.WATA_MIN_AMOUNT_KOPEKS,
+        settings.WATA_MAX_AMOUNT_KOPEKS,
     )
 
-    keyboard = await get_topup_amount_keyboard('wata', db_user.language, back_callback='back_to_menu')
+    keyboard = await get_topup_amount_keyboard('wata', db_user.language, back_callback='balance_topup')
 
     await callback.message.edit_text(
         message_text,
@@ -111,23 +112,11 @@ async def process_wata_payment_amount(
         await message.answer('❌ Оплата через WATA временно недоступна')
         return
 
-    if amount_kopeks < settings.WATA_MIN_AMOUNT_KOPEKS:
+    if amount_kopeks < settings.WATA_MIN_AMOUNT_KOPEKS or amount_kopeks > settings.WATA_MAX_AMOUNT_KOPEKS:
         await message.answer(
-            texts.t(
-                'WATA_AMOUNT_TOO_LOW',
-                'Минимальная сумма пополнения: {amount}',
-            ).format(amount=settings.format_price(settings.WATA_MIN_AMOUNT_KOPEKS)),
-            reply_markup=get_back_keyboard(db_user.language),
-        )
-        return
-
-    if amount_kopeks > settings.WATA_MAX_AMOUNT_KOPEKS:
-        await message.answer(
-            texts.t(
-                'WATA_AMOUNT_TOO_HIGH',
-                'Максимальная сумма пополнения: {amount}',
-            ).format(amount=settings.format_price(settings.WATA_MAX_AMOUNT_KOPEKS)),
-            reply_markup=get_back_keyboard(db_user.language),
+            payment_amount_range_error(settings.WATA_MIN_AMOUNT_KOPEKS, settings.WATA_MAX_AMOUNT_KOPEKS),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
         )
         return
 
@@ -159,44 +148,14 @@ async def process_wata_payment_amount(
     payment_link_id = result['payment_link_id']
     local_payment_id = result['local_payment_id']
 
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=texts.t('WATA_PAY_BUTTON', '💳 Оплатить через WATA'),
-                    url=payment_url,
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text=texts.t('CHECK_STATUS_BUTTON', '📊 Проверить статус'),
-                    callback_data=f'check_wata_{local_payment_id}',
-                )
-            ],
-            [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-        ]
+    keyboard = payment_invoice_keyboard(
+        language=db_user.language,
+        pay_url=payment_url,
+        amount_kopeks=amount_kopeks,
+        status_callback=f'check_wata_{local_payment_id}',
     )
 
-    message_template = texts.t(
-        'WATA_PAYMENT_INSTRUCTIONS',
-        (
-            '💳 <b>Оплата через WATA</b>\n\n'
-            '💰 Сумма: {amount}\n'
-            '🆔 ID платежа: {payment_id}\n\n'
-            '📱 <b>Инструкция:</b>\n'
-            "1. Нажмите кнопку 'Оплатить через WATA'\n"
-            '2. Следуйте подсказкам платежной системы\n'
-            '3. Подтвердите перевод\n'
-            '4. Средства зачислятся автоматически\n\n'
-            '❓ Если возникнут проблемы, обратитесь в {support}'
-        ),
-    )
-
-    message_text = message_template.format(
-        amount=settings.format_price(amount_kopeks),
-        payment_id=payment_link_id,
-        support=settings.get_support_contact_display_html(),
-    )
+    message_text = payment_invoice_text(settings.get_wata_display_name(), amount_kopeks)
 
     state_data = await state.get_data()
     prompt_message_id = state_data.get('wata_prompt_message_id')
@@ -298,7 +257,7 @@ async def check_wata_payment_status(
         texts.t('WATA_STATUS_TITLE', '💳 <b>Статус платежа WATA</b>'),
         '',
         f'🆔 ID: {payment.payment_link_id}',
-        f'💰 Сумма: {settings.format_price(payment.amount_kopeks)}',
+        f'💰 Сумма: {format_whole_rubles(payment.amount_kopeks)}',
         f'📊 Статус: {label_info["emoji"]} {label_info["label"]}',
         f'📅 Создан: {format_local_datetime(payment.created_at, "%d.%m.%Y %H:%M") if payment.created_at else "—"}',
     ]

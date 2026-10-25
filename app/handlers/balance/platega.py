@@ -15,6 +15,13 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+    payment_submethod_text,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -30,7 +37,6 @@ async def _prompt_amount(
     state: FSMContext,
     method_code: int,
 ) -> None:
-    texts = get_texts(db_user.language)
     method_name = settings.get_platega_method_display_title(method_code)
 
     # Всегда фиксируем выбранный метод для последующей обработки
@@ -57,32 +63,15 @@ async def _prompt_amount(
             )
         return
 
-    min_amount_label = settings.format_price(settings.PLATEGA_MIN_AMOUNT_KOPEKS)
-    max_amount_kopeks = settings.PLATEGA_MAX_AMOUNT_KOPEKS
-    max_amount_label = settings.format_price(max_amount_kopeks) if max_amount_kopeks and max_amount_kopeks > 0 else ''
-
-    default_prompt_body = (
-        'Введите сумму для пополнения от {min_amount} до {max_amount}.\n'
-        if max_amount_kopeks and max_amount_kopeks > 0
-        else 'Введите сумму для пополнения от {min_amount}.\n'
+    message_text = payment_amount_text(
+        f'{settings.get_platega_display_name()} · {method_name}',
+        settings.PLATEGA_MIN_AMOUNT_KOPEKS,
+        settings.PLATEGA_MAX_AMOUNT_KOPEKS,
     )
 
-    prompt_template = texts.t(
-        'PLATEGA_TOPUP_PROMPT',
-        (f'💳 <b>Оплата через Platega ({{method_name}})</b>\n\n{default_prompt_body}Оплата происходит через Platega.'),
-    )
+    keyboard = await get_topup_amount_keyboard('platega', db_user.language, back_callback='balance_topup')
 
-    keyboard = await get_topup_amount_keyboard('platega', db_user.language, back_callback='back_to_menu')
-
-    await message.edit_text(
-        prompt_template.format(
-            method_name=method_name,
-            min_amount=min_amount_label,
-            max_amount=max_amount_label,
-        ),
-        reply_markup=keyboard,
-        parse_mode='HTML',
-    )
+    await message.edit_text(message_text, reply_markup=keyboard, parse_mode='HTML')
 
     await state.set_state(BalanceStates.waiting_for_amount)
     await state.update_data(
@@ -161,11 +150,9 @@ async def start_platega_payment(
     method_buttons.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')])
 
     await callback.message.edit_text(
-        texts.t(
-            'PLATEGA_SELECT_PAYMENT_METHOD',
-            'Выберите способ оплаты Platega:',
-        ),
+        payment_submethod_text(settings.get_platega_display_name()),
         reply_markup=types.InlineKeyboardMarkup(inline_keyboard=method_buttons),
+        parse_mode='HTML',
     )
     if not has_pending_amount:
         await state.set_state(BalanceStates.waiting_for_platega_method)
@@ -290,24 +277,11 @@ async def process_platega_payment_amount(
         await state.set_state(BalanceStates.waiting_for_platega_method)
         return
 
-    if amount_kopeks < settings.PLATEGA_MIN_AMOUNT_KOPEKS:
+    if amount_kopeks < settings.PLATEGA_MIN_AMOUNT_KOPEKS or amount_kopeks > settings.PLATEGA_MAX_AMOUNT_KOPEKS:
         await message.answer(
-            texts.t(
-                'PLATEGA_AMOUNT_TOO_LOW',
-                'Минимальная сумма для оплаты через Platega: {amount}',
-            ).format(amount=settings.format_price(settings.PLATEGA_MIN_AMOUNT_KOPEKS)),
+            payment_amount_range_error(settings.PLATEGA_MIN_AMOUNT_KOPEKS, settings.PLATEGA_MAX_AMOUNT_KOPEKS),
             reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
-        )
-        await state.set_state(BalanceStates.waiting_for_amount)
-        return
-
-    if amount_kopeks > settings.PLATEGA_MAX_AMOUNT_KOPEKS:
-        await message.answer(
-            texts.t(
-                'PLATEGA_AMOUNT_TOO_HIGH',
-                'Максимальная сумма для оплаты через Platega: {amount}',
-            ).format(amount=settings.format_price(settings.PLATEGA_MAX_AMOUNT_KOPEKS)),
-            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
         )
         await state.set_state(BalanceStates.waiting_for_amount)
         return
@@ -338,43 +312,13 @@ async def process_platega_payment_amount(
 
     redirect_url = payment_result.get('redirect_url')
     local_payment_id = payment_result.get('local_payment_id')
-    transaction_id = payment_result.get('transaction_id')
     method_title = settings.get_platega_method_display_title(method_code)
 
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text=texts.t(
-                        'PLATEGA_PAY_BUTTON',
-                        '💳 Оплатить через {method}',
-                    ).format(method=method_title),
-                    url=redirect_url,
-                )
-            ],
-            [
-                types.InlineKeyboardButton(
-                    text=texts.t('CHECK_STATUS_BUTTON', '📊 Проверить статус'),
-                    callback_data=f'check_platega_{local_payment_id}',
-                )
-            ],
-            [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-        ]
-    )
-
-    instructions_template = texts.t(
-        'PLATEGA_PAYMENT_INSTRUCTIONS',
-        (
-            '💳 <b>Оплата через Platega ({method})</b>\n\n'
-            '💰 Сумма: {amount}\n'
-            '🆔 ID транзакции: {transaction}\n\n'
-            '📱 <b>Инструкция:</b>\n'
-            '1. Нажмите кнопку «Оплатить»\n'
-            '2. Следуйте подсказкам платёжной системы\n'
-            '3. Подтвердите перевод\n'
-            '4. Средства зачислятся автоматически\n\n'
-            '❓ Если возникнут проблемы, обратитесь в {support}'
-        ),
+    keyboard = payment_invoice_keyboard(
+        language=db_user.language,
+        pay_url=redirect_url,
+        amount_kopeks=amount_kopeks,
+        status_callback=f'check_platega_{local_payment_id}',
     )
 
     state_data = await state.get_data()
@@ -393,12 +337,7 @@ async def process_platega_payment_amount(
             logger.warning('Не удалось удалить сообщение с запросом суммы Platega', delete_error=delete_error)
 
     invoice_message = await message.answer(
-        instructions_template.format(
-            method=method_title,
-            amount=settings.format_price(amount_kopeks),
-            transaction=transaction_id or local_payment_id,
-            support=settings.get_support_contact_display_html(),
-        ),
+        payment_invoice_text(f'{settings.get_platega_display_name()} · {method_title}', amount_kopeks),
         reply_markup=keyboard,
         parse_mode='HTML',
     )

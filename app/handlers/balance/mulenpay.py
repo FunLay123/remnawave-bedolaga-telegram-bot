@@ -13,6 +13,13 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    format_whole_rubles,
+    payment_amount_range_error,
+    payment_amount_text,
+    payment_invoice_keyboard,
+    payment_invoice_text,
+)
 from app.utils.timezone import format_local_datetime
 
 
@@ -45,7 +52,6 @@ async def start_mulenpay_payment(
         return
 
     mulenpay_name = settings.get_mulenpay_display_name()
-    mulenpay_name_html = settings.get_mulenpay_display_name_html()
 
     if not settings.is_mulenpay_enabled():
         await callback.answer(
@@ -54,20 +60,13 @@ async def start_mulenpay_payment(
         )
         return
 
-    message_template = texts.t(
-        'MULENPAY_TOPUP_PROMPT',
-        (
-            '💳 <b>Оплата через {mulenpay_name_html}</b>\n\n'
-            'Введите сумму для пополнения от 100 до 100 000 ₽.\n'
-            'Оплата происходит через защищенную платформу {mulenpay_name}.'
-        ),
-    )
-    message_text = message_template.format(
-        mulenpay_name=mulenpay_name,
-        mulenpay_name_html=mulenpay_name_html,
+    message_text = payment_amount_text(
+        mulenpay_name,
+        settings.MULENPAY_MIN_AMOUNT_KOPEKS,
+        settings.MULENPAY_MAX_AMOUNT_KOPEKS,
     )
 
-    keyboard = await get_topup_amount_keyboard('mulenpay', db_user.language, back_callback='back_to_menu')
+    keyboard = await get_topup_amount_keyboard('mulenpay', db_user.language, back_callback='balance_topup')
 
     await callback.message.edit_text(
         message_text,
@@ -113,25 +112,16 @@ async def process_mulenpay_payment_amount(
         return
 
     mulenpay_name = settings.get_mulenpay_display_name()
-    mulenpay_name_html = settings.get_mulenpay_display_name_html()
 
     if not settings.is_mulenpay_enabled():
         await message.answer(f'❌ Оплата через {mulenpay_name} временно недоступна')
         return
 
-    if amount_kopeks < settings.MULENPAY_MIN_AMOUNT_KOPEKS:
+    if amount_kopeks < settings.MULENPAY_MIN_AMOUNT_KOPEKS or amount_kopeks > settings.MULENPAY_MAX_AMOUNT_KOPEKS:
         await message.answer(
-            f'Минимальная сумма пополнения: {settings.format_price(settings.MULENPAY_MIN_AMOUNT_KOPEKS)}\n\n'
-            'Отправьте новую сумму пополнения числом в сообщении.',
-            reply_markup=get_back_keyboard(db_user.language),
-        )
-        return
-
-    if amount_kopeks > settings.MULENPAY_MAX_AMOUNT_KOPEKS:
-        await message.answer(
-            f'Максимальная сумма пополнения: {settings.format_price(settings.MULENPAY_MAX_AMOUNT_KOPEKS)}\n\n'
-            'Отправьте новую сумму пополнения числом в сообщении.',
-            reply_markup=get_back_keyboard(db_user.language),
+            payment_amount_range_error(settings.MULENPAY_MIN_AMOUNT_KOPEKS, settings.MULENPAY_MAX_AMOUNT_KOPEKS),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
         )
         return
 
@@ -176,54 +166,17 @@ async def process_mulenpay_payment_amount(
         mulen_payment_id = payment_result.get('mulen_payment_id')
         local_payment_id = payment_result.get('local_payment_id')
 
-        keyboard = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    types.InlineKeyboardButton(
-                        text=texts.t(
-                            'MULENPAY_PAY_BUTTON',
-                            '💳 Оплатить через {mulenpay_name}',
-                        ).format(mulenpay_name=mulenpay_name),
-                        url=payment_url,
-                    )
-                ],
-                [
-                    types.InlineKeyboardButton(
-                        text=texts.t('CHECK_STATUS_BUTTON', '📊 Проверить статус'),
-                        callback_data=f'check_mulenpay_{local_payment_id}',
-                    )
-                ],
-                [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-            ]
+        keyboard = payment_invoice_keyboard(
+            language=db_user.language,
+            pay_url=payment_url,
+            amount_kopeks=amount_kopeks,
+            status_callback=f'check_mulenpay_{local_payment_id}',
         )
 
         payment_id_display = mulen_payment_id if mulen_payment_id is not None else local_payment_id
 
-        message_template = texts.t(
-            'MULENPAY_PAYMENT_INSTRUCTIONS',
-            (
-                '💳 <b>Оплата через {mulenpay_name_html}</b>\n\n'
-                '💰 Сумма: {amount}\n'
-                '🆔 ID платежа: {payment_id}\n\n'
-                '📱 <b>Инструкция:</b>\n'
-                "1. Нажмите кнопку 'Оплатить через {mulenpay_name}'\n"
-                '2. Следуйте подсказкам платежной системы\n'
-                '3. Подтвердите перевод\n'
-                '4. Средства зачислятся автоматически\n\n'
-                '❓ Если возникнут проблемы, обратитесь в {support}'
-            ),
-        )
-
-        message_text = message_template.format(
-            amount=settings.format_price(amount_kopeks),
-            payment_id=payment_id_display,
-            support=settings.get_support_contact_display_html(),
-            mulenpay_name=mulenpay_name,
-            mulenpay_name_html=mulenpay_name_html,
-        )
-
         invoice_message = await message.answer(
-            message_text,
+            payment_invoice_text(mulenpay_name, amount_kopeks),
             reply_markup=keyboard,
             parse_mode='HTML',
         )
@@ -301,7 +254,7 @@ async def check_mulenpay_payment_status(callback: types.CallbackQuery, db: Async
         message_lines = [
             f'💳 Статус платежа {mulenpay_name}:\n\n',
             f'🆔 ID: {payment.mulen_payment_id or payment.id}\n',
-            f'💰 Сумма: {settings.format_price(payment.amount_kopeks)}\n',
+            f'💰 Сумма: {format_whole_rubles(payment.amount_kopeks)}\n',
             f'📊 Статус: {emoji} {status_text}\n',
             f'📅 Создан: {format_local_datetime(payment.created_at, "%d.%m.%Y %H:%M")}\n',
         ]

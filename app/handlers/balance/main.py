@@ -1,4 +1,5 @@
 import html
+import math
 
 import structlog
 from aiogram import Dispatcher, F, types
@@ -20,6 +21,18 @@ from app.keyboards.inline import (
 from app.localization.texts import get_texts
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import (
+    DEFAULT_TOPUP_MAX_KOPEKS,
+    DEFAULT_TOPUP_MIN_KOPEKS,
+    format_max_rubles,
+    format_min_rubles,
+    get_payment_methods_text,
+    payment_amount_error_text,
+    payment_amount_range_error,
+    payment_methods_unavailable_text,
+    payment_support_keyboard,
+    payment_support_text,
+)
 from app.utils.timezone import format_local_datetime
 
 
@@ -353,14 +366,11 @@ async def handle_balance_history_pagination(callback: types.CallbackQuery, db_us
 
 @error_handler
 async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext):
-    from app.config import settings
-    from app.utils.payment_utils import get_payment_methods_text
-
     texts = get_texts(db_user.language)
 
     # Проверка ограничения на пополнение
     if getattr(db_user, 'restriction_topup', False):
-        reason = html.escape(getattr(db_user, 'restriction_reason', None) or 'Действие ограничено администратором')
+        reason = getattr(db_user, 'restriction_reason', None) or 'Действие ограничено администратором'
         support_url = settings.get_support_contact_url()
         keyboard = []
         if support_url:
@@ -368,14 +378,12 @@ async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db:
         keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
         await callback.message.edit_text(
-            f'🚫 <b>Пополнение ограничено</b>\n\n{reason}\n\n'
-            'Если вы считаете это ошибкой, вы можете обжаловать решение.',
+            payment_methods_unavailable_text(reason),
             reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
+            parse_mode='HTML',
         )
         await callback.answer()
         return
-
-    payment_text = get_payment_methods_text(db_user.language)
 
     # Проверяем сохранённую корзину для автоподстановки суммы пополнения
     amount_kopeks = 0
@@ -390,9 +398,20 @@ async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db:
     except Exception:
         pass
 
-    full_text = payment_text
-
     keyboard = get_payment_methods_keyboard(amount_kopeks, db_user.language)
+
+    # Автоматические способы — любые кнопки пополнения, кроме поддержки.
+    has_direct_methods = any(
+        (button.callback_data or '').startswith('topup_') and button.callback_data != 'topup_support'
+        for row in keyboard.inline_keyboard
+        for button in row
+    )
+
+    full_text = get_payment_methods_text(
+        db_user.language,
+        db_user.balance_kopeks,
+        has_direct_methods=has_direct_methods,
+    )
 
     # Если сообщение недоступно, отправляем новое
     if isinstance(callback.message, InaccessibleMessage):
@@ -505,44 +524,18 @@ async def request_support_topup(callback: types.CallbackQuery, db_user: User):
         return
 
     user_id_display = db_user.telegram_id or db_user.email or f'#{db_user.id}'
-    support_text = f"""
-🛠️ <b>Пополнение через поддержку</b>
+    support_url = settings.get_support_contact_url()
 
-Для пополнения баланса обратитесь в техподдержку:
-{settings.get_support_contact_display_html()}
-
-Укажите:
-• ID: {user_id_display}
-• Сумму пополнения
-• Способ оплаты
-
-⏰ Время обработки: 1-24 часа
-
-<b>Доступные способы:</b>
-• Криптовалюта
-• Переводы между банками
-• Другие платежные системы
-"""
-
-    keyboard = types.InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                types.InlineKeyboardButton(
-                    text='💬 Написать в поддержку', url=settings.get_support_contact_url() or 'https://t.me/'
-                )
-            ],
-            [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-        ]
+    await callback.message.edit_text(
+        payment_support_text(user_id_display),
+        reply_markup=payment_support_keyboard(db_user.language, support_url),
+        parse_mode='HTML',
     )
-
-    await callback.message.edit_text(support_text, reply_markup=keyboard, parse_mode='HTML')
     await callback.answer()
 
 
 @error_handler
 async def process_topup_amount(message: types.Message, db_user: User, state: FSMContext):
-    texts = get_texts(db_user.language)
-
     try:
         if not message.text:
             if message.successful_payment:
@@ -552,61 +545,66 @@ async def process_topup_amount(message: types.Message, db_user: User, state: FSM
                 await state.clear()
                 return
 
-            await message.answer(texts.INVALID_AMOUNT, reply_markup=get_back_keyboard(db_user.language))
+            await message.answer(
+                payment_amount_error_text('Введите сумму числом, например 500'),
+                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                parse_mode='HTML',
+            )
             return
 
         amount_text = message.text.strip()
         if not amount_text:
-            await message.answer(texts.INVALID_AMOUNT, reply_markup=get_back_keyboard(db_user.language))
+            await message.answer(
+                payment_amount_error_text('Введите сумму числом, например 500'),
+                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                parse_mode='HTML',
+            )
             return
 
         amount_rubles = float(amount_text.replace(',', '.'))
-
-        if amount_rubles < 1:
-            await message.answer(
-                'Минимальная сумма пополнения: 1 ₽\n\nОтправьте новую сумму пополнения числом в сообщении.',
-                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
-            )
-            return
-
-        if amount_rubles > 50000:
-            await message.answer(
-                'Максимальная сумма пополнения: 50,000 ₽\n\nОтправьте новую сумму пополнения числом в сообщении.',
-                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
-            )
-            return
-
+        if not math.isfinite(amount_rubles):
+            raise ValueError(f'Amount must be finite: {amount_text!r}')
         amount_kopeks = int(amount_rubles * 100)
+
+        if amount_kopeks < DEFAULT_TOPUP_MIN_KOPEKS:
+            await message.answer(
+                payment_amount_error_text(f'Минимальная сумма — {format_min_rubles(DEFAULT_TOPUP_MIN_KOPEKS)}'),
+                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                parse_mode='HTML',
+            )
+            return
+
+        if amount_kopeks > DEFAULT_TOPUP_MAX_KOPEKS:
+            await message.answer(
+                payment_amount_error_text(f'Максимальная сумма — {format_max_rubles(DEFAULT_TOPUP_MAX_KOPEKS)}'),
+                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                parse_mode='HTML',
+            )
+            return
         data = await state.get_data()
         payment_method = data.get('payment_method', 'stars')
 
-        if payment_method in ['yookassa', 'yookassa_sbp']:
-            if amount_kopeks < settings.YOOKASSA_MIN_AMOUNT_KOPEKS:
-                min_rubles = f'{settings.YOOKASSA_MIN_AMOUNT_KOPEKS / 100:.2f}'.rstrip('0').rstrip('.')
-                example_rubles = max(1, (settings.YOOKASSA_MIN_AMOUNT_KOPEKS + 99) // 100)
-                retry_hint = f'Чтобы продолжить, отправьте боту сообщение с суммой пополнения не меньше {min_rubles} ₽.'
-                if example_rubles <= 50000 and example_rubles * 100 <= settings.YOOKASSA_MAX_AMOUNT_KOPEKS:
-                    retry_hint += f'\n\nНапример, отправьте: {example_rubles}'
-                await message.answer(
-                    f'❌ Минимальная сумма пополнения через YooKassa — {min_rubles} ₽.\n\n{retry_hint}',
-                    reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
-                )
-                return
-
-            if amount_kopeks > settings.YOOKASSA_MAX_AMOUNT_KOPEKS:
-                max_rubles = f'{settings.YOOKASSA_MAX_AMOUNT_KOPEKS / 100:.2f}'.rstrip('0').rstrip('.')
-                await message.answer(
-                    f'❌ Максимальная сумма пополнения через YooKassa — {max_rubles} ₽.\n\n'
-                    f'Чтобы продолжить, отправьте боту сообщение с суммой пополнения не больше {max_rubles} ₽.',
-                    reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
-                )
-                return
+        if payment_method in ['yookassa', 'yookassa_sbp'] and (
+            amount_kopeks < settings.YOOKASSA_MIN_AMOUNT_KOPEKS or amount_kopeks > settings.YOOKASSA_MAX_AMOUNT_KOPEKS
+        ):
+            await message.answer(
+                payment_amount_range_error(settings.YOOKASSA_MIN_AMOUNT_KOPEKS, settings.YOOKASSA_MAX_AMOUNT_KOPEKS),
+                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                parse_mode='HTML',
+            )
+            return
 
         if not await route_payment_by_method(message, db_user, amount_kopeks, state, payment_method):
             await message.answer('Неизвестный способ оплаты')
 
-    except ValueError:
-        await message.answer(texts.INVALID_AMOUNT, reply_markup=get_back_keyboard(db_user.language))
+    except (ValueError, OverflowError):
+        # OverflowError — конечное, но огромное число: float('1e307') * 100 → inf,
+        # int(inf) бросает его мимо проверки isfinite.
+        await message.answer(
+            payment_amount_error_text('Введите сумму числом, например 500'),
+            reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+            parse_mode='HTML',
+        )
 
 
 @error_handler

@@ -16,6 +16,7 @@ from app.database.models import PaymentMethod, TransactionType
 from app.services import cashera_recurring_cancel as cashera_cancel
 from app.services.cashera_service import cashera_service, normalize_payment_url
 from app.utils.payment_logger import payment_logger as logger
+from app.utils.payment_utils import payment_success_text
 from app.utils.user_utils import format_referrer_info
 
 
@@ -567,12 +568,10 @@ class CasheraPaymentMixin:
                 keyboard = await self.build_topup_success_keyboard(user)
                 await self.bot.send_message(
                     user.telegram_id,
-                    (
-                        '✅ <b>Пополнение успешно!</b>\n\n'
-                        f'\U0001f4b0 Сумма: {settings.format_price(payment.amount_kopeks)}\n'
-                        f'\U0001f4b3 Способ: {settings.get_cashera_display_name_html()}\n'
-                        f'\U0001f194 Транзакция: {transaction.id}\n\n'
-                        'Баланс пополнен автоматически!'
+                    payment_success_text(
+                        payment.amount_kopeks,
+                        old_balance + payment.amount_kopeks,
+                        old_balance,
                     ),
                     parse_mode='HTML',
                     reply_markup=keyboard,

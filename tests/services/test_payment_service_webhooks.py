@@ -1385,13 +1385,12 @@ async def test_process_pal24_callback_success(monkeypatch: pytest.MonkeyPatch) -
     assert payment.transaction_id == 654
     assert user.balance_kopeks == 5000
     assert admin_calls
-    # The success path now sends a single "Пополнение успешно!" message to the user;
-    # the separate saved-cart message (return_to_saved_cart) was removed when the
-    # duplicate post-topup message was dropped from production.
+    # A successful top-up sends one compact "Баланс пополнен" screen.
     assert bot.sent_messages
     success_message = bot.sent_messages[-1]
     assert success_message['args'][0] == user.telegram_id
-    assert 'Пополнение успешно' in success_message['args'][1]
+    assert 'Баланс пополнен' in success_message['args'][1]
+    assert '+50 ₽' in success_message['args'][1]
 
 
 @pytest.mark.anyio('asyncio')

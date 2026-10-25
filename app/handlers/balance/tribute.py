@@ -7,6 +7,7 @@ from app.config import settings
 from app.database.models import User
 from app.localization.texts import get_texts
 from app.utils.decorators import error_handler
+from app.utils.payment_utils import payment_invoice_keyboard, payment_invoice_text
 
 
 logger = structlog.get_logger(__name__)
@@ -54,21 +55,16 @@ async def start_tribute_payment(
             await callback.answer('❌ Ошибка создания платежа', show_alert=True)
             return
 
-        keyboard = types.InlineKeyboardMarkup(
-            inline_keyboard=[
-                [types.InlineKeyboardButton(text='💳 Перейти к оплате', url=payment_url)],
-                [types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')],
-            ]
+        keyboard = payment_invoice_keyboard(
+            language=db_user.language,
+            pay_url=payment_url,
+            amount_kopeks=0,
+            pay_text='Оплатить',
         )
 
         message_text = (
-            '💳 <b>Пополнение банковской картой</b>\n\n'
-            '• Введите любую сумму от 100₽\n'
-            '• Безопасная оплата через Tribute\n'
-            '• Мгновенное зачисление на баланс\n'
-            '• Принимаем карты Visa, MasterCard, МИР\n\n'
-            '• 🚨 НЕ ОТПРАВЛЯТЬ ПЛАТЕЖ АНОНИМНО!\n\n'
-            'Нажмите кнопку для перехода к оплате:'
+            payment_invoice_text('Tribute', None)
+            + '\n\n<blockquote>Не отправляйте платёж анонимно — иначе не сможем зачислить его на баланс</blockquote>'
         )
 
         await callback.message.edit_text(
