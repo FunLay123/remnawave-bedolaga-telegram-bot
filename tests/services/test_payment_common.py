@@ -145,7 +145,7 @@ async def test_success_keyboard_reload_prefers_active_subscription(monkeypatch) 
     mixin = type('_TestMixin', (PaymentCommonMixin,), {})()
     keyboard = await mixin.build_topup_success_keyboard(lazy_user)
 
-    assert _callbacks(keyboard) == ['menu_subscription']
+    assert _callbacks(keyboard) == ['back_to_menu']
 
 
 @pytest.mark.asyncio

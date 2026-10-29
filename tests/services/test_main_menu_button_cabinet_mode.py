@@ -320,12 +320,8 @@ def test_home_button_key_is_not_in_cabinet_miniapp_button_keys() -> None:
 
 
 @pytest.mark.asyncio
-async def test_topup_success_keyboard_without_cart_points_to_subscription() -> None:
-    """No saved cart/draft -> a single subscription button.
-
-    The minimal top-up success screen intentionally has no "Мой баланс" or
-    "Главное меню" rows: one clear next step is enough.
-    """
+async def test_topup_success_keyboard_without_cart_points_to_main_menu() -> None:
+    """No saved cart/draft -> a single primary "Главное меню" button."""
     from types import SimpleNamespace
 
     from app.services.payment.common import PaymentCommonMixin
@@ -347,5 +343,8 @@ async def test_topup_success_keyboard_without_cart_points_to_subscription() -> N
 
     assert len(keyboard.inline_keyboard) == 1
     button = keyboard.inline_keyboard[0][0]
-    assert button.callback_data == 'menu_subscription'
+    assert button.text == 'Главное меню'
+    assert button.callback_data == 'back_to_menu'
+    assert button.style == 'primary'
+    assert button.icon_custom_emoji_id == '5269735794846769214'
     assert button.web_app is None

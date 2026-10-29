@@ -25,7 +25,7 @@ from app.services.subscription_checkout_service import (
     should_offer_checkout_resume,
 )
 from app.services.user_cart_service import user_cart_service
-from app.utils.miniapp_buttons import build_miniapp_or_callback_button
+from app.utils.miniapp_buttons import build_main_menu_button, build_miniapp_or_callback_button
 from app.utils.payment_button_styles import apply_button_style
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.payment_utils import payment_success_text
@@ -65,24 +65,21 @@ class PaymentCommonMixin:
     """Mixin с базовой логикой, которую используют остальные платёжные блоки."""
 
     async def build_topup_success_keyboard(self, user: Any) -> InlineKeyboardMarkup:
-        """Одна кнопка: вернуться к оформлению, если есть корзина/черновик, иначе — в подписку."""
+        """Одна кнопка: вернуться к оформлению, если есть корзина/черновик, иначе — в главное меню."""
         texts = get_texts(user.language if user else 'ru')
-        subscription_button = InlineKeyboardMarkup(
+        main_menu_button = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     apply_button_style(
-                        build_miniapp_or_callback_button(
-                            text=texts.MENU_SUBSCRIPTION,
-                            callback_data='menu_subscription',
-                        ),
-                        'success:subscription',
+                        build_main_menu_button(texts.MAIN_MENU_BUTTON),
+                        'success:main_menu',
                     )
                 ]
             ]
         )
 
         if not user:
-            return subscription_button
+            return main_menu_button
 
         try:
             cart_data = await user_cart_service.get_user_cart(user.id)
@@ -167,7 +164,7 @@ class PaymentCommonMixin:
                 error=error,
             )
 
-        return subscription_button
+        return main_menu_button
 
     async def _send_payment_success_notification(
         self,

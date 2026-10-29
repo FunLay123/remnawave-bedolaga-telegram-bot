@@ -54,7 +54,12 @@ class ButtonStyle:
 
 # Заполняется вручную. Пустой словарь = текущий вид без изменений.
 BUTTON_STYLES: dict[str, ButtonStyle] = {
-    'method:stars': ButtonStyle(icon_custom_emoji_id='5460980668378931880')
+    'method:stars': ButtonStyle(icon_custom_emoji_id='5460980668378931880'),
+    'amount:15000': ButtonStyle(style='primary'),
+    'success:main_menu': ButtonStyle(
+        icon_custom_emoji_id='5269735794846769214',
+        style='primary',
+    ),
     # Примеры:
     # 'method:stars': ButtonStyle(icon_custom_emoji_id='1234567890', style='primary'),
     # 'method:yookassa': ButtonStyle(icon_custom_emoji_id='1234567890'),
