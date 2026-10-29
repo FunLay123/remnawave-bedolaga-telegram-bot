@@ -50,6 +50,22 @@ def _sub(sub_id: int, user_id: int, *, trial: bool = False, days: int = 30) -> S
     )
 
 
+def _expired_placeholder(sub_id: int, user_id: int) -> Subscription:
+    """Брошенная заготовка СБП: EXPIRED с нулевым сроком."""
+    now = datetime.now(UTC)
+    return Subscription(
+        id=sub_id,
+        user_id=user_id,
+        remnawave_short_id=f'sub{sub_id}',
+        status=SubscriptionStatus.EXPIRED.value,
+        is_trial=False,
+        start_date=now,
+        end_date=now,
+        traffic_limit_gb=100,
+        device_limit=1,
+    )
+
+
 @pytest.mark.asyncio
 async def test_first_30_day_purchase_rewards_both_sides(monkeypatch):
     monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
@@ -146,6 +162,43 @@ async def test_referrer_without_subscription_skips_only_referrer(monkeypatch):
         rows = (await db.execute(select(ReferralEarning))).scalars().all()
         assert REASON_FIRST_PURCHASE_REFEREE in {row.reason for row in rows}
         assert REASON_FIRST_PURCHASE not in {row.reason for row in rows}
+
+
+@pytest.mark.asyncio
+async def test_expired_zero_duration_placeholder_is_not_a_referrer_target(monkeypatch):
+    """Брошенная заготовка СБП не должна оживать от награды.
+
+    У заготовки ``start_date == end_date``, то есть подписки фактически не было.
+    ``add_reward_days`` поднял бы её в ACTIVE и выдал пригласившему 10 живых
+    дней, хотя он ни разу не платил. Приглашённый при этом награду получает.
+    """
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all([_user(1), _user(2, referred_by_id=1), _sub(10, 2), _expired_placeholder(11, 1)])
+        await db.commit()
+
+        result = await register_first_purchase(
+            db,
+            referee_id=2,
+            subscription_id=10,
+            duration_days=30,
+            paid_amount_kopeks=10_000,
+            source='test',
+        )
+
+        assert result.status == 'rewarded'
+        assert result.referee_days == 10
+        assert result.referrer_days == 0
+        assert result.referrer_subscription_id is None
+
+        rows = (await db.execute(select(ReferralEarning))).scalars().all()
+        reasons = {row.reason for row in rows}
+        assert REASON_FIRST_PURCHASE_REFEREE in reasons
+        assert REASON_FIRST_PURCHASE not in reasons
+
+        placeholder = await db.get(Subscription, 11)
+        assert placeholder.status == SubscriptionStatus.EXPIRED.value
+        assert placeholder.end_date == placeholder.start_date
 
 
 @pytest.mark.asyncio

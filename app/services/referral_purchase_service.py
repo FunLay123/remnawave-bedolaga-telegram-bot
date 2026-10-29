@@ -220,7 +220,9 @@ async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscript
 
     Правило выбора то же, что у платной подписки в уровневых наградах: живые
     нетриальные впереди, при равенстве — более поздний срок, затем меньший id.
-    Истёкшая подписка тоже годится: ``add_reward_days`` поднимет её обратно.
+    Истёкшая подписка тоже годится: ``add_reward_days`` поднимет её обратно,
+    кроме заготовки СБП. У заготовки ``start_date == end_date``: она ни разу не
+    оплачена, и реактивация выдала бы пригласившему живые дни бесплатно.
     ``None`` — подписки, куда можно положить награду, нет вовсе. Это
     единственный разрешённый случай «пригласивший без подписки»: пропускается
     только его сторона, приглашённый свою награду получает.
@@ -254,7 +256,23 @@ async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscript
         SubscriptionStatus.LIMITED.value,
         SubscriptionStatus.EXPIRED.value,
     }
-    candidates = [sub for sub in locked if (sub.status or '').lower() in allowed]
+
+    def _is_abandoned_placeholder(sub: Subscription) -> bool:
+        """EXPIRED-заготовка СБП: нулевой срок, ни разу не оплачена.
+
+        ``create_sbp_pending_subscription`` заводит строку с
+        ``start_date == end_date`` и статусом ``pending``; брошенная заготовка
+        истекает в ``expired``, сохраняя нулевой срок. Поднимать её наградой
+        нельзя: пригласивший не заплатил, а получил бы доступ.
+        """
+        return (
+            (sub.status or '').lower() == SubscriptionStatus.EXPIRED.value
+            and sub.start_date is not None
+            and sub.end_date is not None
+            and sub.end_date <= sub.start_date
+        )
+
+    candidates = [sub for sub in locked if (sub.status or '').lower() in allowed and not _is_abandoned_placeholder(sub)]
     if not candidates:
         return None
     candidates.sort(
@@ -484,7 +502,19 @@ async def register_first_purchase_after_purchase(
         return FirstPurchaseResult(status='error')
 
     if result.status == 'rewarded':
-        await _post_commit_effects(result, referee_id, bot=bot)
+        # Побочные эффекты — уже после коммита награды. Их сбой (панель, Lava,
+        # телеграм) не имеет права превратить успешную покупку в ошибку.
+        try:
+            await _post_commit_effects(result, referee_id, bot=bot)
+        except Exception as error:
+            logger.error(
+                'Failed to run referral first purchase post-commit effects',
+                referee_id=referee_id,
+                subscription_id=subscription_id,
+                source=source,
+                error=str(error),
+                exc_info=True,
+            )
     return result
 
 
@@ -550,22 +580,40 @@ async def _post_commit_effects(
     if bot is None:
         return
 
+    # Синхронизация и Lava выше уже выполнены: отключённые уведомления глушат
+    # только сообщения, но не побочные эффекты награды. Порядок проверок тот же,
+    # что в referral_service: сначала общий выключатель, затем реферальный.
+    if not settings.is_notifications_enabled():
+        logger.debug(
+            'Referral first purchase notification suppressed: user notifications disabled',
+            referee_id=referee_id,
+        )
+        return
+    if not settings.is_referral_notifications_enabled():
+        logger.debug(
+            'Referral first purchase notification suppressed: referral notifications disabled',
+            referee_id=referee_id,
+        )
+        return
+
     from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
     from app.database.crud.user import get_user_by_id
     from app.localization.texts import get_texts
+    from app.utils.pricing_utils import _pluralize_days_ru
 
     async with AsyncSessionLocal() as db:
         referee = await get_user_by_id(db, referee_id)
         if referee is not None and referee.telegram_id:
             texts = get_texts(referee.language)
             if result.referee_days:
+                referee_days_text = f'{result.referee_days} {_pluralize_days_ru(result.referee_days)}'
                 try:
                     await bot.send_message(
                         chat_id=referee.telegram_id,
                         text=(
                             '<tg-emoji emoji-id="5235695112419303615">🎁</tg-emoji> '
-                            '<b>Вам +10 дней</b>\n\n'
+                            f'<b>Вам +{referee_days_text}</b>\n\n'
                             'За первую покупку по приглашению.'
                         ),
                         reply_markup=InlineKeyboardMarkup(
@@ -588,13 +636,14 @@ async def _post_commit_effects(
             referrer = await get_user_by_id(db, result.referrer_id)
             if referrer and referrer.telegram_id:
                 texts = get_texts(referrer.language)
+                referrer_days_text = f'{result.referrer_days} {_pluralize_days_ru(result.referrer_days)}'
                 try:
                     await bot.send_message(
                         chat_id=referrer.telegram_id,
                         text=(
                             '<tg-emoji emoji-id="5335020345717973061">🎉</tg-emoji> '
                             '<b>Друг купил подписку</b>\n\n'
-                            'Вам +10 дней к текущей подписке.'
+                            f'Вам +{referrer_days_text} к текущей подписке.'
                         ),
                         reply_markup=InlineKeyboardMarkup(
                             inline_keyboard=[
