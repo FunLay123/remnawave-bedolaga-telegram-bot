@@ -26,6 +26,7 @@ from app.services.subscription_checkout_service import (
 )
 from app.services.user_cart_service import user_cart_service
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button
+from app.utils.payment_button_styles import apply_button_style
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.payment_utils import payment_success_text
 
@@ -69,9 +70,12 @@ class PaymentCommonMixin:
         subscription_button = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
-                    build_miniapp_or_callback_button(
-                        text=texts.MENU_SUBSCRIPTION,
-                        callback_data='menu_subscription',
+                    apply_button_style(
+                        build_miniapp_or_callback_button(
+                            text=texts.MENU_SUBSCRIPTION,
+                            callback_data='menu_subscription',
+                        ),
+                        'success:subscription',
                     )
                 ]
             ]
@@ -95,10 +99,13 @@ class PaymentCommonMixin:
                 return InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
-                            build_miniapp_or_callback_button(
-                                text=texts.t('GIFT_RETURN_TO_CART_BUTTON', '🎁 Вернуться к подарку'),
-                                callback_data='return_to_gift_cart',
-                                style='primary',
+                            apply_button_style(
+                                build_miniapp_or_callback_button(
+                                    text=texts.t('GIFT_RETURN_TO_CART_BUTTON', '🎁 Вернуться к подарку'),
+                                    callback_data='return_to_gift_cart',
+                                    style='primary',
+                                ),
+                                'success:gift',
                             )
                         ]
                     ]
@@ -106,10 +113,13 @@ class PaymentCommonMixin:
             return InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
-                        build_miniapp_or_callback_button(
-                            text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
-                            callback_data='return_to_saved_cart',
-                            style='primary',
+                        apply_button_style(
+                            build_miniapp_or_callback_button(
+                                text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
+                                callback_data='return_to_saved_cart',
+                                style='primary',
+                            ),
+                            'success:return',
                         )
                     ]
                 ]
@@ -139,10 +149,13 @@ class PaymentCommonMixin:
                 return InlineKeyboardMarkup(
                     inline_keyboard=[
                         [
-                            build_miniapp_or_callback_button(
-                                text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
-                                callback_data='subscription_resume_checkout',
-                                style='primary',
+                            apply_button_style(
+                                build_miniapp_or_callback_button(
+                                    text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
+                                    callback_data='subscription_resume_checkout',
+                                    style='primary',
+                                ),
+                                'success:return',
                             )
                         ]
                     ]

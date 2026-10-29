@@ -15,6 +15,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_button_styles import styled_button
 from app.utils.payment_utils import (
     payment_amount_range_error,
     payment_amount_text,
@@ -140,14 +141,16 @@ async def start_platega_payment(
         label = settings.get_platega_method_display_title(method_code)
         method_buttons.append(
             [
-                types.InlineKeyboardButton(
-                    text=label,
+                styled_button(
+                    f'submethod:platega:{method_code}',
+                    label,
                     callback_data=f'platega_method_{method_code}',
+                    fallback_action='submethod:platega:*',
                 )
             ]
         )
 
-    method_buttons.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')])
+    method_buttons.append([styled_button('nav:back', texts.BACK, callback_data='balance_topup')])
 
     await callback.message.edit_text(
         payment_submethod_text(settings.get_platega_display_name()),

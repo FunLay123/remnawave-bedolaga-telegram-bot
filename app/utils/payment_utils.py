@@ -4,13 +4,14 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.localization.texts import get_texts
+from app.utils.payment_button_styles import apply_button_style
 
 
 # Единый визуальный язык экранов пополнения. Шапка — тот же кастомный эмодзи,
 # что и на экранах подписки/продления; буллиты — ⚪️ и ▫️.
 PAYMENT_SCREEN_HEADER = '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji>'
-PAYMENT_BULLET = '⚪️'
-PAYMENT_SUB_BULLET = '▫️'
+PAYMENT_BULLET = '<tg-emoji emoji-id="5307554373457440075">⚪️</tg-emoji>'
+PAYMENT_SUB_BULLET = '<tg-emoji emoji-id="5276288708054624909">▫️</tg-emoji>'
 PAYMENT_PAY_ICON_ID = '5334552404736104314'
 PAYMENT_SUPPORT_ICON_ID = '5988023995125993550'
 
@@ -160,6 +161,7 @@ def payment_invoice_keyboard(
     pay_callback: str | None = None,
     amount_kopeks: int = 0,
     pay_text: str | None = None,
+    pay_action: str | None = None,
     status_callback: str | None = None,
     back_callback: str = 'balance_topup',
     extra_rows: list[list[InlineKeyboardButton]] | None = None,
@@ -168,35 +170,31 @@ def payment_invoice_keyboard(
     rows: list[list[InlineKeyboardButton]] = []
 
     if pay_url:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=pay_text or f'Оплатить {format_whole_rubles(amount_kopeks)}',
-                    url=pay_url,
-                    style='primary',
-                    icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
-                )
-            ]
+        pay_button = InlineKeyboardButton(
+            text=pay_text or f'Оплатить {format_whole_rubles(amount_kopeks)}',
+            url=pay_url,
+            style='primary',
+            icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
         )
+        rows.append([apply_button_style(pay_button, pay_action or 'invoice:pay')])
     elif pay_callback:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=pay_text or f'Оплатить {format_whole_rubles(amount_kopeks)}',
-                    callback_data=pay_callback,
-                    style='primary',
-                    icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
-                )
-            ]
+        pay_button = InlineKeyboardButton(
+            text=pay_text or f'Оплатить {format_whole_rubles(amount_kopeks)}',
+            callback_data=pay_callback,
+            style='primary',
+            icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
         )
+        rows.append([apply_button_style(pay_button, pay_action or 'invoice:pay')])
 
     if extra_rows:
         rows.extend(extra_rows)
 
     if status_callback:
-        rows.append([InlineKeyboardButton(text='Проверить статус', callback_data=status_callback)])
+        status_button = InlineKeyboardButton(text='Проверить статус', callback_data=status_callback)
+        rows.append([apply_button_style(status_button, 'invoice:status')])
 
-    rows.append([InlineKeyboardButton(text=texts.CANCEL, callback_data=back_callback)])
+    cancel_button = InlineKeyboardButton(text=texts.CANCEL, callback_data=back_callback)
+    rows.append([apply_button_style(cancel_button, 'nav:cancel')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -204,17 +202,15 @@ def payment_support_keyboard(language: str, support_url: str | None) -> InlineKe
     texts = get_texts(language)
     rows: list[list[InlineKeyboardButton]] = []
     if support_url:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text='Написать в поддержку',
-                    url=support_url,
-                    style='primary',
-                    icon_custom_emoji_id=PAYMENT_SUPPORT_ICON_ID,
-                )
-            ]
+        write_button = InlineKeyboardButton(
+            text='Написать в поддержку',
+            url=support_url,
+            style='primary',
+            icon_custom_emoji_id=PAYMENT_SUPPORT_ICON_ID,
         )
-    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')])
+        rows.append([apply_button_style(write_button, 'support:write')])
+    back_button = InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')
+    rows.append([apply_button_style(back_button, 'nav:back')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

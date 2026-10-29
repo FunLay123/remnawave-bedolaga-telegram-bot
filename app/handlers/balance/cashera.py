@@ -15,6 +15,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_button_styles import styled_button
 from app.utils.payment_utils import (
     payment_amount_range_error,
     payment_amount_text,
@@ -114,14 +115,16 @@ async def start_cashera_payment(callback: types.CallbackQuery, db_user: User, st
 
     buttons = [
         [
-            types.InlineKeyboardButton(
-                text=settings.get_cashera_method_display_title(code),
+            styled_button(
+                f'submethod:cashera:{code}',
+                settings.get_cashera_method_display_title(code),
                 callback_data=f'{METHOD_CALLBACK_PREFIX}{code}',
+                fallback_action='submethod:cashera:*',
             )
         ]
         for code in active_methods
     ]
-    buttons.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')])
+    buttons.append([styled_button('nav:back', texts.BACK, callback_data='balance_topup')])
 
     await callback.message.edit_text(
         payment_submethod_text(settings.get_cashera_display_name()),

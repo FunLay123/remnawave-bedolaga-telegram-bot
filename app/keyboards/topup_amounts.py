@@ -9,6 +9,7 @@ from app.services.payment_method_config_service import (
     get_config_by_method_id,
     get_effective_quick_amounts,
 )
+from app.utils.payment_button_styles import styled_button
 
 
 logger = structlog.get_logger(__name__)
@@ -100,9 +101,11 @@ async def get_topup_amount_keyboard(
     row: list[InlineKeyboardButton] = []
     for amount in amounts:
         row.append(
-            InlineKeyboardButton(
-                text=format_quick_amount(amount),
+            styled_button(
+                f'amount:{amount}',
+                format_quick_amount(amount),
                 callback_data=f'topup_amount|{method}|{amount}',
+                fallback_action='amount:*',
             )
         )
         if len(row) == 2:
@@ -110,5 +113,5 @@ async def get_topup_amount_keyboard(
             row = []
     if row:
         keyboard.append(row)
-    keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
+    keyboard.append([styled_button('nav:back', texts.BACK, callback_data=back_callback)])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)

@@ -18,6 +18,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_button_styles import apply_button_style, styled_button
 from app.utils.payment_utils import (
     PAYMENT_PAY_ICON_ID,
     format_whole_rubles,
@@ -106,11 +107,15 @@ async def _send_pal24_payment_message(
         if sbp_url and settings.is_pal24_sbp_button_visible():
             pay_buttons.append(
                 [
-                    types.InlineKeyboardButton(
-                        text=sbp_button_text,
-                        url=sbp_url,
-                        style='primary',
-                        icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                    apply_button_style(
+                        types.InlineKeyboardButton(
+                            text=sbp_button_text,
+                            url=sbp_url,
+                            style='primary',
+                            icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                        ),
+                        'invoice:pay:pal24:sbp',
+                        fallback_action='invoice:pay',
                     )
                 ]
             )
@@ -124,11 +129,15 @@ async def _send_pal24_payment_message(
         if card_url and card_url != sbp_url and settings.is_pal24_card_button_visible():
             pay_buttons.append(
                 [
-                    types.InlineKeyboardButton(
-                        text=card_button_text,
-                        url=card_url,
-                        style='primary',
-                        icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                    apply_button_style(
+                        types.InlineKeyboardButton(
+                            text=card_button_text,
+                            url=card_url,
+                            style='primary',
+                            icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                        ),
+                        'invoice:pay:pal24:card',
+                        fallback_action='invoice:pay',
                     )
                 ]
             )
@@ -136,11 +145,15 @@ async def _send_pal24_payment_message(
         if not pay_buttons and fallback_url and settings.is_pal24_sbp_button_visible():
             pay_buttons.append(
                 [
-                    types.InlineKeyboardButton(
-                        text=sbp_button_text,
-                        url=fallback_url,
-                        style='primary',
-                        icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                    apply_button_style(
+                        types.InlineKeyboardButton(
+                            text=sbp_button_text,
+                            url=fallback_url,
+                            style='primary',
+                            icon_custom_emoji_id=PAYMENT_PAY_ICON_ID,
+                        ),
+                        'invoice:pay:pal24:sbp',
+                        fallback_action='invoice:pay',
                     )
                 ]
             )
@@ -331,8 +344,9 @@ async def process_pal24_payment_amount(
     if 'sbp' in available_methods:
         method_buttons.append(
             [
-                types.InlineKeyboardButton(
-                    text=settings.get_pal24_sbp_button_text(
+                styled_button(
+                    'submethod:pal24:sbp',
+                    settings.get_pal24_sbp_button_text(
                         texts.t('PAL24_SBP_PAY_BUTTON', '🏦 Оплатить через PayPalych (СБП)')
                     ),
                     callback_data='pal24_method_sbp',
@@ -342,8 +356,9 @@ async def process_pal24_payment_amount(
     if 'card' in available_methods:
         method_buttons.append(
             [
-                types.InlineKeyboardButton(
-                    text=settings.get_pal24_card_button_text(
+                styled_button(
+                    'submethod:pal24:card',
+                    settings.get_pal24_card_button_text(
                         texts.t('PAL24_CARD_PAY_BUTTON', '💳 Оплатить банковской картой (PayPalych)')
                     ),
                     callback_data='pal24_method_card',
@@ -351,7 +366,7 @@ async def process_pal24_payment_amount(
             ]
         )
 
-    method_buttons.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='balance_topup')])
+    method_buttons.append([styled_button('nav:back', texts.BACK, callback_data='balance_topup')])
 
     await message.answer(
         payment_submethod_text(settings.get_pal24_display_name()),

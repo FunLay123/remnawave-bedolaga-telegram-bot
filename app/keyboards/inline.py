@@ -12,6 +12,7 @@ from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts
 from app.utils.legacy_subscription import is_legacy_subscription as _legacy_subscription
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button
+from app.utils.payment_button_styles import apply_button_style
 from app.utils.price_display import PriceInfo, format_price_button
 from app.utils.pricing_utils import (
     apply_percentage_discount,
@@ -1529,6 +1530,28 @@ def _apply_payment_name_overrides(keyboard: list[list[InlineKeyboardButton]]) ->
                 row[idx] = button.model_copy(update={'text': override})
 
 
+def _apply_payment_method_button_styles(keyboard: list[list[InlineKeyboardButton]]) -> None:
+    """Точечные иконки/primary для способов оплаты и «Назад».
+
+    Ключи реестра: ``method:<id>``, ``method:support``, ``nav:back``.
+    """
+    for row in keyboard:
+        for idx, button in enumerate(row):
+            data = button.callback_data or ''
+            if data == 'back_to_menu':
+                row[idx] = apply_button_style(button, 'nav:back')
+                continue
+            if data.startswith('topup_amount|'):
+                parts = data.split('|')
+                method = parts[1] if len(parts) > 1 else ''
+            elif data.startswith('topup_'):
+                method = data[len('topup_') :]
+            else:
+                continue
+            if method:
+                row[idx] = apply_button_style(button, f'method:{method}')
+
+
 def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     texts = get_texts(language)
     keyboard = []
@@ -2172,6 +2195,7 @@ def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LAN
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
 
     _apply_payment_name_overrides(keyboard)
+    _apply_payment_method_button_styles(keyboard)
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 

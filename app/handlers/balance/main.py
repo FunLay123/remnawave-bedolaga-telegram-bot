@@ -21,6 +21,7 @@ from app.keyboards.inline import (
 from app.localization.texts import get_texts
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_button_styles import styled_button
 from app.utils.payment_utils import (
     DEFAULT_TOPUP_MAX_KOPEKS,
     DEFAULT_TOPUP_MIN_KOPEKS,
@@ -374,8 +375,8 @@ async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db:
         support_url = settings.get_support_contact_url()
         keyboard = []
         if support_url:
-            keyboard.append([types.InlineKeyboardButton(text='🆘 Обжаловать', url=support_url)])
-        keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
+            keyboard.append([styled_button('restricted:appeal', '🆘 Обжаловать', url=support_url)])
+        keyboard.append([styled_button('nav:back', texts.BACK, callback_data='back_to_menu')])
 
         await callback.message.edit_text(
             payment_methods_unavailable_text(reason),

@@ -144,6 +144,7 @@ async def process_stars_payment_amount(message: types.Message, db_user: User, am
                 pay_callback=f'stars_test_pay|{amount_kopeks}|{test_token}',
                 amount_kopeks=amount_kopeks,
                 pay_text=f'Оплатить {stars_amount} ★',
+                pay_action='invoice:pay:stars',
             )
         else:
             payment_service = PaymentService(message.bot)
@@ -157,6 +158,7 @@ async def process_stars_payment_amount(message: types.Message, db_user: User, am
                 pay_url=invoice_link,
                 amount_kopeks=amount_kopeks,
                 pay_text=f'Оплатить {stars_amount} ★',
+                pay_action='invoice:pay:stars',
             )
 
         state_data = await state.get_data()

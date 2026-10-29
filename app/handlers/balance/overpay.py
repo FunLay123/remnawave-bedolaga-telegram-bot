@@ -15,6 +15,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.payment_button_styles import styled_button
 from app.utils.payment_utils import (
     format_min_rubles,
     payment_amount_error_text,
@@ -247,11 +248,22 @@ async def start_overpay_topup(
     options = _available_options(texts)
     display_name = settings.get_overpay_display_name()
 
-    keyboard_rows = [[InlineKeyboardButton(text=label, callback_data=f'topup_{method}')] for method, label in options]
+    keyboard_rows = [
+        [
+            styled_button(
+                f'submethod:overpay:{method.removeprefix("overpay_")}',
+                label,
+                callback_data=f'topup_{method}',
+                fallback_action='submethod:overpay:*',
+            )
+        ]
+        for method, label in options
+    ]
     keyboard_rows.append(
         [
-            InlineKeyboardButton(
-                text=texts.t('BACK_BUTTON', '◀️ Назад'),
+            styled_button(
+                'nav:back',
+                texts.t('BACK_BUTTON', '◀️ Назад'),
                 callback_data='menu_balance',
             )
         ]

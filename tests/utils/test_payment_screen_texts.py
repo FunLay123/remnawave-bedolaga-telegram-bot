@@ -1,8 +1,10 @@
 """Единые тексты экранов пополнения: целые рубли, шапка и буллиты."""
 
 from app.utils.payment_utils import (
+    PAYMENT_BULLET,
     PAYMENT_PAY_ICON_ID,
     PAYMENT_SCREEN_HEADER,
+    PAYMENT_SUB_BULLET,
     format_max_rubles,
     format_min_rubles,
     format_whole_rubles,
@@ -28,8 +30,8 @@ def test_methods_screen_has_balance_and_no_method_descriptions() -> None:
 
     assert text.startswith(PAYMENT_SCREEN_HEADER)
     assert '<b>Пополнение баланса</b>' in text
-    assert '⚪️ Баланс: <b>150 ₽</b>' in text
-    assert '▫️ Выберите способ оплаты:' in text
+    assert f'{PAYMENT_BULLET} Баланс: <b>150 ₽</b>' in text
+    assert f'{PAYMENT_SUB_BULLET} Выберите способ оплаты:' in text
     assert 'быстро и удобно' not in text
     assert 'Выберите способ пополнения' not in text
 
@@ -52,7 +54,7 @@ def test_amount_screen_uses_provider_and_whole_ruble_range() -> None:
     text = payment_amount_text('Telegram Stars', 5_000, 5_000_000)
 
     assert '<b>Сумма пополнения</b>' in text
-    assert '⚪️ Способ: Telegram Stars' in text
+    assert f'{PAYMENT_BULLET} Способ: Telegram Stars' in text
     assert 'от 50 ₽ до 50000 ₽' in text
 
 
@@ -80,8 +82,8 @@ def test_range_clamped_to_global_manual_input_limits() -> None:
 def test_invoice_screen_has_amount_and_optional_stars() -> None:
     text = payment_invoice_text('Telegram Stars', 15_000, stars_amount=150)
     assert '<b>Счёт на оплату</b>' in text
-    assert '⚪️ Способ: Telegram Stars' in text
-    assert '▫️ К оплате: <b>150 ₽ (150 ★)</b>' in text
+    assert f'{PAYMENT_BULLET} Способ: Telegram Stars' in text
+    assert f'{PAYMENT_SUB_BULLET} К оплате: <b>150 ₽ (150 ★)</b>' in text
 
 
 def test_invoice_screen_can_show_secondary_currency() -> None:
@@ -97,20 +99,20 @@ def test_invoice_screen_without_known_amount_points_to_provider_page() -> None:
 def test_success_screen_shows_credit_and_balance_transition() -> None:
     text = payment_success_text(15_000, 30_000, 15_000)
     assert '<b>Баланс пополнен</b>' in text
-    assert '⚪️ Зачислено: <b>+150 ₽</b>' in text
-    assert '▫️ Баланс: 150 ₽ → 300 ₽' in text
+    assert f'{PAYMENT_BULLET} Зачислено: <b>+150 ₽</b>' in text
+    assert f'{PAYMENT_SUB_BULLET} Баланс: 150 ₽ → 300 ₽' in text
 
 
 def test_success_screen_without_old_balance_shows_only_new_balance() -> None:
     text = payment_success_text(15_000, 30_000)
-    assert '▫️ Баланс: 300 ₽' in text
+    assert f'{PAYMENT_SUB_BULLET} Баланс: 300 ₽' in text
     assert '→' not in text
 
 
 def test_success_screen_without_any_balance_omits_balance_line() -> None:
     text = payment_success_text(15_000, None)
     assert 'Зачислено: <b>+150 ₽</b>' in text
-    assert '▫️ Баланс' not in text
+    assert f'{PAYMENT_SUB_BULLET} Баланс' not in text
     assert '→' not in text
 
 
