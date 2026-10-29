@@ -962,6 +962,9 @@ REASON_COMMISSION = 'referral_commission_topup'
 REASON_REGISTRATION_REWARD = 'referral_registration_reward'
 REASON_DAYS_REFERRER = 'referral_days_reward'
 REASON_DAYS_REFEREE = 'referral_days_bonus'
+REASON_FIRST_PURCHASE = 'referral_first_purchase'
+REASON_FIRST_PURCHASE_REFEREE = 'referral_first_purchase_referee'
+REASON_FIRST_PURCHASE_REGISTERED = 'referral_first_purchase_registered'
 
 # Строки, где начисление ушло ПРИГЛАШЁННОМУ, а не пригласившему.
 #
@@ -975,7 +978,13 @@ REASON_DAYS_REFEREE = 'referral_days_bonus'
 # пригласившему дни, выданные другому человеку, и каждую пришлось бы чинить
 # отдельно. При зеркалировании чинить нужно ровно те запросы, что считают
 # ``DISTINCT referral_id`` как «мои рефералы» — их два, и оба ниже помечены.
-REFEREE_DIRECTED_REASONS = frozenset({REASON_DAYS_REFEREE})
+REFEREE_DIRECTED_REASONS = frozenset(
+    {
+        REASON_DAYS_REFEREE,
+        REASON_FIRST_PURCHASE_REFEREE,
+        REASON_FIRST_PURCHASE_REGISTERED,
+    }
+)
 
 
 def is_referee_directed(reason: str) -> bool:

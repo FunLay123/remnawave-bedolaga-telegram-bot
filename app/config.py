@@ -468,10 +468,15 @@ class Settings(BaseSettings):
     REFERRAL_NOTIFICATION_RETRY_ATTEMPTS: int = 3
 
     # Схема наград: 'legacy' — прежнее поведение на ключах REFERRAL_* выше,
-    # 'levels' — таблица referral_reward_levels (деньги и/или дни, много уровней).
-    # Значение по умолчанию менять нельзя: смена схемы обязана быть осознанным
-    # действием админа, а не побочным эффектом обновления бота.
+    # 'levels' — таблица referral_reward_levels (деньги и/или дни, много уровней),
+    # 'days_only' — только дни за триал и за первую покупку; деньги, уровни и
+    # вывод отключены. Значение по умолчанию менять нельзя: смена схемы обязана
+    # быть осознанным действием админа, а не побочным эффектом обновления бота.
     REFERRAL_REWARD_SCHEME: str = 'legacy'
+    # Дни в схеме 'days_only'.
+    REFERRAL_TRIAL_BONUS_DAYS: int = 3
+    REFERRAL_FIRST_PURCHASE_BONUS_DAYS: int = 10
+    REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS: int = 30
     # Насколько глубоко подниматься по цепочке пригласивших. Отдельный предохранитель
     # от обхода длинной цепочки на каждом пополнении, даже если уровней настроено больше.
     # Действует только в режиме 'chain': в режиме 'tiers' цепочки нет вовсе.
@@ -3995,6 +4000,9 @@ class Settings(BaseSettings):
             'recurring_commission_tiers': self.REFERRAL_RECURRING_COMMISSION_TIERS,
             'notifications_enabled': self.REFERRAL_NOTIFICATIONS_ENABLED,
             'reward_scheme': self.REFERRAL_REWARD_SCHEME,
+            'trial_bonus_days': self.REFERRAL_TRIAL_BONUS_DAYS,
+            'first_purchase_bonus_days': self.REFERRAL_FIRST_PURCHASE_BONUS_DAYS,
+            'first_purchase_min_period_days': self.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS,
             'levels_mode': self.get_referral_levels_mode(),
             'allow_days_target_choice': self.is_referral_days_target_choice_enabled(),
             'allow_reward_kind_choice': self.is_referral_reward_kind_choice_enabled(),
@@ -4014,6 +4022,10 @@ class Settings(BaseSettings):
     def is_referral_levels_scheme(self) -> bool:
         """Включена ли многоуровневая схема наград."""
         return str(self.REFERRAL_REWARD_SCHEME or '').strip().lower() == 'levels'
+
+    def is_referral_days_only_scheme(self) -> bool:
+        """Дни за триал и за первую покупку; деньги/уровни/вывод отключены."""
+        return str(self.REFERRAL_REWARD_SCHEME or '').strip().lower() == 'days_only'
 
     def get_referral_levels_mode(self) -> str:
         """Что означает номер уровня: глубина цепочки ('chain') или ранг ('tiers').
