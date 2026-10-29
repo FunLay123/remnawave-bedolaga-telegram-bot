@@ -105,6 +105,41 @@ async def test_legacy_summary_keeps_first_topup_counter(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reassigned_referral_moves_paid_count_with_the_invite(monkeypatch):
+    """После передачи реферала счётчик оплативших переезжает вместе с ним.
+
+    Раньше маркеры считались по ``referral_id``: старый пригласивший сохранял
+    оплатившего, хотя приглашённых у него уже не было, и конверсия превышала
+    100%. Теперь оплата считается только у того, к кому реферал привязан сейчас.
+    """
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all([_user(1), _user(2, referred_by_id=1), _user(3)])
+        db.add(_marker(2, 1))
+        await db.commit()
+
+        before = await get_user_referral_summary(db, 1)
+        assert before['invited_count'] == 1
+        assert before['paid_referrals_count'] == 1
+        assert before['conversion_rate'] == 100.0
+
+        # Админ передал реферала 2 другому пригласившему.
+        referred = await db.get(User, 2)
+        referred.referred_by_id = 3
+        await db.commit()
+
+        old_referrer = await get_user_referral_summary(db, 1)
+        new_referrer = await get_user_referral_summary(db, 3)
+
+        assert old_referrer['invited_count'] == 0
+        assert old_referrer['paid_referrals_count'] == 0
+        assert old_referrer['conversion_rate'] == 0.0
+        assert new_referrer['invited_count'] == 1
+        assert new_referrer['paid_referrals_count'] == 1
+        assert new_referrer['conversion_rate'] == 100.0
+
+
+@pytest.mark.asyncio
 async def test_detailed_list_marks_first_purchase_per_referral(monkeypatch):
     """В списке рефералов оплата видна по маркеру, а не по флагу пополнения."""
     async with memory_session(monkeypatch, TABLES) as db:

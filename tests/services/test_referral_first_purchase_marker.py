@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import select
 
+from app.config import settings
 from app.database.models import Base, ReferralEarning, Subscription, SubscriptionStatus, User
 from app.services.referral_purchase_service import (
     backfill_first_purchase_markers,
@@ -56,6 +57,7 @@ def _paid_sub(sub_id: int, user_id: int) -> Subscription:
 
 @pytest.mark.asyncio
 async def test_marker_is_written_once_for_a_paid_referral(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     async with memory_session(monkeypatch, TABLES) as db:
         db.add_all([_user(1), _user(2, referred_by_id=1), _paid_sub(10, 2)])
         await db.commit()
@@ -101,6 +103,7 @@ async def test_backfill_is_idempotent(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_pending_subscription_does_not_write_marker(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     async with memory_session(monkeypatch, TABLES) as db:
         db.add_all(
             [
@@ -117,6 +120,7 @@ async def test_pending_subscription_does_not_write_marker(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_expired_zero_duration_placeholder_does_not_write_marker(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     async with memory_session(monkeypatch, TABLES) as db:
         db.add_all(
             [
@@ -139,6 +143,7 @@ async def test_expired_zero_duration_placeholder_does_not_write_marker(monkeypat
 
 @pytest.mark.asyncio
 async def test_expired_real_subscription_writes_marker(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     async with memory_session(monkeypatch, TABLES) as db:
         db.add_all(
             [
@@ -157,6 +162,24 @@ async def test_expired_real_subscription_writes_marker(monkeypatch):
 
         assert await ensure_marker_for_already_paid_referral(db, 2) is True
         assert await has_first_purchase_marker(db, 2) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('scheme', ['legacy', 'levels'])
+async def test_non_days_only_scheme_writes_no_marker(monkeypatch, scheme):
+    """Маркер принадлежит только схеме «только дни».
+
+    В legacy/levels оплата уже учитывается деньгами и флагами пополнения;
+    маркер там исказил бы счётчик оплативших после переключения схемы.
+    """
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', scheme)
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all([_user(1), _user(2, referred_by_id=1), _paid_sub(10, 2)])
+        await db.commit()
+
+        assert await ensure_marker_for_already_paid_referral(db, 2) is False
+        assert await has_first_purchase_marker(db, 2) is False
+        assert (await db.execute(select(ReferralEarning))).scalars().all() == []
 
 
 @pytest.mark.asyncio

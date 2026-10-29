@@ -52,6 +52,60 @@ def test_simple_subscription_extension_calls_the_first_purchase_hook():
     assert source.index('create_transaction') < source.index('register_first_purchase_after_purchase')
 
 
+def test_simple_subscription_extension_shows_rewarded_days_in_messages():
+    """После награды сообщения показывают срок вместе с бонусными днями.
+
+    ``new_end_date`` считался до хука. Если награда выдана, объект этой сессии
+    помнит старый срок, и без перечитывания админ и пользователь увидели бы
+    дату без +10 дней, хотя она уже в базе.
+    """
+    source = _function_source('app/handlers/subscription/purchase.py', '_extend_existing_subscription')
+
+    assert 'first_purchase_result = await register_first_purchase_after_purchase(' in source
+    hook_index = source.index('register_first_purchase_after_purchase')
+    reward_index = source.index("first_purchase_result.status == 'rewarded'", hook_index)
+    refresh_index = source.index('await db.refresh(current_subscription)', reward_index)
+    admin_index = source.index('send_subscription_extension_notification', refresh_index)
+    message_index = source.index('success_message = (', admin_index)
+
+    assert 'new_end_date = current_subscription.end_date' in source[refresh_index:admin_index]
+    assert hook_index < reward_index < refresh_index < admin_index < message_index
+
+
+MONITORING_FILE = 'app/services/monitoring_service.py'
+
+
+def test_monitoring_autopay_calls_the_first_purchase_hook():
+    """Автоплатёж — такая же оплата и обязан ставить маркер первой покупки.
+
+    Для бесплатно созданной нетриальной подписки (купон/подарок/админка) с
+    автоплатежом это первое реальное списание. Хук стоит после
+    ``create_transaction`` (транзакция уже закоммичена) и получает бота
+    мониторинга. Триальный autopay не затрагивается: запрос в теле функции
+    фильтрует ``is_trial == False``.
+    """
+    function = _function_node(MONITORING_FILE, '_process_autopayments')
+    source = _function_source(MONITORING_FILE, '_process_autopayments')
+
+    hooks = _calls(function, (FIRST_PURCHASE_HOOK,))
+    assert len(hooks) == 1, f'ожидается один вызов {FIRST_PURCHASE_HOOK}, найдено {len(hooks)}'
+    hook = hooks[0]
+
+    assert _keyword_expression(hook, 'referee_id') == 'user.id'
+    assert _keyword_expression(hook, 'subscription_id') == 'subscription.id'
+    assert _keyword_expression(hook, 'duration_days') == 'autopay_period'
+    assert _keyword_expression(hook, 'paid_amount_kopeks') == 'charge_amount'
+    assert _keyword_expression(hook, 'source') == repr('monitoring_autopay')
+    assert _keyword_expression(hook, 'bot') == 'self.bot'
+
+    except_nodes = _nodes_inside_except_handlers(function)
+    commits = [call for call in _calls(function, COMMIT_CALLS) if id(call) not in except_nodes]
+    assert commits
+    assert hook.lineno > max(call.lineno for call in commits), 'хук обязан стоять после коммита платежа'
+
+    assert 'Subscription.is_trial == False' in source, 'запрос autopay обязан исключать триалы'
+
+
 TARIFF_PURCHASE_FILE = 'app/handlers/subscription/tariff_purchase.py'
 FIRST_PURCHASE_HOOK = 'register_first_purchase_after_purchase'
 

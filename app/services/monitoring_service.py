@@ -1863,6 +1863,27 @@ class MonitoringService:
                                 logger.warning('Не удалось создать транзакцию автопродления', user_id=user.id, exc=exc)
                                 transaction = None
 
+                            # Первая оплаченная покупка реферала. У бесплатно
+                            # созданной нетриальной подписки (купон, подарок,
+                            # админка) с включённым автоплатежом это первое
+                            # реальное списание — хук обязан учесть его, как и
+                            # любую другую оплату. Повторные автопродления
+                            # отсекает маркер. Триальный autopay сюда не
+                            # доходит: запрос выше фильтрует is_trial=False.
+                            # Сбой хука не отменяет уже прошедшую оплату.
+                            from app.services.referral_purchase_service import (
+                                register_first_purchase_after_purchase,
+                            )
+
+                            await register_first_purchase_after_purchase(
+                                referee_id=user.id,
+                                subscription_id=subscription.id,
+                                duration_days=autopay_period,
+                                paid_amount_kopeks=charge_amount,
+                                source='monitoring_autopay',
+                                bot=self.bot,
+                            )
+
                             # Отправляем уведомление администраторам
                             try:
                                 from app.services.subscription_renewal_service import with_admin_notification_service

@@ -384,6 +384,13 @@ async def attach_referrer_if_missing(
 
         await ensure_marker_for_already_paid_referral(db, user.id)
     except Exception as error:
+        # Сбой маркера мог оставить сессию в failed-транзакции. Без отката
+        # следующий же запрос в этой общей сессии упадёт PendingRollbackError,
+        # хотя привязка уже состоялась и вызывающий продолжает работу.
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         logger.error(
             'Failed to register first-purchase marker after referral attach',
             user_id=user.id,
@@ -694,9 +701,22 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                 welcome_message = (
                     f'🎉 <b>Добро пожаловать!</b>\n\n'
                     f'Вы перешли по реферальной ссылке пользователя '
-                    f'<b>{html.escape(referrer.full_name)}</b>!\n\n'
-                    f'🎁 Вам +{trial_bonus_days} {_pluralize_days_ru(trial_bonus_days)} к пробному периоду.'
+                    f'<b>{html.escape(referrer.full_name)}</b>!'
                 )
+                # Обещать бонус к пробному периоду можно, только если триал
+                # этому человеку действительно доступен. Выключенная программа,
+                # нулевая длительность или запрет триала для его способа входа
+                # делают обещание невыполнимым — тогда шлём нейтральное
+                # приветствие без строки о бонусе.
+                if (
+                    trial_bonus_days > 0
+                    and settings.is_referral_program_enabled()
+                    and settings.TRIAL_DURATION_DAYS > 0
+                    and not settings.is_trial_disabled_for_user(getattr(new_user, 'auth_type', None))
+                ):
+                    welcome_message += (
+                        f'\n\n🎁 Вам +{trial_bonus_days} {_pluralize_days_ru(trial_bonus_days)} к пробному периоду.'
+                    )
                 await send_referral_notification(
                     bot,
                     new_user.telegram_id,

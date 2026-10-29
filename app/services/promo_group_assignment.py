@@ -120,6 +120,12 @@ async def maybe_assign_promo_group_by_total_spent(
 
     total_spent = await get_user_total_spent_kopeks(db, user_id)
     if total_spent <= 0:
+        # Строка пользователя уже заблокирована выше. Вызывающий (post-commit
+        # хук create_transaction) сразу после возврата может открыть вторую
+        # сессию — реферальный хук делает SELECT ... FOR UPDATE той же строки.
+        # Без коммита блокировка осталась бы за этой сессией, вторая сессия
+        # встала бы в ожидание, а внешний код ждал бы её: взаимная блокировка.
+        await db.commit()
         return None
 
     previous_threshold = user.auto_promo_group_threshold_kopeks or 0
@@ -128,6 +134,9 @@ async def maybe_assign_promo_group_by_total_spent(
     # чтобы промокод-группы всегда очищались при покупке)
     target_group = await _get_best_group_for_spending(db, total_spent)
     if not target_group:
+        # Тот же контракт, что и выше: блокировку строки пользователя нельзя
+        # оставлять за собой — иначе следующая сессия вызывающего повиснет.
+        await db.commit()
         return None
 
     try:

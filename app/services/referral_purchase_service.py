@@ -19,6 +19,7 @@ import structlog
 from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database.crud.subscription import add_reward_days
@@ -87,6 +88,12 @@ async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int
 
     Возвращает ``True``, только если строка действительно создана.
     """
+    # Маркер — часть схемы «только дни»: в legacy/levels награда за первую
+    # покупку не начисляется днями, и маркер там не нужен. Запись маркера в
+    # чужой схеме ещё и испортила бы счётчик оплативших при переключении схемы.
+    if not settings.is_referral_days_only_scheme():
+        return False
+
     user = await db.get(User, user_id)
     if user is None or user.referred_by_id is None:
         return False
@@ -218,11 +225,19 @@ async def _lock_subscription(db: AsyncSession, subscription_id: int, user_id: in
 async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscription | None:
     """Подписка пригласившего, в которую лягут дни.
 
-    Правило выбора то же, что у платной подписки в уровневых наградах: живые
-    нетриальные впереди, при равенстве — более поздний срок, затем меньший id.
-    Истёкшая подписка тоже годится: ``add_reward_days`` поднимет её обратно,
-    кроме заготовки СБП. У заготовки ``start_date == end_date``: она ни разу не
-    оплачена, и реактивация выдала бы пригласившему живые дни бесплатно.
+    Порядок выбора: живая платная (ACTIVE/LIMITED, не триал), затем живой триал,
+    затем истёкшая платная, затем истёкший триал; внутри класса — более поздний
+    срок, затем меньший id. Живая подписка впереди истёкшей: дни к ней не
+    сдвигают часовой пояс доступа, а ``add_reward_days`` истёкшую поднимает.
+    Истёкшая подписка тоже годится, кроме заготовки СБП: у неё
+    ``start_date == end_date``, она ни разу не оплачена, и реактивация выдала бы
+    пригласившему живые дни бесплатно.
+
+    Суточные тарифы исключаются: ``add_reward_days`` продлит ``end_date``, но
+    ежедневное списание продолжит идти, и обещанные дни пригласивший всё равно
+    оплатит из баланса. Награда днями имеет смысл только для подписок с
+    оплаченным сроком.
+
     ``None`` — подписки, куда можно положить награду, нет вовсе. Это
     единственный разрешённый случай «пригласивший без подписки»: пропускается
     только его сторона, приглашённый свою награду получает.
@@ -242,6 +257,7 @@ async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscript
         subscription = (
             await db.execute(
                 select(Subscription)
+                .options(selectinload(Subscription.tariff))
                 .where(Subscription.id == subscription_id)
                 .with_for_update()
                 .execution_options(populate_existing=True)
@@ -272,12 +288,30 @@ async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscript
             and sub.end_date <= sub.start_date
         )
 
-    candidates = [sub for sub in locked if (sub.status or '').lower() in allowed and not _is_abandoned_placeholder(sub)]
+    def _is_daily_tariff(sub: Subscription) -> bool:
+        """Суточный тариф: продление срока не отменяет ежедневное списание."""
+        tariff = sub.tariff
+        return bool(tariff is not None and getattr(tariff, 'is_daily', False))
+
+    def _priority(sub: Subscription) -> int:
+        """Класс подписки в порядке дизайна: живая платная → живой триал →
+        истёкшая платная → истёкший триал."""
+        status = (sub.status or '').lower()
+        trial = bool(sub.is_trial) or status == SubscriptionStatus.TRIAL.value
+        if status == SubscriptionStatus.EXPIRED.value:
+            return 3 if trial else 2
+        return 1 if trial else 0
+
+    candidates = [
+        sub
+        for sub in locked
+        if (sub.status or '').lower() in allowed and not _is_abandoned_placeholder(sub) and not _is_daily_tariff(sub)
+    ]
     if not candidates:
         return None
     candidates.sort(
         key=lambda sub: (
-            bool(sub.is_trial),
+            _priority(sub),
             -(sub.end_date.timestamp() if sub.end_date else 0),
             sub.id,
         )
@@ -365,6 +399,27 @@ async def register_first_purchase(
             await db.commit()
             logger.info(
                 'Referral first purchase registered below bonus period',
+                referee_id=referee_id,
+                referrer_id=referrer_id,
+                duration_days=duration_days,
+                source=source,
+            )
+            return FirstPurchaseResult(
+                status='registered',
+                referee_id=referee_id,
+                referrer_id=referrer_id,
+                referee_subscription_id=referee_subscription_id,
+            )
+
+        if bonus <= 0:
+            # Бонус выключен: дни никому не выдаются, но маркер всё равно
+            # фиксирует первую покупку. Иначе каждая следующая покупка снова
+            # считалась бы первой, и включение бонуса задним числом наградило
+            # бы уже оплаченные покупки.
+            referee_subscription_id = referee_sub.id
+            await db.commit()
+            logger.info(
+                'Referral first purchase registered without bonus days',
                 referee_id=referee_id,
                 referrer_id=referrer_id,
                 duration_days=duration_days,

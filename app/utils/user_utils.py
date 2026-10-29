@@ -123,15 +123,19 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
         # счётчик обязан по-прежнему опираться на флаг пополнения — иначе вся
         # история установки разом покажет ноль оплативших.
         if settings.is_referral_days_only_scheme():
-            # Строка-маркер принадлежит приглашённому (user_id), а на
-            # пригласившего указывает referral_id. DISTINCT страхует от
-            # когда-либо продублированной строки. Полный список рефералов
-            # ради одного счётчика не грузим.
             from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
 
+            # Считаем маркеры только тех приглашённых, кто СЕЙЧАС привязан к
+            # этому пригласившему. Иначе после передачи реферала старому
+            # пригласившему оставался бы оплативший без приглашённого, и
+            # конверсия превышала бы 100%. DISTINCT страхует от когда-либо
+            # продублированной строки маркера.
             paid_referrals_result = await db.execute(
-                select(func.count(func.distinct(ReferralEarning.user_id))).where(
-                    ReferralEarning.referral_id == user_id,
+                select(func.count(func.distinct(ReferralEarning.user_id)))
+                .select_from(ReferralEarning)
+                .join(User, User.id == ReferralEarning.user_id)
+                .where(
+                    User.referred_by_id == user_id,
                     ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
                 )
             )

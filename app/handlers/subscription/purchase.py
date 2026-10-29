@@ -4790,7 +4790,7 @@ async def _extend_existing_subscription(
 
     from app.services.referral_purchase_service import register_first_purchase_after_purchase
 
-    await register_first_purchase_after_purchase(
+    first_purchase_result = await register_first_purchase_after_purchase(
         referee_id=db_user.id,
         subscription_id=current_subscription.id,
         duration_days=period_days,
@@ -4798,6 +4798,15 @@ async def _extend_existing_subscription(
         source='bot_simple_subscription_extend',
         bot=callback.bot,
     )
+
+    if first_purchase_result.status == 'rewarded':
+        # Награда днями записана из другой сессии и уже закоммичена, а объект
+        # этой сессии помнит срок до награды. Перечитываем подписку и
+        # пользователя, чтобы админское уведомление и сообщение об успешном
+        # продлении показали срок вместе с бонусными днями.
+        await db.refresh(current_subscription)
+        await db.refresh(db_user)
+        new_end_date = current_subscription.end_date
 
     # Отправляем уведомление админу
     try:
