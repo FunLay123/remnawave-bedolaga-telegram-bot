@@ -1230,6 +1230,16 @@ class MiniAppSubscriptionPurchaseService:
             payment_method=PaymentMethod.BALANCE,
         )
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=user.id,
+            subscription_id=subscription.id,
+            duration_days=pricing.selection.period.days,
+            paid_amount_kopeks=pricing.final_total,
+            source='miniapp_balance_purchase',
+        )
+
         await db.refresh(user)
         await db.refresh(subscription)
 

@@ -1105,6 +1105,17 @@ class LavaPaymentMixin:
 
             await db.commit()
 
+            from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+            await register_first_purchase_after_purchase(
+                referee_id=record.user_id,
+                subscription_id=record.subscription_id,
+                duration_days=record.charge_days,
+                paid_amount_kopeks=record.amount_kopeks,
+                source='lava_recurring_first_charge',
+                bot=getattr(self, 'bot', None),
+            )
+
             from app.database.crud.transaction import emit_transaction_side_effects
 
             await emit_transaction_side_effects(

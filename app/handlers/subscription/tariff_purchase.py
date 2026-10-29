@@ -2206,6 +2206,17 @@ async def confirm_tariff_purchase(
     except Exception as e:
         logger.error('Ошибка создания транзакции', error=e)
 
+    from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+    await register_first_purchase_after_purchase(
+        referee_id=db_user.id,
+        subscription_id=subscription.id,
+        duration_days=period,
+        paid_amount_kopeks=final_price,
+        source='bot_tariff_purchase',
+        bot=callback.bot,
+    )
+
     # Отправляем уведомление админу
     try:
         admin_notification_service = AdminNotificationService(callback.bot)
@@ -2507,6 +2518,17 @@ async def confirm_daily_tariff_purchase(
         type=TransactionType.SUBSCRIPTION_PAYMENT,
         amount_kopeks=final_daily_price,
         description=f'Покупка суточного тарифа {tariff.name} (первый день)',
+    )
+
+    from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+    await register_first_purchase_after_purchase(
+        referee_id=db_user.id,
+        subscription_id=subscription.id,
+        duration_days=1,
+        paid_amount_kopeks=final_daily_price,
+        source='bot_tariff_purchase',
+        bot=callback.bot,
     )
 
     # Отправляем уведомление админу

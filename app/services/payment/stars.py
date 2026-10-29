@@ -434,6 +434,17 @@ class TelegramStarsMixin:
             description=transaction.description,
         )
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=user.id,
+            subscription_id=subscription.id,
+            duration_days=period_days,
+            paid_amount_kopeks=amount_kopeks,
+            source='stars_simple_subscription',
+            bot=getattr(self, 'bot', None),
+        )
+
         # Consume promo-offer discount (invoice was created with discounted price)
         try:
             from app.utils.promo_offer import consume_user_promo_offer

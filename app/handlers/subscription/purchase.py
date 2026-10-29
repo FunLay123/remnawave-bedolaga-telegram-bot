@@ -2680,6 +2680,17 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
             description=f'Подписка на {period_days} дней ({months_in_period} мес)',
         )
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=subscription.id,
+            duration_days=period_days,
+            paid_amount_kopeks=final_price,
+            source='bot_confirm_purchase',
+            bot=callback.bot,
+        )
+
         try:
             notification_service = AdminNotificationService(callback.bot)
             await notification_service.send_subscription_purchase_notification(

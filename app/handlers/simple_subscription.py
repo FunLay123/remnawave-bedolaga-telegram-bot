@@ -530,6 +530,17 @@ async def handle_simple_subscription_pay_with_balance(
             await callback.answer('❌ Ошибка создания подписки. Средства возвращены на баланс.', show_alert=True)
             return
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=subscription.id,
+            duration_days=subscription_params['period_days'],
+            paid_amount_kopeks=price_kopeks,
+            source='bot_simple_subscription_balance',
+            bot=callback.bot,
+        )
+
         # Обновляем баланс пользователя
         await db.refresh(db_user)
 
@@ -2277,6 +2288,17 @@ async def confirm_simple_subscription_purchase(
             )
             await callback.answer('❌ Ошибка создания подписки. Средства возвращены на баланс.', show_alert=True)
             return
+
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=subscription.id,
+            duration_days=subscription_params['period_days'],
+            paid_amount_kopeks=price_kopeks,
+            source='bot_simple_subscription_balance',
+            bot=callback.bot,
+        )
 
         # Обновляем баланс пользователя
         await db.refresh(db_user)

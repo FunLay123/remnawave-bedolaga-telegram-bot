@@ -1688,6 +1688,17 @@ async def handle_activate_button(callback: types.CallbackQuery, db_user: User, d
                 show_alert=True,
             )
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=(subscription.id if subscription is not None else new_subscription.id),
+            duration_days=best_period,
+            paid_amount_kopeks=(pricing.final_total if subscription is not None else best_price),
+            source='menu_quick_activation',
+            bot=callback.bot,
+        )
+
     except Exception as e:
         user_id_display = db_user.telegram_id or db_user.email or f'#{db_user.id}'
         logger.error('Ошибка автоматической активации для', user_id_display=user_id_display, error=e)
