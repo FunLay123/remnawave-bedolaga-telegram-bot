@@ -27,18 +27,31 @@ def _user(uid: int, referred_by_id: int | None = None) -> User:
     )
 
 
-def _paid_sub(sub_id: int, user_id: int) -> Subscription:
+def _subscription(
+    sub_id: int,
+    user_id: int,
+    *,
+    status: str = SubscriptionStatus.ACTIVE.value,
+    is_trial: bool = False,
+    start_offset_days: int = -1,
+    end_offset_days: int = 30,
+) -> Subscription:
     now = datetime.now(UTC)
     return Subscription(
         id=sub_id,
         user_id=user_id,
-        status=SubscriptionStatus.ACTIVE.value,
-        is_trial=False,
-        start_date=now - timedelta(days=1),
-        end_date=now + timedelta(days=30),
+        remnawave_short_id=f'sub{sub_id}',
+        status=status,
+        is_trial=is_trial,
+        start_date=now + timedelta(days=start_offset_days),
+        end_date=now + timedelta(days=end_offset_days),
         traffic_limit_gb=100,
         device_limit=1,
     )
+
+
+def _paid_sub(sub_id: int, user_id: int) -> Subscription:
+    return _subscription(sub_id, user_id)
 
 
 @pytest.mark.asyncio
@@ -83,4 +96,101 @@ async def test_backfill_is_idempotent(monkeypatch):
         await db.commit()
 
         assert await backfill_first_purchase_markers(db) == 1
+        assert await backfill_first_purchase_markers(db) == 0
+
+
+@pytest.mark.asyncio
+async def test_pending_subscription_does_not_write_marker(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all(
+            [
+                _user(1),
+                _user(2, referred_by_id=1),
+                _subscription(10, 2, status=SubscriptionStatus.PENDING.value),
+            ]
+        )
+        await db.commit()
+
+        assert await ensure_marker_for_already_paid_referral(db, 2) is False
+        assert await has_first_purchase_marker(db, 2) is False
+
+
+@pytest.mark.asyncio
+async def test_expired_zero_duration_placeholder_does_not_write_marker(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all(
+            [
+                _user(1),
+                _user(2, referred_by_id=1),
+                _subscription(
+                    10,
+                    2,
+                    status=SubscriptionStatus.EXPIRED.value,
+                    start_offset_days=0,
+                    end_offset_days=0,
+                ),
+            ]
+        )
+        await db.commit()
+
+        assert await ensure_marker_for_already_paid_referral(db, 2) is False
+        assert await has_first_purchase_marker(db, 2) is False
+
+
+@pytest.mark.asyncio
+async def test_expired_real_subscription_writes_marker(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all(
+            [
+                _user(1),
+                _user(2, referred_by_id=1),
+                _subscription(
+                    10,
+                    2,
+                    status=SubscriptionStatus.EXPIRED.value,
+                    start_offset_days=-60,
+                    end_offset_days=-30,
+                ),
+            ]
+        )
+        await db.commit()
+
+        assert await ensure_marker_for_already_paid_referral(db, 2) is True
+        assert await has_first_purchase_marker(db, 2) is True
+
+
+@pytest.mark.asyncio
+async def test_backfill_skips_placeholders_and_marks_real_subscriptions(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all(
+            [
+                _user(1),
+                _user(2, referred_by_id=1),
+                _user(3, referred_by_id=1),
+                _user(4, referred_by_id=1),
+                _user(5, referred_by_id=1),
+                _subscription(10, 2, status=SubscriptionStatus.PENDING.value),
+                _subscription(
+                    11,
+                    3,
+                    status=SubscriptionStatus.EXPIRED.value,
+                    start_offset_days=0,
+                    end_offset_days=0,
+                ),
+                _subscription(
+                    12,
+                    4,
+                    status=SubscriptionStatus.EXPIRED.value,
+                    start_offset_days=-60,
+                    end_offset_days=-30,
+                ),
+                _subscription(13, 5, status=SubscriptionStatus.ACTIVE.value),
+            ]
+        )
+        await db.commit()
+
+        assert await backfill_first_purchase_markers(db) == 2
+
+        marked_user_ids = set((await db.execute(select(ReferralEarning.user_id))).scalars().all())
+        assert marked_user_ids == {4, 5}
         assert await backfill_first_purchase_markers(db) == 0
