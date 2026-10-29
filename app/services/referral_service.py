@@ -374,6 +374,23 @@ async def attach_referrer_if_missing(
             error=str(exc),
         )
 
+    # Поздняя привязка: реферал мог купить подписку ещё до того, как у него
+    # появился пригласивший. Маркер фиксирует эту покупку как уже учтённую,
+    # чтобы следующая покупка не получила награду за «первую». Маркер только
+    # читает подписки и пишет строку ledger'а — привязка от него не зависит,
+    # поэтому сбой здесь логируется и не откатывает уже состоявшееся прикрепление.
+    try:
+        from app.services.referral_purchase_service import ensure_marker_for_already_paid_referral
+
+        await ensure_marker_for_already_paid_referral(db, user.id)
+    except Exception as error:
+        logger.error(
+            'Failed to register first-purchase marker after referral attach',
+            user_id=user.id,
+            referrer_id=referrer.id,
+            error=str(error),
+        )
+
     return referrer.id
 
 
