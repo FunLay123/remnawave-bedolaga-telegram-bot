@@ -1,6 +1,8 @@
 import ast
 from pathlib import Path
 
+import pytest
+
 
 EXPECTED_FILES = {
     'app/handlers/subscription/purchase.py',
@@ -48,3 +50,104 @@ def test_simple_subscription_extension_calls_the_first_purchase_hook():
     assert 'register_first_purchase_after_purchase' in source
     assert "source='bot_simple_subscription_extend'" in source
     assert source.index('create_transaction') < source.index('register_first_purchase_after_purchase')
+
+
+TARIFF_PURCHASE_FILE = 'app/handlers/subscription/tariff_purchase.py'
+FIRST_PURCHASE_HOOK = 'register_first_purchase_after_purchase'
+
+# Последняя точка «деньги списаны и зафиксированы»: create_transaction
+# коммитит сессию сама, у суточного переключения перед ней есть ещё явный
+# db.commit() смены подписки. Хук обязан стоять после самой поздней из них.
+COMMIT_CALLS = ('create_transaction', 'commit')
+
+
+def _function_node(path: str, name: str) -> ast.AST:
+    source = Path(path).read_text(encoding='utf-8')
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name == name:
+            return node
+    raise AssertionError(f'{name} not found in {path}')
+
+
+def _call_name(call: ast.Call) -> str | None:
+    if isinstance(call.func, ast.Name):
+        return call.func.id
+    if isinstance(call.func, ast.Attribute):
+        return call.func.attr
+    return None
+
+
+def _calls(node: ast.AST, names: tuple[str, ...]) -> list[ast.Call]:
+    return [child for child in ast.walk(node) if isinstance(child, ast.Call) and _call_name(child) in names]
+
+
+def _nodes_inside_except_handlers(function: ast.AST) -> set[int]:
+    """Узлы компенсирующих возвратов в ``except`` — это путь ошибки, не покупки.
+
+    У суточного переключения в обработчике исключения есть собственный
+    ``db.commit()`` возврата. Он идёт ниже хука по тексту, но к успешной
+    оплате отношения не имеет, поэтому при поиске «последнего коммита»
+    такие узлы не учитываются.
+    """
+    inside: set[int] = set()
+    for node in ast.walk(function):
+        if isinstance(node, ast.ExceptHandler):
+            inside.update(id(child) for child in ast.walk(node))
+    return inside
+
+
+def _keyword_expression(call: ast.Call, name: str) -> str:
+    for keyword in call.keywords:
+        if keyword.arg == name:
+            return ast.unparse(keyword.value)
+    raise AssertionError(f'{name} не передан в вызове {_call_name(call)}')
+
+
+@pytest.mark.parametrize(
+    ('function_name', 'source', 'duration_days', 'paid_amount_kopeks'),
+    [
+        ('confirm_tariff_extend', 'bot_tariff_extend', 'period', 'final_price'),
+        ('confirm_tariff_switch', 'bot_tariff_switch', 'period', 'final_price'),
+        ('confirm_daily_tariff_switch', 'bot_daily_tariff_switch', '1', 'final_daily_price'),
+        ('handle_custom_confirm', 'bot_custom_tariff_purchase', 'custom_days', 'total_price'),
+    ],
+)
+def test_tariff_purchase_function_body_registers_first_purchase(
+    function_name: str,
+    source: str,
+    duration_days: str,
+    paid_amount_kopeks: str,
+) -> None:
+    """Проверяем именно тело функции, а не текст модуля.
+
+    Файловая проверка на подстроку пропустила дыру в простом продлении,
+    поэтому здесь хук ищется в AST конкретной функции: ровно один вызов,
+    после последнего коммита платежа и до уведомления админу.
+    """
+    function = _function_node(TARIFF_PURCHASE_FILE, function_name)
+
+    hooks = _calls(function, (FIRST_PURCHASE_HOOK,))
+    assert len(hooks) == 1, f'{function_name}: ожидается один вызов {FIRST_PURCHASE_HOOK}, найдено {len(hooks)}'
+    hook = hooks[0]
+
+    except_nodes = _nodes_inside_except_handlers(function)
+    commits = [call for call in _calls(function, COMMIT_CALLS) if id(call) not in except_nodes]
+    assert commits, f'{function_name}: не найден ни create_transaction, ни commit'
+    last_commit_line = max(call.lineno for call in commits)
+    assert hook.lineno > last_commit_line, (
+        f'{function_name}: хук на строке {hook.lineno} стоит до последнего коммита платежа (строка {last_commit_line})'
+    )
+
+    notifications = _calls(function, ('send_subscription_purchase_notification',))
+    assert notifications, f'{function_name}: не найдено уведомление админу'
+    first_notification_line = min(call.lineno for call in notifications)
+    assert hook.lineno < first_notification_line, (
+        f'{function_name}: хук должен стоять до уведомления админу (строка {first_notification_line})'
+    )
+
+    assert _keyword_expression(hook, 'referee_id') == 'db_user.id'
+    assert _keyword_expression(hook, 'subscription_id') == 'subscription.id'
+    assert _keyword_expression(hook, 'duration_days') == duration_days
+    assert _keyword_expression(hook, 'paid_amount_kopeks') == paid_amount_kopeks
+    assert _keyword_expression(hook, 'source') == repr(source)

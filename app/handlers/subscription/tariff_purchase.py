@@ -1524,6 +1524,17 @@ async def handle_custom_confirm(
             description=f'Покупка тарифа {tariff.name} на {custom_days} дней',
         )
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=subscription.id,
+            duration_days=custom_days,
+            paid_amount_kopeks=total_price,
+            source='bot_custom_tariff_purchase',
+            bot=callback.bot,
+        )
+
         # Отправляем уведомление админу
         try:
             admin_notification_service = AdminNotificationService(callback.bot)
@@ -3177,6 +3188,17 @@ async def confirm_tariff_extend(
             description=f'Продление тарифа {tariff.name} на {period} дней',
         )
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=subscription.id,
+            duration_days=period,
+            paid_amount_kopeks=final_price,
+            source='bot_tariff_extend',
+            bot=callback.bot,
+        )
+
         # Отправляем уведомление админу
         try:
             admin_notification_service = AdminNotificationService(callback.bot)
@@ -4012,6 +4034,17 @@ async def confirm_tariff_switch(
             description=f'Смена тарифа на {tariff.name}',
         )
 
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=subscription.id,
+            duration_days=period,
+            paid_amount_kopeks=final_price,
+            source='bot_tariff_switch',
+            bot=callback.bot,
+        )
+
         # Отправляем уведомление админу
         try:
             admin_notification_service = AdminNotificationService(callback.bot)
@@ -4308,6 +4341,17 @@ async def confirm_daily_tariff_switch(
             type=TransactionType.SUBSCRIPTION_PAYMENT,
             amount_kopeks=final_daily_price,
             description=f'Смена на суточный тариф {tariff.name} (первый день)',
+        )
+
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        await register_first_purchase_after_purchase(
+            referee_id=db_user.id,
+            subscription_id=subscription.id,
+            duration_days=1,
+            paid_amount_kopeks=final_daily_price,
+            source='bot_daily_tariff_switch',
+            bot=callback.bot,
         )
 
         # Отправляем уведомление админу
