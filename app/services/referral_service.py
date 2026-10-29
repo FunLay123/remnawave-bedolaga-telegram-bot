@@ -666,6 +666,10 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
             logger.warning('Self-referral blocked in process_referral_registration', user_id=new_user_id)
             return False
 
+        if settings.is_referral_days_only_scheme():
+            logger.debug('Days-only referral scheme: registration rewards disabled', user_id=new_user_id)
+            return True
+
         new_user = await get_user_by_id(db, new_user_id)
         referrer = await get_user_by_id(db, referrer_id)
 
@@ -1012,6 +1016,10 @@ async def _process_topup_levels(db: AsyncSession, user, topup_amount_kopeks: int
 
 async def process_referral_topup(db: AsyncSession, user_id: int, topup_amount_kopeks: int, bot: Bot = None):
     try:
+        if settings.is_referral_days_only_scheme():
+            logger.debug('Days-only referral scheme: topup rewards disabled', user_id=user_id)
+            return True
+
         user = await get_user_by_id(db, user_id)
         if not user or not user.referred_by_id:
             logger.debug('Пользователь не является рефералом, пропуск комиссии', user_id=user_id)

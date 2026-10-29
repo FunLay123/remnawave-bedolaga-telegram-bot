@@ -1023,6 +1023,9 @@ async def award_referral_rewards(
     Ошибка на одном получателе не должна съедать награды остальных: цепочка
     обрабатывается по звеньям, сбой звена логируется и не прерывает обход.
     """
+    if settings.is_referral_days_only_scheme():
+        return []
+
     from app.database.crud.referral import get_user_campaign_id
 
     components = await build_reward_components(db, referee, event=event, topup_amount_kopeks=topup_amount_kopeks)
