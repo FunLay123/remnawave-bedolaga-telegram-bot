@@ -57,7 +57,7 @@ BUTTON_STYLES: dict[str, ButtonStyle] = {
     'method:stars': ButtonStyle(icon_custom_emoji_id='5460980668378931880'),
     'amount:15000': ButtonStyle(style='primary'),
     'success:main_menu': ButtonStyle(
-        icon_custom_emoji_id='5269735794846769214',
+        icon_custom_emoji_id='5332588449335628124',
         style='primary',
     ),
     # Примеры:
