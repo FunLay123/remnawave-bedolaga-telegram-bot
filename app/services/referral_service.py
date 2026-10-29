@@ -666,10 +666,6 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
             logger.warning('Self-referral blocked in process_referral_registration', user_id=new_user_id)
             return False
 
-        if settings.is_referral_days_only_scheme():
-            logger.debug('Days-only referral scheme: registration rewards disabled', user_id=new_user_id)
-            return True
-
         new_user = await get_user_by_id(db, new_user_id)
         referrer = await get_user_by_id(db, referrer_id)
 
@@ -680,6 +676,56 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
         if new_user.referred_by_id != referrer_id:
             logger.error('Пользователь не привязан к рефереру', new_user_id=new_user_id, referrer_id=referrer_id)
             return False
+
+        if settings.is_referral_days_only_scheme():
+            logger.debug('Days-only referral scheme: registration rewards disabled', user_id=new_user_id)
+
+            try:
+                from app.services.referral_contest_service import referral_contest_service
+
+                await referral_contest_service.on_referral_registration(db, new_user_id)
+            except Exception as exc:
+                logger.debug('Не удалось записать конкурсную регистрацию', exc=exc)
+
+            if bot:
+                from app.utils.pricing_utils import _pluralize_days_ru
+
+                trial_bonus_days = settings.REFERRAL_TRIAL_BONUS_DAYS
+                welcome_message = (
+                    f'🎉 <b>Добро пожаловать!</b>\n\n'
+                    f'Вы перешли по реферальной ссылке пользователя '
+                    f'<b>{html.escape(referrer.full_name)}</b>!\n\n'
+                    f'🎁 Вам +{trial_bonus_days} {_pluralize_days_ru(trial_bonus_days)} к пробному периоду.'
+                )
+                await send_referral_notification(
+                    bot,
+                    new_user.telegram_id,
+                    welcome_message,
+                    user=new_user,
+                    notification_type=NotificationType.REFERRAL_WELCOME,
+                    referrer_name=referrer.full_name,
+                )
+
+                first_purchase_bonus_days = settings.REFERRAL_FIRST_PURCHASE_BONUS_DAYS
+                inviter_message = (
+                    f'👥 <b>Новый реферал!</b>\n\n'
+                    f'По вашей ссылке зарегистрировался пользователь '
+                    f'<b>{html.escape(new_user.full_name)}</b>!\n\n'
+                    f'🎁 Когда он впервые купит подписку от '
+                    f'{settings.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS} дней, '
+                    f'вы получите +{first_purchase_bonus_days} '
+                    f'{_pluralize_days_ru(first_purchase_bonus_days)}.'
+                )
+                await send_referral_notification(
+                    bot,
+                    referrer.telegram_id,
+                    inviter_message,
+                    user=referrer,
+                    referral_name=new_user.full_name,
+                    notification_type=NotificationType.REFERRAL_REGISTERED,
+                )
+
+            return True
 
         # Cross-session de-dup. Bot and cabinet run on separate
         # ``AsyncSessionLocal`` instances; the per-session idempotency
