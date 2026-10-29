@@ -66,6 +66,28 @@ async def show_referral_info(callback: types.CallbackQuery, db_user: User, db: A
         await callback.answer(texts.t('REFERRAL_CODE_NOT_ASSIGNED', 'Реферальный код не назначен'), show_alert=True)
         return
 
+    if settings.is_referral_days_only_scheme():
+        from app.utils.referral_ui import (
+            build_days_only_referral_screen,
+            ensure_subscriptions_loaded,
+            is_trial_available_for_referral,
+        )
+
+        await ensure_subscriptions_loaded(db, db_user)
+
+        bot_username = (await callback.bot.get_me()).username
+        bot_referral_link = settings.get_bot_referral_link(db_user.referral_code, bot_username)
+        summary = await get_user_referral_summary(db, db_user.id)
+        text, keyboard = build_days_only_referral_screen(
+            user=db_user,
+            summary=summary,
+            bot_referral_link=bot_referral_link,
+            trial_available=is_trial_available_for_referral(db_user),
+        )
+        await edit_or_answer_photo(callback, text, keyboard)
+        await callback.answer()
+        return
+
     summary = await get_user_referral_summary(db, db_user.id)
 
     bot_username = (await callback.bot.get_me()).username
