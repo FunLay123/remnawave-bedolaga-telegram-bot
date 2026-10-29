@@ -117,10 +117,20 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
         invited_count_result = await db.execute(select(func.count(User.id)).where(User.referred_by_id == user_id))
         invited_count = invited_count_result.scalar() or 0
 
-        referrals_result = await db.execute(select(User).where(User.referred_by_id == user_id))
-        referrals = referrals_result.scalars().all()
+        # «Оплатил» — это маркер первой покупки, а не has_made_first_topup:
+        # в схеме «только дни» оплата подписки не пополняет баланс, поэтому
+        # флаг пополнения у оплатившего навсегда остаётся False. Строка-маркер
+        # принадлежит приглашённому (user_id), а на пригласившего указывает
+        # referral_id. Полный список рефералов ради одного счётчика не грузим.
+        from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
 
-        paid_referrals_count = sum(1 for ref in referrals if ref.has_made_first_topup)
+        paid_referrals_result = await db.execute(
+            select(func.count(func.distinct(ReferralEarning.user_id))).where(
+                ReferralEarning.referral_id == user_id,
+                ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+            )
+        )
+        paid_referrals_count = int(paid_referrals_result.scalar() or 0)
 
         # Дни идут отдельной суммой: в копейках такая награда равна нулю, и без
         # своего итога пользователь, которому программа платит днями, видит на
@@ -250,6 +260,24 @@ async def get_detailed_referral_list(db: AsyncSession, user_id: int, limit: int 
         total_count_result = await db.execute(select(func.count(User.id)).where(User.referred_by_id == user_id))
         total_count = total_count_result.scalar() or 0
 
+        # Маркер первой покупки — одним запросом на страницу, а не по запросу
+        # на каждого реферала. В схеме «только дни» это единственный источник
+        # правды об оплате: has_made_first_topup там не выставляется.
+        from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
+
+        referral_ids = [referral.id for referral in referrals]
+        referrals_with_first_purchase: set[int] = set()
+        if referral_ids:
+            markers_result = await db.execute(
+                select(ReferralEarning.user_id)
+                .where(
+                    ReferralEarning.user_id.in_(referral_ids),
+                    ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+                )
+                .distinct()
+            )
+            referrals_with_first_purchase = set(markers_result.scalars().all())
+
         detailed_referrals = []
         for referral in referrals:
             earnings_result = await db.execute(
@@ -293,6 +321,7 @@ async def get_detailed_referral_list(db: AsyncSession, user_id: int, limit: int 
                     'days_earned': int(days_earned_from_referral or 0),
                     'last_activity': referral.last_activity,
                     'has_made_first_topup': referral.has_made_first_topup,
+                    'has_first_purchase': referral.id in referrals_with_first_purchase,
                     'balance_kopeks': referral.balance_kopeks,
                     'total_earned_kopeks': total_earned_from_referral,
                     'topups_count': topups_count,
