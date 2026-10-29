@@ -346,5 +346,5 @@ async def test_topup_success_keyboard_without_cart_points_to_main_menu() -> None
     assert button.text == 'Главное меню'
     assert button.callback_data == 'back_to_menu'
     assert button.style == 'primary'
-    assert button.icon_custom_emoji_id == '5269735794846769214'
+    assert button.icon_custom_emoji_id == '5314310000531766389'
     assert button.web_app is None
