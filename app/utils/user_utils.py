@@ -117,19 +117,31 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
         invited_count_result = await db.execute(select(func.count(User.id)).where(User.referred_by_id == user_id))
         invited_count = invited_count_result.scalar() or 0
 
-        # «Оплатил» — это маркер первой покупки, а не has_made_first_topup:
-        # в схеме «только дни» оплата подписки не пополняет баланс, поэтому
-        # флаг пополнения у оплатившего навсегда остаётся False. Строка-маркер
-        # принадлежит приглашённому (user_id), а на пригласившего указывает
-        # referral_id. Полный список рефералов ради одного счётчика не грузим.
-        from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
+        # «Оплатил» зависит от схемы. Маркеры пишет только режим «только дни»:
+        # в нём оплата подписки не пополняет баланс, и has_made_first_topup у
+        # оплатившего навсегда остаётся False. В legacy/levels маркеров нет, и
+        # счётчик обязан по-прежнему опираться на флаг пополнения — иначе вся
+        # история установки разом покажет ноль оплативших.
+        if settings.is_referral_days_only_scheme():
+            # Строка-маркер принадлежит приглашённому (user_id), а на
+            # пригласившего указывает referral_id. DISTINCT страхует от
+            # когда-либо продублированной строки. Полный список рефералов
+            # ради одного счётчика не грузим.
+            from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
 
-        paid_referrals_result = await db.execute(
-            select(func.count(func.distinct(ReferralEarning.user_id))).where(
-                ReferralEarning.referral_id == user_id,
-                ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+            paid_referrals_result = await db.execute(
+                select(func.count(func.distinct(ReferralEarning.user_id))).where(
+                    ReferralEarning.referral_id == user_id,
+                    ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+                )
             )
-        )
+        else:
+            paid_referrals_result = await db.execute(
+                select(func.count(User.id)).where(
+                    User.referred_by_id == user_id,
+                    User.has_made_first_topup.is_(True),
+                )
+            )
         paid_referrals_count = int(paid_referrals_result.scalar() or 0)
 
         # Дни идут отдельной суммой: в копейках такая награда равна нулю, и без
@@ -263,18 +275,21 @@ async def get_detailed_referral_list(db: AsyncSession, user_id: int, limit: int 
         # Маркер первой покупки — одним запросом на страницу, а не по запросу
         # на каждого реферала. В схеме «только дни» это единственный источник
         # правды об оплате: has_made_first_topup там не выставляется.
+        # referral_id == user_id обязателен: после передачи реферала другому
+        # пригласившему старый маркер не должен всплывать в чужом списке.
         from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
 
         referral_ids = [referral.id for referral in referrals]
         referrals_with_first_purchase: set[int] = set()
         if referral_ids:
+            # DISTINCT не нужен: повторы схлопнет set, а группировка по
+            # referral_id здесь не выполняется — фильтр лишь проверяет пару.
             markers_result = await db.execute(
-                select(ReferralEarning.user_id)
-                .where(
+                select(ReferralEarning.user_id).where(
                     ReferralEarning.user_id.in_(referral_ids),
+                    ReferralEarning.referral_id == user_id,
                     ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
                 )
-                .distinct()
             )
             referrals_with_first_purchase = set(markers_result.scalars().all())
 

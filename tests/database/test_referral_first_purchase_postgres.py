@@ -1,10 +1,13 @@
 """Конкурентная проверка: первая покупка реферала награждается ровно один раз.
 
-Тест идёт только на настоящем PostgreSQL из ``TEST_POSTGRES_DSN``: SQLite молча
-игнорирует ``FOR UPDATE``, поэтому на нём гонка выглядит проверенной, не будучи
-проверенной вовсе. База из ``TEST_POSTGRES_DSN`` обязана быть выделенной
-тестовой — тест сносит и создаёт схему заново. Без переменной тест пропускается,
-чтобы окружение без PostgreSQL не роняло прогон.
+Тест идёт только на настоящем PostgreSQL: SQLite молча игнорирует ``FOR UPDATE``,
+поэтому на нём гонка выглядит проверенной, не будучи проверенной вовсе. База
+берётся из ``TEST_POSTGRES_DSN`` (явное переопределение) или из общей тестовой
+переменной ``TEST_DATABASE_URL``; без базы тест пропускается, а под
+``REQUIRE_POSTGRES_TESTS=1`` — падает, чтобы CI не считал пропуск успехом.
+
+База обязана быть выделенной тестовой: тест сносит и создаёт схему заново.
+DSN, совпавший с боевым ``DATABASE_URL``, отвергается до любых DDL.
 """
 
 import asyncio
@@ -13,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -24,23 +28,40 @@ from app.services.referral_reward_service import (
     REASON_FIRST_PURCHASE_REFEREE,
     REASON_FIRST_PURCHASE_REGISTERED,
 )
-from tests.fixtures.postgres_db import real_asyncpg
+from tests.fixtures.postgres_db import real_asyncpg, require_postgres_dsn
 
 
-pytestmark = pytest.mark.skipif(
-    not os.getenv('TEST_POSTGRES_DSN'),
-    reason='PostgreSQL-only concurrency test',
-)
+pytestmark = pytest.mark.postgres
 
 
-def _test_dsn() -> str:
-    """DSN тестовой базы; боевой DATABASE_URL отвергается до любых DDL."""
-    dsn = os.environ['TEST_POSTGRES_DSN']
-    if dsn.strip() == str(settings.DATABASE_URL or '').strip():
-        pytest.fail(
-            'TEST_POSTGRES_DSN совпадает с DATABASE_URL: тест пересоздаёт схему и не должен идти по боевой базе'
-        )
-    return dsn
+def _same_database(left: URL, right: URL) -> bool:
+    """Одна и та же база, даже если драйвер в URL записан по-разному."""
+    return (
+        left.get_backend_name() == right.get_backend_name()
+        and left.username == right.username
+        and left.password == right.password
+        and left.host == right.host
+        and left.port == right.port
+        and left.database == right.database
+    )
+
+
+def _concurrency_dsn() -> str:
+    """DSN выделенной тестовой базы для конкурентной проверки."""
+    override = os.environ.get('TEST_POSTGRES_DSN', '').strip()
+    # require_postgres_dsn() = TEST_DATABASE_URL, иначе skip; под
+    # REQUIRE_POSTGRES_TESTS=1 — падение. Так CI без базы не зеленеет.
+    raw = override or require_postgres_dsn()
+
+    test_url = make_url(raw)
+    if test_url.get_backend_name() != 'postgresql':
+        pytest.fail(f'Для конкурентной проверки нужен PostgreSQL, а не {test_url.get_backend_name()}')
+
+    configured = settings.DATABASE_URL
+    if configured and _same_database(test_url, make_url(str(configured))):
+        pytest.fail('Тестовая база совпадает с DATABASE_URL: тест пересоздаёт схему и не должен идти по боевой базе')
+
+    return raw
 
 
 @pytest.mark.asyncio
@@ -56,7 +77,7 @@ async def test_concurrent_first_purchase_grants_once(monkeypatch):
     # NullPool: два конкурентных вызова обязаны получить два разных соединения,
     # иначе блокировка строки проверялась бы на соединении самой себя.
     with real_asyncpg():
-        engine = create_async_engine(_test_dsn(), poolclass=NullPool)
+        engine = create_async_engine(_concurrency_dsn(), poolclass=NullPool)
     maker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
 
     try:
@@ -69,11 +90,11 @@ async def test_concurrent_first_purchase_grants_once(monkeypatch):
                 [
                     User(id=1, telegram_id=1001, first_name='R', language='ru', balance_kopeks=0),
                     User(id=2, telegram_id=1002, first_name='F', language='ru', balance_kopeks=0, referred_by_id=1),
-                    # short_id уникален: у двух подписок не может быть одинакового ''.
+                    # short_id уникален и ограничен 16 символами.
                     Subscription(
                         id=10,
                         user_id=2,
-                        remnawave_short_id='concurrency-referee',
+                        remnawave_short_id='conc-referee',
                         status=SubscriptionStatus.ACTIVE.value,
                         is_trial=False,
                         start_date=now - timedelta(days=1),
@@ -84,7 +105,7 @@ async def test_concurrent_first_purchase_grants_once(monkeypatch):
                     Subscription(
                         id=11,
                         user_id=1,
-                        remnawave_short_id='concurrency-referrer',
+                        remnawave_short_id='conc-referrer',
                         status=SubscriptionStatus.ACTIVE.value,
                         is_trial=False,
                         start_date=now - timedelta(days=1),
