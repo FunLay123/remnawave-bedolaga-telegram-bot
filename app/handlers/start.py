@@ -626,9 +626,9 @@ async def _activate_pending_trial(
             trial_squad_uuid = await get_random_trial_squad_uuid(db)
             trial_squads = [trial_squad_uuid] if trial_squad_uuid else []
 
-        from app.services.trial_activation_service import get_effective_trial_days
+        from app.services.trial_activation_service import get_effective_trial_days_from_db
 
-        effective_trial_days = get_effective_trial_days(user, settings.TRIAL_DURATION_DAYS)
+        effective_trial_days = await get_effective_trial_days_from_db(db, user, trial_tariff)
 
         subscription = await create_trial_subscription(
             db=db,

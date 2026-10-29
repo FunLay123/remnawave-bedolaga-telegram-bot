@@ -91,6 +91,7 @@ from app.services.trial_activation_service import (
     TrialPaymentInsufficientFunds,
     charge_trial_activation_if_required,
     get_effective_trial_days,
+    get_effective_trial_days_from_db,
     preview_trial_activation_charge,
     revert_trial_activation,
     rollback_trial_subscription_activation,
@@ -3518,8 +3519,9 @@ async def get_subscription_details(
     referral_info = await _build_referral_info(db, user)
 
     trial_available = _is_trial_available_for_user(user)
-    # Приглашённому показываем базовую длительность вместе с бонусом.
-    _effective_trial_days = get_effective_trial_days(user, settings.TRIAL_DURATION_DAYS)
+    # Приглашённому показываем базовую длительность вместе с бонусом; база —
+    # триальный тариф, если он задан, иначе глобальная настройка.
+    _effective_trial_days = await get_effective_trial_days_from_db(db, user)
     trial_duration_days = _effective_trial_days if _effective_trial_days > 0 else None
     trial_price_kopeks = settings.get_trial_activation_price()
     trial_payment_required = settings.is_trial_paid_activation_enabled() and trial_price_kopeks > 0

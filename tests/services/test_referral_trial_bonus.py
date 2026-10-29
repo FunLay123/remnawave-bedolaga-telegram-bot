@@ -8,7 +8,10 @@ import pytest
 
 from app.config import settings
 from app.database.crud.subscription import activate_pending_trial_subscription
-from app.services.trial_activation_service import get_effective_trial_days
+from app.services.trial_activation_service import (
+    get_effective_trial_days,
+    get_effective_trial_days_from_db,
+)
 
 
 def test_referred_user_gets_three_extra_days(monkeypatch):
@@ -29,6 +32,49 @@ def test_non_referred_or_disabled_program_gets_base_days(monkeypatch):
 def test_zero_base_days_does_not_create_a_trial(monkeypatch):
     monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     assert get_effective_trial_days(SimpleNamespace(referred_by_id=1), 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_db_resolver_without_trial_tariff_uses_global_base(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'TRIAL_DURATION_DAYS', 3)
+    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: True)
+    monkeypatch.setattr(type(settings), 'get_trial_tariff_id', lambda self: 0)
+    monkeypatch.setattr('app.database.crud.tariff.get_trial_tariff', AsyncMock(return_value=None))
+
+    user = SimpleNamespace(referred_by_id=1)
+    assert await get_effective_trial_days_from_db(AsyncMock(), user) == 6
+
+
+@pytest.mark.asyncio
+async def test_db_resolver_uses_trial_tariff_duration(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'TRIAL_DURATION_DAYS', 3)
+    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: True)
+
+    user = SimpleNamespace(referred_by_id=1)
+    trial_tariff = SimpleNamespace(trial_duration_days=7)
+    assert await get_effective_trial_days_from_db(AsyncMock(), user, trial_tariff) == 10
+
+
+@pytest.mark.asyncio
+async def test_db_resolver_non_referred_gets_base(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'TRIAL_DURATION_DAYS', 3)
+    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
+
+    user = SimpleNamespace(referred_by_id=None)
+    assert await get_effective_trial_days_from_db(AsyncMock(), user) == 3
+
+
+@pytest.mark.asyncio
+async def test_db_resolver_zero_global_base_stays_zero(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'TRIAL_DURATION_DAYS', 0)
+    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
+
+    user = SimpleNamespace(referred_by_id=1)
+    assert await get_effective_trial_days_from_db(AsyncMock(), user) == 0
 
 
 @pytest.mark.asyncio

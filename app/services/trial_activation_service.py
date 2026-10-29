@@ -51,6 +51,32 @@ def get_effective_trial_days(user: User, base_days: int) -> int:
     return base + max(0, int(settings.REFERRAL_TRIAL_BONUS_DAYS))
 
 
+async def get_effective_trial_days_from_db(
+    db: AsyncSession,
+    user: User,
+    trial_tariff: object | None = None,
+) -> int:
+    """Эффективный срок триала с базой из триального тарифа, если он задан.
+
+    Единый резолвер для точек, где тарифный ``trial_duration_days`` иначе
+    терялся бы: предпросмотр мини-аппа и диплинк-триал должны показывать и
+    выдавать тот же срок, что и остальные входы.
+    """
+    base_days = settings.TRIAL_DURATION_DAYS
+    if settings.is_tariffs_mode():
+        if trial_tariff is None:
+            from app.database.crud.tariff import get_tariff_by_id, get_trial_tariff
+
+            trial_tariff = await get_trial_tariff(db)
+            if trial_tariff is None:
+                trial_tariff_id = settings.get_trial_tariff_id()
+                if trial_tariff_id > 0:
+                    trial_tariff = await get_tariff_by_id(db, trial_tariff_id)
+        if trial_tariff is not None:
+            base_days = getattr(trial_tariff, 'trial_duration_days', None) or base_days
+    return get_effective_trial_days(user, base_days)
+
+
 def get_trial_activation_charge_amount() -> int:
     """Returns the configured activation charge in kopeks if payment is enabled."""
 
