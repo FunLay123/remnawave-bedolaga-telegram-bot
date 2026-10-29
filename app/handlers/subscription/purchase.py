@@ -60,6 +60,7 @@ from app.services.trial_activation_service import (
 from app.services.user_cart_service import user_cart_service
 from app.utils.decorators import error_handler
 from app.utils.legacy_subscription import is_legacy_subscription as _legacy_subscription
+from app.utils.photo_message import edit_or_answer_photo
 
 
 logger = structlog.get_logger(__name__)
@@ -799,7 +800,13 @@ def _get_trial_payment_keyboard(language: str, can_pay_from_balance: bool = Fals
     return types.InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-async def activate_trial(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+async def activate_trial(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    *,
+    from_referral: bool = False,
+):
     from app.services.trial_activation_service import get_trial_activation_charge_amount
 
     texts = get_texts(db_user.language)
@@ -1335,6 +1342,37 @@ async def activate_trial(callback: types.CallbackQuery, db_user: User, db: Async
 
         await callback.message.edit_text(failure_text, reply_markup=get_back_keyboard(db_user.language))
         await callback.answer()
+        return
+
+    if from_referral:
+        if getattr(db_user, 'referral_code', None):
+            from app.utils.referral_ui import (
+                build_days_only_referral_screen,
+                is_trial_available_for_referral,
+            )
+            from app.utils.user_utils import get_user_referral_summary
+
+            # После активации в объекте пользователя может ещё не быть новой
+            # подписки: без перезагрузки экран показал бы «нет подписки» и
+            # предложил триал, который только что выдали.
+            await db.refresh(db_user, ['subscriptions'])
+            summary = await get_user_referral_summary(db, db_user.id)
+            bot_username = (await callback.bot.get_me()).username
+            link = settings.get_bot_referral_link(db_user.referral_code, bot_username)
+            text, keyboard = build_days_only_referral_screen(
+                user=db_user,
+                summary=summary,
+                bot_referral_link=link,
+                trial_available=is_trial_available_for_referral(db_user),
+            )
+            await edit_or_answer_photo(callback, text, keyboard)
+
+        try:
+            await callback.answer('Триал активирован')
+        except Exception as error:
+            # Callback query мог истечь, пока шла синхронизация с панелью.
+            # Экран уже обновлён, и ронять активацию из-за тоста нельзя.
+            logger.warning('Не удалось показать уведомление о триале из партнёрки', error=error)
         return
 
     await callback.answer()

@@ -21,6 +21,7 @@ from app.services.referral_reward_service import format_reward_total
 from app.services.referral_withdrawal_service import referral_withdrawal_service
 from app.states import ReferralWithdrawalStates
 from app.utils.photo_message import edit_or_answer_photo
+from app.utils.referral_ui import ensure_subscriptions_loaded, is_trial_available_for_referral
 from app.utils.user_utils import (
     get_detailed_referral_list,
     get_effective_referral_commission_percent,
@@ -374,6 +375,28 @@ async def show_referral_info(callback: types.CallbackQuery, db_user: User, db: A
     await callback.answer()
 
 
+async def start_trial_from_referral(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+):
+    """Активирует триал из CTA на экране партнёрки.
+
+    Проверка дублируется сознательно: кнопка живёт в старом сообщении, и между
+    её показом и нажатием триал мог уже стать недоступен (например, подписка
+    появилась с другого устройства).
+    """
+    await ensure_subscriptions_loaded(db, db_user)
+
+    if not is_trial_available_for_referral(db_user):
+        await callback.answer('Триал недоступен', show_alert=True)
+        return
+
+    from app.handlers.subscription.purchase import activate_trial
+
+    await activate_trial(callback, db_user, db, from_referral=True)
+
+
 async def show_referral_qr(
     callback: types.CallbackQuery,
     db_user: User,
@@ -433,6 +456,10 @@ async def show_detailed_referral_list(callback: types.CallbackQuery, db_user: Us
     texts = get_texts(db_user.language)
 
     referrals_data = await get_detailed_referral_list(db, db_user.id, limit=10, offset=(page - 1) * 10)
+
+    if settings.is_referral_days_only_scheme():
+        await _show_days_only_referral_list(callback, db_user, db, referrals_data, page)
+        return
 
     if not referrals_data['referrals']:
         await edit_or_answer_photo(
@@ -544,6 +571,74 @@ async def show_detailed_referral_list(callback: types.CallbackQuery, db_user: Us
         text,
         types.InlineKeyboardMarkup(inline_keyboard=keyboard),
     )
+    await callback.answer()
+
+
+async def _show_days_only_referral_list(callback, db_user, db, referrals_data, page: int) -> None:
+    """Список рефералов для схемы «только дни».
+
+    Денег здесь нет: оплата подтверждается маркером первой покупки, наградой
+    считаются дни. «Пополнений» и «Заработано с него» в этой схеме либо всегда
+    ноль, либо вводят в заблуждение.
+    """
+    from app.utils.user_utils import get_user_referral_summary
+
+    summary = await get_user_referral_summary(db, db_user.id)
+
+    if not referrals_data['referrals']:
+        await edit_or_answer_photo(
+            callback,
+            '<blockquote>👥 У вас пока нет рефералов.</blockquote>',
+            types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(text='Назад', callback_data='menu_referrals')]]
+            ),
+        )
+        await callback.answer()
+        return
+
+    text = (
+        '<tg-emoji emoji-id="5258274739041883702">👥</tg-emoji> <b>Мои рефералы</b>\n\n'
+        f'Приглашено {int(summary.get("invited_count") or 0)} · '
+        f'Оплатили {int(summary.get("paid_referrals_count") or 0)}\n'
+        f'Получено +{int(summary.get("total_earned_days") or 0)} дн.\n\n'
+    )
+    for item in referrals_data['referrals']:
+        name = f'@{item["username"]}' if item.get('username') else html_escape(str(item.get('full_name') or ''))
+        if item.get('has_first_purchase'):
+            text += (
+                '<tg-emoji emoji-id="5449444442056441600">•</tg-emoji> '
+                f'{name} — <tg-emoji emoji-id="5116414868357907335">✅</tg-emoji> оплатил'
+            )
+            if item.get('days_earned'):
+                text += f', +{int(item["days_earned"])} дн.'
+        else:
+            text += (
+                '<tg-emoji emoji-id="5449444442056441600">•</tg-emoji> '
+                f'{name} — <tg-emoji emoji-id="5123359615727174427">⏳</tg-emoji> пробует'
+            )
+        text += '\n'
+
+    rows = []
+    navigation = []
+    if referrals_data['has_prev']:
+        navigation.append(
+            types.InlineKeyboardButton(
+                text='←',
+                callback_data=f'referral_list_page_{page - 1}',
+            )
+        )
+    if referrals_data['has_next']:
+        navigation.append(
+            types.InlineKeyboardButton(
+                text='→',
+                callback_data=f'referral_list_page_{page + 1}',
+            )
+        )
+    if navigation:
+        rows.append(navigation)
+    rows.append([types.InlineKeyboardButton(text='Назад', callback_data='menu_referrals')])
+
+    await edit_or_answer_photo(callback, text, types.InlineKeyboardMarkup(inline_keyboard=rows))
     await callback.answer()
 
 
@@ -1073,6 +1168,8 @@ async def cancel_withdrawal_request(callback: types.CallbackQuery, db_user: User
 
 def register_handlers(dp: Dispatcher):
     dp.callback_query.register(show_referral_info, F.data == 'menu_referrals')
+
+    dp.callback_query.register(start_trial_from_referral, F.data == 'referral_start_trial')
 
     dp.callback_query.register(create_invite_message, F.data == 'referral_create_invite')
 
