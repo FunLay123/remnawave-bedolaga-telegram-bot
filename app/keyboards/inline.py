@@ -655,6 +655,17 @@ def get_main_menu_keyboard(
         ],
     ]
 
+    if settings.is_referral_program_enabled():
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text='Партнёрка',
+                    callback_data='menu_referrals',
+                    icon_custom_emoji_id='5343636681473935403',
+                )
+            ]
+        )
+
     try:
         from app.services.support_settings_service import SupportSettingsService
 
