@@ -1191,6 +1191,58 @@ async def _drop_orphan_premium_states(db: AsyncSession, subscription: Subscripti
         )
 
 
+async def add_reward_days(
+    db: AsyncSession,
+    subscription: Subscription,
+    days: int,
+) -> Subscription | None:
+    """Добавить бонусные дни, не применяя платёжные побочки.
+
+    В отличие от ``extend_subscription`` этот helper не сбрасывает трафик, не
+    выключает другие триалы и не делает housekeeping докупок. Он только
+    продлевает срок, поднимает истёкшую подписку и чистит напоминания.
+    """
+    if days <= 0:
+        return None
+
+    result = await db.execute(
+        select(Subscription)
+        .where(Subscription.id == subscription.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    locked = result.scalar_one_or_none()
+    if locked is None:
+        return None
+
+    status = (locked.status or '').lower()
+    if status in (SubscriptionStatus.PENDING.value, SubscriptionStatus.DISABLED.value):
+        return None
+    if status not in (
+        SubscriptionStatus.ACTIVE.value,
+        SubscriptionStatus.TRIAL.value,
+        SubscriptionStatus.LIMITED.value,
+        SubscriptionStatus.EXPIRED.value,
+    ):
+        return None
+
+    from app.services.grace_access_echo import undo_grace_overlay_echo
+
+    await undo_grace_overlay_echo(db, locked)
+
+    now = datetime.now(UTC)
+    base = locked.end_date if locked.end_date and locked.end_date > now else now
+    locked.end_date = base + timedelta(days=days)
+
+    if status == SubscriptionStatus.EXPIRED.value:
+        locked.status = SubscriptionStatus.TRIAL.value if locked.is_trial else SubscriptionStatus.ACTIVE.value
+
+    locked.updated_at = now
+    await clear_notifications(db, locked.id, commit=False)
+    await db.flush()
+    return locked
+
+
 async def extend_subscription(
     db: AsyncSession,
     subscription: Subscription,
