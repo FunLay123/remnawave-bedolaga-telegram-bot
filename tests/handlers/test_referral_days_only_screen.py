@@ -1,5 +1,10 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+import app.handlers.referral as referral_handler
+from app.config import settings
 from app.database.models import SubscriptionStatus
 from app.utils.referral_ui import build_days_only_referral_screen
 
@@ -90,3 +95,49 @@ def test_no_subscription_screen_falls_back_to_subscription_cta():
     assert keyboard.inline_keyboard[0][0].callback_data == 'menu_subscription'
     assert keyboard.inline_keyboard[0][0].style == 'primary'
     assert keyboard.inline_keyboard[0][0].icon_custom_emoji_id == '5314310000531766389'
+
+
+def test_terms_block_uses_referral_settings(monkeypatch):
+    monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 7)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_BONUS_DAYS', 21)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS', 60)
+
+    user = _user(subscriptions=[_sub(SubscriptionStatus.ACTIVE.value)])
+    text, _keyboard = build_days_only_referral_screen(
+        user=user,
+        summary={'invited_count': 0, 'paid_referrals_count': 0, 'total_earned_days': 0},
+        bot_referral_link='https://t.me/bot?start=ref_ABC123',
+        trial_available=False,
+    )
+
+    assert '• +7 дней к триалу' in text
+    assert '• +21 день вам и другу' in text
+    assert 'за первую покупку от 60 дней' in text
+
+
+@pytest.mark.asyncio
+async def test_show_referral_info_renders_days_only_screen_as_text(monkeypatch):
+    """В режиме логотипа фото-сообщение ломает CTA: экран обязан быть текстовым."""
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', True)
+
+    captured = {}
+
+    async def fake_summary(db, user_id):
+        return {'invited_count': 0, 'paid_referrals_count': 0, 'total_earned_days': 0}
+
+    async def fake_edit(callback, text, keyboard, parse_mode='HTML', *, force_text=False):
+        captured['force_text'] = force_text
+
+    monkeypatch.setattr(referral_handler, 'get_user_referral_summary', fake_summary)
+    monkeypatch.setattr(referral_handler, 'is_trial_available_for_referral', lambda user: True)
+    monkeypatch.setattr(referral_handler, 'edit_or_answer_photo', fake_edit)
+
+    callback = MagicMock()
+    callback.bot.get_me = AsyncMock(return_value=SimpleNamespace(username='bot'))
+    callback.answer = AsyncMock()
+
+    await referral_handler.show_referral_info(callback, _user(subscriptions=[]), SimpleNamespace())
+
+    assert captured['force_text'] is True
+    callback.answer.assert_awaited_once()

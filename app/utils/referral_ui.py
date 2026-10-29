@@ -84,6 +84,16 @@ async def ensure_subscriptions_loaded(db, user) -> None:
         await db.refresh(user, ['subscriptions'])
 
 
+def _days_word(days: int) -> str:
+    """Склонение слова «день» для числа в подписи бонуса."""
+    days = abs(int(days))
+    if days % 10 == 1 and days % 100 != 11:
+        return 'день'
+    if 2 <= days % 10 <= 4 and not 12 <= days % 100 <= 14:
+        return 'дня'
+    return 'дней'
+
+
 def _share_url(link: str) -> str:
     return (
         'https://t.me/share/url?url='
@@ -129,15 +139,19 @@ def build_days_only_referral_screen(
             )
         return text, InlineKeyboardMarkup(inline_keyboard=[[cta], [back]])
 
+    trial_bonus_days = int(settings.REFERRAL_TRIAL_BONUS_DAYS)
+    purchase_bonus_days = int(settings.REFERRAL_FIRST_PURCHASE_BONUS_DAYS)
+    min_period_days = int(settings.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS)
+
     text = (
         f'{HEADER}\n\n'
         f'{INVITED} Приглашено: <b>{int(summary.get("invited_count") or 0)}</b>\n'
         f'{PAID} Оплатили: <b>{int(summary.get("paid_referrals_count") or 0)}</b>\n'
         f'{RECEIVED} Получено бонусом: <b>+{int(summary.get("total_earned_days") or 0)} дн.</b>\n\n'
         f'{TERMS} <b>За каждого друга</b>\n'
-        '• +3 дня к триалу\n'
-        '• +10 дней вам и другу\n'
-        '  за первую покупку от 30 дней\n\n'
+        f'• +{trial_bonus_days} {_days_word(trial_bonus_days)} к триалу\n'
+        f'• +{purchase_bonus_days} {_days_word(purchase_bonus_days)} вам и другу\n'
+        f'  за первую покупку от {min_period_days} {_days_word(min_period_days)}\n\n'
         '🔗 Ваша ссылка\n'
         f'<blockquote><code>{html.escape(bot_referral_link)}</code></blockquote>'
     )

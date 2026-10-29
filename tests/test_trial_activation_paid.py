@@ -1,6 +1,7 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -161,3 +162,51 @@ async def test_activate_free_trial_insufficient_funds_redirects_to_topup(
     )
     trial_callback_query.message.edit_text.assert_called_once()
     trial_callback_query.answer.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_paid_trial_screen_survives_photo_message(
+    trial_callback_query,
+    trial_user,
+    trial_db,
+):
+    """Экран партнёрки в режиме логотипа — фото: edit_text обязан уйти в fallback."""
+    trial_user.balance_kopeks = 100
+    trial_user.restriction_subscription = False
+    trial_user.auth_type = 'telegram'
+    trial_user.is_trial_already_used.return_value = False
+
+    trial_callback_query.message.caption = None
+    trial_callback_query.message.delete = AsyncMock()
+    trial_callback_query.message.answer = AsyncMock()
+    trial_callback_query.message.edit_text = AsyncMock(
+        side_effect=TelegramBadRequest(
+            method=MagicMock(),
+            message='there is no text in the message to edit',
+        )
+    )
+
+    with (
+        patch(
+            'app.services.trial_activation_service.get_trial_activation_charge_amount',
+            return_value=15900,
+        ),
+        patch(
+            'app.handlers.subscription.purchase.get_texts',
+            return_value=MagicMock(
+                t=lambda key, default, **kwargs: default,
+            ),
+        ),
+        patch('app.config.Settings.is_trial_disabled_for_user', return_value=False),
+        patch('app.config.Settings.is_tariffs_mode', return_value=False),
+        patch(
+            'app.handlers.subscription.purchase._get_trial_payment_keyboard',
+            return_value=InlineKeyboardMarkup(inline_keyboard=[]),
+        ),
+    ):
+        await activate_trial(trial_callback_query, trial_user, trial_db)
+
+    trial_callback_query.message.edit_text.assert_awaited_once()
+    trial_callback_query.message.delete.assert_awaited_once()
+    trial_callback_query.message.answer.assert_awaited_once()
+    trial_callback_query.answer.assert_awaited_once()

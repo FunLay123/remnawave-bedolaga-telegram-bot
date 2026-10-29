@@ -908,7 +908,10 @@ async def activate_trial(
         message_text = '\n'.join(message_lines)
         keyboard = _get_trial_payment_keyboard(db_user.language, can_pay_from_balance)
 
-        await callback.message.edit_text(message_text, reply_markup=keyboard, parse_mode='HTML')
+        # Экран партнёрки в режиме логотипа — фото-сообщение: edit_text на нём
+        # падает с «there is no text in the message», помощник уходит в caption
+        # или пере-отправку.
+        await _edit_message_text_or_caption(callback.message, message_text, keyboard, parse_mode='HTML')
         await callback.answer()
         return
 
@@ -1345,30 +1348,45 @@ async def activate_trial(
         return
 
     if from_referral:
-        if getattr(db_user, 'referral_code', None):
-            from app.utils.referral_ui import (
-                build_days_only_referral_screen,
-                is_trial_available_for_referral,
-            )
-            from app.utils.user_utils import get_user_referral_summary
+        toast_text = 'Триал активирован'
+        try:
+            # Кнопка CTA могла пережить переключение схемы: перерисовывать экран
+            # в days-only в levels/legacy нельзя.
+            if settings.is_referral_days_only_scheme() and getattr(db_user, 'referral_code', None):
+                from app.utils.referral_ui import (
+                    build_days_only_referral_screen,
+                    is_trial_available_for_referral,
+                )
+                from app.utils.user_utils import get_user_referral_summary
 
-            # После активации в объекте пользователя может ещё не быть новой
-            # подписки: без перезагрузки экран показал бы «нет подписки» и
-            # предложил триал, который только что выдали.
-            await db.refresh(db_user, ['subscriptions'])
-            summary = await get_user_referral_summary(db, db_user.id)
-            bot_username = (await callback.bot.get_me()).username
-            link = settings.get_bot_referral_link(db_user.referral_code, bot_username)
-            text, keyboard = build_days_only_referral_screen(
-                user=db_user,
-                summary=summary,
-                bot_referral_link=link,
-                trial_available=is_trial_available_for_referral(db_user),
+                # После активации в объекте пользователя может ещё не быть новой
+                # подписки: без перезагрузки экран показал бы «нет подписки» и
+                # предложил триал, который только что выдали.
+                await db.refresh(db_user, ['subscriptions'])
+                summary = await get_user_referral_summary(db, db_user.id)
+                bot_username = (await callback.bot.get_me()).username
+                link = settings.get_bot_referral_link(db_user.referral_code, bot_username)
+                text, keyboard = build_days_only_referral_screen(
+                    user=db_user,
+                    summary=summary,
+                    bot_referral_link=link,
+                    trial_available=is_trial_available_for_referral(db_user),
+                )
+                # force_text: экран партнёрки текстовый, иначе в режиме логотипа
+                # пользователь останется на старом фото без ссылки.
+                await edit_or_answer_photo(callback, text, keyboard, force_text=True)
+        except Exception as error:
+            # Триал уже активирован. Сбой перерисовки не должен превращаться в
+            # ошибку активации: хотя бы подтверждаем callback без тоста.
+            toast_text = None
+            logger.warning(
+                'Не удалось обновить экран партнёрки после активации триала',
+                user_id=getattr(db_user, 'id', None),
+                error=error,
             )
-            await edit_or_answer_photo(callback, text, keyboard)
 
         try:
-            await callback.answer('Триал активирован')
+            await callback.answer(toast_text)
         except Exception as error:
             # Callback query мог истечь, пока шла синхронизация с панелью.
             # Экран уже обновлён, и ронять активацию из-за тоста нельзя.

@@ -21,7 +21,11 @@ from app.services.referral_reward_service import format_reward_total
 from app.services.referral_withdrawal_service import referral_withdrawal_service
 from app.states import ReferralWithdrawalStates
 from app.utils.photo_message import edit_or_answer_photo
-from app.utils.referral_ui import ensure_subscriptions_loaded, is_trial_available_for_referral
+from app.utils.referral_ui import (
+    build_days_only_referral_screen,
+    ensure_subscriptions_loaded,
+    is_trial_available_for_referral,
+)
 from app.utils.user_utils import (
     get_detailed_referral_list,
     get_effective_referral_commission_percent,
@@ -68,12 +72,6 @@ async def show_referral_info(callback: types.CallbackQuery, db_user: User, db: A
         return
 
     if settings.is_referral_days_only_scheme():
-        from app.utils.referral_ui import (
-            build_days_only_referral_screen,
-            ensure_subscriptions_loaded,
-            is_trial_available_for_referral,
-        )
-
         await ensure_subscriptions_loaded(db, db_user)
 
         bot_username = (await callback.bot.get_me()).username
@@ -85,7 +83,9 @@ async def show_referral_info(callback: types.CallbackQuery, db_user: User, db: A
             bot_referral_link=bot_referral_link,
             trial_available=is_trial_available_for_referral(db_user),
         )
-        await edit_or_answer_photo(callback, text, keyboard)
+        # force_text: с ENABLE_LOGO_MODE экран уходит фото-сообщением, а CTA
+        # «Начать триал» и следующий activate_trial редактируют текст сообщения.
+        await edit_or_answer_photo(callback, text, keyboard, force_text=True)
         await callback.answer()
         return
 
@@ -394,7 +394,9 @@ async def start_trial_from_referral(
 
     from app.handlers.subscription.purchase import activate_trial
 
-    await activate_trial(callback, db_user, db, from_referral=True)
+    # Кнопка может пережить переключение схемы: в levels/legacy экран рисуется
+    # по-старому, и перерисовывать его после активации в days-only не нужно.
+    await activate_trial(callback, db_user, db, from_referral=settings.is_referral_days_only_scheme())
 
 
 async def show_referral_qr(
@@ -581,8 +583,6 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
     считаются дни. «Пополнений» и «Заработано с него» в этой схеме либо всегда
     ноль, либо вводят в заблуждение.
     """
-    from app.utils.user_utils import get_user_referral_summary
-
     summary = await get_user_referral_summary(db, db_user.id)
 
     if not referrals_data['referrals']:
@@ -603,7 +603,10 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
         f'Получено +{int(summary.get("total_earned_days") or 0)} дн.\n\n'
     )
     for item in referrals_data['referrals']:
-        name = f'@{item["username"]}' if item.get('username') else html_escape(str(item.get('full_name') or ''))
+        if item.get('username'):
+            name = f'@{html_escape(str(item["username"]))}'
+        else:
+            name = html_escape(str(item.get('full_name') or ''))
         if item.get('has_first_purchase'):
             text += (
                 '<tg-emoji emoji-id="5449444442056441600">•</tg-emoji> '
