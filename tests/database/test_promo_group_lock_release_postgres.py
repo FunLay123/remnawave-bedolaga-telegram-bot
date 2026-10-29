@@ -96,10 +96,14 @@ async def test_create_transaction_releases_user_lock_for_referral_hook(monkeypat
             await conn.run_sync(Base.metadata.create_all)
 
         async with maker() as db:
+            # referred_by_id — обычная колонка, а не relationship: SQLAlchemy не
+            # выводит зависимость и вставляет строки в порядке списка. На
+            # PostgreSQL немедленный self-FK требует, чтобы пригласивший уже
+            # существовал, поэтому id=2 идёт первым.
             db.add_all(
                 [
-                    User(id=1, telegram_id=1001, first_name='R', language='ru', balance_kopeks=0, referred_by_id=2),
                     User(id=2, telegram_id=1002, first_name='F', language='ru', balance_kopeks=0),
+                    User(id=1, telegram_id=1001, first_name='R', language='ru', balance_kopeks=0, referred_by_id=2),
                     # short_id уникален и ограничен 16 символами.
                     Subscription(
                         id=10,

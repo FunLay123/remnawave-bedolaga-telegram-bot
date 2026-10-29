@@ -105,6 +105,15 @@ def test_monitoring_autopay_calls_the_first_purchase_hook():
 
     assert 'Subscription.is_trial == False' in source, 'запрос autopay обязан исключать триалы'
 
+    # Награда пишется в другой сессии: уведомления о продлении должны
+    # перечитать подписку, иначе покажут срок без бонусных дней.
+    hook_index = source.index(FIRST_PURCHASE_HOOK)
+    reward_index = source.index("first_purchase_result.status == 'rewarded'", hook_index)
+    refresh_index = source.index('await db.refresh(subscription)', reward_index)
+    admin_index = source.index('send_subscription_extension_notification', refresh_index)
+    email_index = source.index('notify_autopay_success', admin_index)
+    assert refresh_index < admin_index < email_index
+
 
 TARIFF_PURCHASE_FILE = 'app/handlers/subscription/tariff_purchase.py'
 FIRST_PURCHASE_HOOK = 'register_first_purchase_after_purchase'

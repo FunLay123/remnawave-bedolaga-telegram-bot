@@ -1875,7 +1875,7 @@ class MonitoringService:
                                 register_first_purchase_after_purchase,
                             )
 
-                            await register_first_purchase_after_purchase(
+                            first_purchase_result = await register_first_purchase_after_purchase(
                                 referee_id=user.id,
                                 subscription_id=subscription.id,
                                 duration_days=autopay_period,
@@ -1883,6 +1883,21 @@ class MonitoringService:
                                 source='monitoring_autopay',
                                 bot=self.bot,
                             )
+
+                            if first_purchase_result.status == 'rewarded':
+                                # Награда днями записана из другой сессии и уже
+                                # закоммичена, а объект этой сессии помнит срок
+                                # до неё. Перечитываем подписку, чтобы
+                                # уведомления показали дату вместе с бонусом.
+                                try:
+                                    await db.refresh(subscription)
+                                except Exception as refresh_exc:
+                                    logger.warning(
+                                        'Автопродление: не удалось перечитать подписку после реферальной награды',
+                                        user_id=user.id,
+                                        subscription_id=subscription.id,
+                                        exc=refresh_exc,
+                                    )
 
                             # Отправляем уведомление администраторам
                             try:

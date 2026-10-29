@@ -138,6 +138,17 @@ async def test_reassigned_referral_moves_paid_count_with_the_invite(monkeypatch)
         assert new_referrer['paid_referrals_count'] == 1
         assert new_referrer['conversion_rate'] == 100.0
 
+        # Список рефералов обязан показывать то же, что сводка: маркер ищется
+        # по текущей привязке реферала, а не по историческому referral_id.
+        old_list = await get_detailed_referral_list(db, 1)
+        new_list = await get_detailed_referral_list(db, 3)
+
+        assert old_list['total_count'] == 0
+        assert old_list['referrals'] == []
+        assert new_list['total_count'] == 1
+        assert new_list['referrals'][0]['id'] == 2
+        assert new_list['referrals'][0]['has_first_purchase'] is True
+
 
 @pytest.mark.asyncio
 async def test_detailed_list_marks_first_purchase_per_referral(monkeypatch):
@@ -147,8 +158,9 @@ async def test_detailed_list_marks_first_purchase_per_referral(monkeypatch):
         db.add_all(
             [
                 _marker(2, 1),
-                # Маркер третьего реферала принадлежит ДРУГОМУ пригласившему:
-                # после передачи реферала он не должен всплывать в списке user 1.
+                # Исторический referral_id маркера третьего реферала указывает
+                # на прежнего пригласившего, но сам реферал сейчас привязан к
+                # user 1 — список обязан показать покупку, как и сводка.
                 _marker(3, 4),
                 ReferralEarning(
                     user_id=1,
@@ -166,7 +178,7 @@ async def test_detailed_list_marks_first_purchase_per_referral(monkeypatch):
         by_id = {row['id']: row for row in detailed['referrals']}
 
         assert by_id[2]['has_first_purchase'] is True
-        assert by_id[3]['has_first_purchase'] is False
+        assert by_id[3]['has_first_purchase'] is True
         assert by_id[2]['days_earned'] == 10
         # Старое поле остаётся: UI переводится на маркеры отдельной задачей.
         assert by_id[2]['has_made_first_topup'] is False
