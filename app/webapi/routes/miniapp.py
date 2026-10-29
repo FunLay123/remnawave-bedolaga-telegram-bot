@@ -90,6 +90,7 @@ from app.services.trial_activation_service import (
     TrialPaymentChargeFailed,
     TrialPaymentInsufficientFunds,
     charge_trial_activation_if_required,
+    get_effective_trial_days,
     preview_trial_activation_charge,
     revert_trial_activation,
     rollback_trial_subscription_activation,
@@ -3517,14 +3518,16 @@ async def get_subscription_details(
     referral_info = await _build_referral_info(db, user)
 
     trial_available = _is_trial_available_for_user(user)
-    trial_duration_days = settings.TRIAL_DURATION_DAYS if settings.TRIAL_DURATION_DAYS > 0 else None
+    # Приглашённому показываем базовую длительность вместе с бонусом.
+    _effective_trial_days = get_effective_trial_days(user, settings.TRIAL_DURATION_DAYS)
+    trial_duration_days = _effective_trial_days if _effective_trial_days > 0 else None
     trial_price_kopeks = settings.get_trial_activation_price()
     trial_payment_required = settings.is_trial_paid_activation_enabled() and trial_price_kopeks > 0
     trial_price_label = settings.format_price(trial_price_kopeks) if trial_payment_required else None
 
     subscription_missing_reason = None
     if subscription is None:
-        if not trial_available and settings.TRIAL_DURATION_DAYS > 0:
+        if not trial_available and trial_duration_days:
             subscription_missing_reason = 'trial_expired'
         else:
             subscription_missing_reason = 'not_found'
@@ -3921,6 +3924,9 @@ async def activate_subscription_trial_endpoint(
         except Exception as e:
             logger.error('Ошибка получения триального тарифа', error=e)
 
+    # Бонус приглашённому — поверх тарифной либо глобальной длительности.
+    trial_duration = get_effective_trial_days(user, trial_duration or settings.TRIAL_DURATION_DAYS)
+
     try:
         subscription = await create_trial_subscription(
             db,
@@ -4079,8 +4085,9 @@ async def activate_subscription_trial_endpoint(
         except Exception:  # pragma: no cover - defensive fallback
             duration_days = None
 
-    if not duration_days and settings.TRIAL_DURATION_DAYS > 0:
-        duration_days = settings.TRIAL_DURATION_DAYS
+    if not duration_days and trial_duration:
+        # trial_duration уже учитывает бонус приглашённому — не берём глобалку.
+        duration_days = trial_duration
 
     language_code = _normalize_language_code(user)
     charged_amount_label = settings.format_price(charged_amount) if charged_amount > 0 else None

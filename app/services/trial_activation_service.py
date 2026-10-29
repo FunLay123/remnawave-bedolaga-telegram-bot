@@ -39,6 +39,18 @@ class TrialActivationReversionResult:
     subscription_rolled_back: bool = True
 
 
+def get_effective_trial_days(user: User, base_days: int) -> int:
+    """Базовая длительность триала плюс бонус приглашённому."""
+    base = max(0, int(base_days or 0))
+    if base <= 0:
+        return 0
+    if not settings.is_referral_program_enabled() or not settings.is_referral_days_only_scheme():
+        return base
+    if getattr(user, 'referred_by_id', None) is None:
+        return base
+    return base + max(0, int(settings.REFERRAL_TRIAL_BONUS_DAYS))
+
+
 def get_trial_activation_charge_amount() -> int:
     """Returns the configured activation charge in kopeks if payment is enabled."""
 

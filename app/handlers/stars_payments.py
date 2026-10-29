@@ -244,6 +244,7 @@ async def _handle_trial_payment(
     from app.database.models import PaymentMethod, TransactionType
     from app.services.admin_notification_service import AdminNotificationService
     from app.services.subscription_service import SubscriptionService
+    from app.services.trial_activation_service import get_effective_trial_days
 
     try:
         # Парсим payload: trial_{subscription_id}
@@ -339,11 +340,18 @@ async def _handle_trial_payment(
         except Exception as admin_error:
             logger.warning('Ошибка отправки уведомления админам о триале', admin_error=admin_error)
 
+        # Период показываем фактический — в нём уже учтён бонус приглашённому.
+        trial_period_days = None
+        if getattr(subscription, 'start_date', None) and getattr(subscription, 'end_date', None):
+            trial_period_days = max(1, (subscription.end_date - subscription.start_date).days or 0)
+        if not trial_period_days:
+            trial_period_days = get_effective_trial_days(user, settings.TRIAL_DURATION_DAYS)
+
         # Отправляем сообщение пользователю
         await message.answer(
             f'🎉 <b>Пробная подписка активирована!</b>\n\n'
             f'⭐ Потрачено: {stars_amount} Stars\n'
-            f'📅 Период: {settings.TRIAL_DURATION_DAYS} дней\n'
+            f'📅 Период: {trial_period_days} дней\n'
             f'📱 Устройств: {Texts.format_device_limit(subscription.device_limit)}\n\n'
             f'Используйте меню для подключения к VPN.',
             parse_mode='HTML',

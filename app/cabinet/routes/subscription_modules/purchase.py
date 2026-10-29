@@ -48,6 +48,7 @@ from app.services.subscription_purchase_service import (
 )
 from app.services.subscription_service import SubscriptionService
 from app.services.traffic_reset_policy import should_reset_traffic_on_tariff_purchase
+from app.services.trial_activation_service import get_effective_trial_days
 from app.services.user_cart_service import user_cart_service
 from app.utils.pricing_utils import calculate_price_per_month, format_period_description
 from app.utils.timezone import format_local_datetime
@@ -1356,7 +1357,7 @@ async def get_trial_info(
     if settings.is_trial_disabled_for_user(getattr(user, 'auth_type', 'telegram')):
         return TrialInfoResponse(
             is_available=False,
-            duration_days=settings.TRIAL_DURATION_DAYS,
+            duration_days=get_effective_trial_days(user, settings.TRIAL_DURATION_DAYS),
             traffic_limit_gb=settings.TRIAL_TRAFFIC_LIMIT_GB,
             device_limit=settings.TRIAL_DEVICE_LIMIT,
             requires_payment=bool(settings.TRIAL_PAYMENT_ENABLED),
@@ -1394,6 +1395,9 @@ async def get_trial_info(
                 duration_days = tariff_trial_days
     except Exception as e:
         logger.error('Error getting trial tariff for info', error=e)
+
+    # Бонус приглашённому — поверх тарифной либо глобальной длительности.
+    duration_days = get_effective_trial_days(user, duration_days)
 
     # Check if user already has an active subscription
     subs = getattr(user, 'subscriptions', None) or []
@@ -1571,6 +1575,9 @@ async def activate_trial(
 
         trial_squad_uuid = await get_random_trial_squad_uuid(db)
         trial_squads = [trial_squad_uuid] if trial_squad_uuid else []
+
+    # Бонус приглашённому — поверх тарифной либо глобальной длительности.
+    trial_duration = get_effective_trial_days(user, trial_duration)
 
     # Create trial subscription
     subscription = await create_trial_subscription(

@@ -2985,12 +2985,19 @@ async def activate_pending_trial_subscription(
     current_time = datetime.now(UTC)
     pending_subscription.status = SubscriptionStatus.ACTIVE.value
 
+    # Длительность pending-триала зафиксирована датами при оформлении заказа.
+    # Считываем её ДО сдвига start_date: поздняя активация должна сохранить
+    # полный срок (включая бонус приглашённому), а не пересчитать его из
+    # глобального TRIAL_DURATION_DAYS.
+    duration_days = getattr(pending_subscription, 'duration_days', None)
+    if not duration_days and pending_subscription.start_date and pending_subscription.end_date:
+        duration_days = max(1, (pending_subscription.end_date - pending_subscription.start_date).days)
+
     # Обновляем даты
     if not pending_subscription.start_date or pending_subscription.start_date < current_time:
         pending_subscription.start_date = current_time
 
-    # Пересчитываем end_date на основе duration_days если есть
-    duration_days = pending_subscription.duration_days if hasattr(pending_subscription, 'duration_days') else None
+    # Пересчитываем end_date на основе исходной длительности если есть
     if duration_days:
         pending_subscription.end_date = current_time + timedelta(days=duration_days)
     elif pending_subscription.end_date and pending_subscription.end_date < current_time:

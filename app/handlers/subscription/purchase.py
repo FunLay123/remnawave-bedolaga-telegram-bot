@@ -53,6 +53,7 @@ from app.services.trial_activation_service import (
     TrialPaymentChargeFailed,
     TrialPaymentInsufficientFunds,
     charge_trial_activation_if_required,
+    get_effective_trial_days,
     revert_trial_activation,
     rollback_trial_subscription_activation,
 )
@@ -670,6 +671,10 @@ async def show_trial_offer(callback: types.CallbackQuery, db_user: User, db: Asy
         except Exception as e:
             logger.error('Ошибка получения триального тарифа', error=e)
 
+    # Приглашённый получает бонусные дни поверх базовой длительности (тарифной
+    # или глобальной) — в предпросмотре показываем то же, что выдадим.
+    trial_days = get_effective_trial_days(db_user, trial_days)
+
     try:
         from app.database.crud.server_squad import get_trial_eligible_server_squads
 
@@ -866,6 +871,9 @@ async def activate_trial(callback: types.CallbackQuery, db_user: User, db: Async
             except Exception as e:
                 logger.error('Ошибка получения триального тарифа для платного триала', error=e)
 
+        # Бонус приглашённому — поверх тарифной либо глобальной длительности.
+        paid_trial_days = get_effective_trial_days(db_user, paid_trial_days)
+
         traffic_label = 'Безлимит' if paid_trial_traffic == 0 else f'{paid_trial_traffic} ГБ'
 
         message_lines = [
@@ -954,10 +962,15 @@ async def activate_trial(callback: types.CallbackQuery, db_user: User, db: Async
             trial_squad_uuid = await get_random_trial_squad_uuid(db)
             trial_squads = [trial_squad_uuid] if trial_squad_uuid else []
 
+        effective_trial_days = get_effective_trial_days(
+            db_user,
+            trial_duration or settings.TRIAL_DURATION_DAYS,
+        )
+
         subscription = await create_trial_subscription(
             db,
             db_user.id,
-            duration_days=trial_duration,
+            duration_days=effective_trial_days,
             device_limit=trial_device_limit,
             traffic_limit_gb=trial_traffic_limit,
             connected_squads=trial_squads,
@@ -3422,10 +3435,15 @@ async def handle_trial_pay_with_balance(callback: types.CallbackQuery, db_user: 
             trial_squad_uuid = await get_random_trial_squad_uuid(db)
             trial_squads = [trial_squad_uuid] if trial_squad_uuid else []
 
+        effective_trial_days = get_effective_trial_days(
+            db_user,
+            trial_duration or settings.TRIAL_DURATION_DAYS,
+        )
+
         subscription = await create_trial_subscription(
             db,
             db_user.id,
-            duration_days=trial_duration,
+            duration_days=effective_trial_days,
             device_limit=trial_device_limit,
             traffic_limit_gb=trial_traffic_limit,
             connected_squads=trial_squads,
@@ -3780,6 +3798,10 @@ async def handle_trial_payment_method(callback: types.CallbackQuery, db_user: Us
 
             trial_squad_uuid = await get_random_trial_squad_uuid(db)
             trial_squads_list = [trial_squad_uuid] if trial_squad_uuid else []
+
+        # Бонус приглашённому — поверх тарифной либо глобальной длительности;
+        # срок фиксируется в pending-подписке и сохраняется при активации.
+        trial_duration = get_effective_trial_days(db_user, trial_duration)
 
         # Создаем pending триальную подписку
         pending_subscription = await create_pending_trial_subscription(
