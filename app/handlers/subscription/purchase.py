@@ -4766,6 +4766,17 @@ async def _extend_existing_subscription(
         description=f'Продление подписки на {period_days} дней',
     )
 
+    from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+    await register_first_purchase_after_purchase(
+        referee_id=db_user.id,
+        subscription_id=current_subscription.id,
+        duration_days=period_days,
+        paid_amount_kopeks=price_kopeks,
+        source='bot_simple_subscription_extend',
+        bot=callback.bot,
+    )
+
     # Отправляем уведомление админу
     try:
         notification_service = AdminNotificationService(callback.bot)
