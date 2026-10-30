@@ -599,7 +599,7 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
 
     text = (
         '<tg-emoji emoji-id="5258274739041883702">👥</tg-emoji> <b>Мои рефералы</b>\n\n'
-        f'Приглашено {int(summary.get("invited_count") or 0)} · '
+        f'Приглашено {int(summary.get("invited_count") or 0)}\n'
         f'Оплатили {int(summary.get("paid_referrals_count") or 0)}\n'
         f'Получено +{int(summary.get("total_earned_days") or 0)} дн.\n\n'
     )
@@ -609,11 +609,11 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
         else:
             name = html_escape(str(item.get('full_name') or ''))
         if item.get('has_first_purchase'):
-            text += f'• {name} — <tg-emoji emoji-id="5116414868357907335">✅</tg-emoji> оплатил'
+            text += f'• {name} — <tg-emoji emoji-id="5116414868357907335">✅</tg-emoji>Оплатил'
             if item.get('days_earned'):
                 text += f', +{int(item["days_earned"])} дн.'
         else:
-            text += f'• {name} — <tg-emoji emoji-id="5123359615727174427">⏳</tg-emoji> пробует'
+            text += f'• {name} — <tg-emoji emoji-id="5123359615727174427">⏳</tg-emoji>Пробует'
         text += '\n'
 
     rows = []
