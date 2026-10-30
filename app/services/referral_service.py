@@ -714,9 +714,7 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                     and settings.TRIAL_DURATION_DAYS > 0
                     and not settings.is_trial_disabled_for_user(getattr(new_user, 'auth_type', None))
                 ):
-                    welcome_message += (
-                        f'\n\n<tg-emoji emoji-id="5235695112419303615">🎁</tg-emoji> Вам +{trial_bonus_days} {_pluralize_days_ru(trial_bonus_days)} к пробному периоду.'
-                    )
+                    welcome_message += f'\n\n<tg-emoji emoji-id="5235695112419303615">🎁</tg-emoji> Вам +{trial_bonus_days} {_pluralize_days_ru(trial_bonus_days)} к пробному периоду.'
                 await send_referral_notification(
                     bot,
                     new_user.telegram_id,
