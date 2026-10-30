@@ -102,11 +102,12 @@ def _patch_yookassa_timeout() -> None:
 
     ApiClient.execute = execute_with_timeout
     ApiClient._timeout_patched = True
-    logger.info(
-        'YooKassa ApiClient.execute monkey-patched with HTTP timeout',
-        connect_timeout=connect_timeout,
-        read_timeout=read_timeout,
-    )
+    if settings.is_yookassa_enabled():
+        logger.info(
+            'YooKassa ApiClient.execute monkey-patched with HTTP timeout',
+            connect_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
 
 
 # Dedicated executor for all synchronous YK SDK calls. Bounded so YK
