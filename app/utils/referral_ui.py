@@ -21,7 +21,7 @@ from app.database.models import SubscriptionStatus
 
 HEADER = '<tg-emoji emoji-id="5235695112419303615">🤝</tg-emoji> <b>Партнёрская программа</b>'
 INVITED = '<tg-emoji emoji-id="5116368680279606270">👥</tg-emoji>'
-PAID = '<tg-emoji emoji-id="5454386656628991407">💳</tg-emoji>'
+PAID = '<tg-emoji emoji-id="5298988357538328017">💳</tg-emoji>'
 RECEIVED = '<tg-emoji emoji-id="5258165702707125574">🎁</tg-emoji>'
 TERMS = '<tg-emoji emoji-id="5335020345717973061">🎁</tg-emoji>'
 SHARE_ICON = '5334552404736104314'
