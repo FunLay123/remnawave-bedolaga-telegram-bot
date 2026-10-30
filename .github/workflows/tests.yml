@@ -71,6 +71,9 @@ jobs:
       - name: Run PostgreSQL tests
         run: uv run pytest -m postgres -q
 
+      # postgres-тесты уже прошли шагом выше; повторять их в общем прогоне —
+      # это ещё ~6 минут на том же наборе. Остальные тесты независимы и
+      # раскладываются по воркерам xdist.
       - name: Run full test suite
         if: matrix.full_suite
-        run: uv run pytest -q
+        run: uv run pytest -q -m "not postgres" -n auto
