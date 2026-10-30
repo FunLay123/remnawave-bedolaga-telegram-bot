@@ -1328,6 +1328,10 @@ class Settings(BaseSettings):
     ENABLE_LOGO_MODE: bool = True
     LOGO_FILE: str = 'vpn_logo.png'
     SKIP_RULES_ACCEPT: bool = False
+    # Показывать экран принятия оферты и правил уже зарегистрированным
+    # пользователям при /start. Тестовый/временный флаг: при включении гейт
+    # показывается при каждом входе, пока флаг не выключат.
+    LEGAL_GATE_FOR_EXISTING_USERS: bool = False
     SKIP_REFERRAL_CODE: bool = False
 
     DEFAULT_LANGUAGE: str = 'ru'

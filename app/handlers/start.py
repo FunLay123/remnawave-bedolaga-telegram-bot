@@ -27,7 +27,7 @@ from app.database.crud.user import (
     get_user_by_telegram_id,
 )
 from app.database.crud.user_message import get_random_active_message
-from app.database.models import GuestPurchase, PinnedMessage, SubscriptionStatus, UserStatus
+from app.database.models import GuestPurchase, PinnedMessage, SubscriptionStatus, User, UserStatus
 from app.keyboards.inline import (
     get_back_keyboard,
     get_language_selection_keyboard,
@@ -1133,14 +1133,18 @@ async def _send_legal_gate(
     state: FSMContext,
     *,
     message: types.Message | None = None,
+    existing_user: bool = False,
 ) -> None:
     from app.keyboards.inline import get_legal_gate_keyboard
     from app.legal_documents import entry_gate_text
 
     data = await state.get_data() or {}
-    if data.get('legal_accepted'):
-        data['legal_accepted'] = False
-        await state.set_data(data)
+    data['legal_accepted'] = False
+    if existing_user:
+        data['legal_gate_existing'] = True
+    else:
+        data.pop('legal_gate_existing', None)
+    await state.set_data(data)
 
     text = entry_gate_text()
     if message is not None:
@@ -1625,6 +1629,16 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
             # Refresh user to pick up newly created subscriptions
             await db.refresh(user, attribute_names=['subscriptions'])
 
+        if settings.LEGAL_GATE_FOR_EXISTING_USERS and not settings.SKIP_RULES_ACCEPT:
+            await _send_legal_gate(
+                message.bot,
+                message.chat.id,
+                state,
+                message=message,
+                existing_user=True,
+            )
+            return
+
         user_subs_for_flags = getattr(user, 'subscriptions', None) or []
         first_sub_for_flags = next(
             (s for s in user_subs_for_flags if s.is_active), user_subs_for_flags[0] if user_subs_for_flags else None
@@ -2001,8 +2015,44 @@ async def _continue_registration_after_rules(
             await complete_registration_from_callback(callback, state, db)
 
 
-async def process_legal_accept(callback: types.CallbackQuery, state: FSMContext, db: AsyncSession):
+async def process_legal_accept(
+    callback: types.CallbackQuery,
+    state: FSMContext,
+    db: AsyncSession,
+    db_user: User | None = None,
+):
     data = await state.get_data() or {}
+    if data.get('legal_gate_existing'):
+        data.pop('legal_gate_existing', None)
+        await state.clear()
+        if db_user is not None:
+            await _record_registration_consent(
+                db,
+                db_user,
+                {'legal_accepted': True},
+                source='bot_existing_user_gate',
+            )
+        try:
+            if db_user is not None:
+                from app.handlers.menu import show_main_menu
+
+                await show_main_menu(callback, db_user, db, skip_callback_answer=True)
+            else:
+                raise RuntimeError('Нет пользователя для показа главного меню')
+        except Exception as error:
+            logger.warning('Не удалось показать главное меню после принятия условий', error=error)
+            try:
+                await callback.message.edit_text(
+                    '✅ Условия приняты',
+                    reply_markup=types.InlineKeyboardMarkup(
+                        inline_keyboard=[[types.InlineKeyboardButton(text='В меню', callback_data='back_to_menu')]]
+                    ),
+                )
+            except Exception:
+                pass
+        await callback.answer()
+        return
+
     data['legal_accepted'] = True
     await state.set_data(data)
     language = data.get('language', DEFAULT_LANGUAGE)
@@ -2289,7 +2339,13 @@ async def process_referral_code_skip(callback: types.CallbackQuery, state: FSMCo
     await complete_registration_from_callback(callback, state, db)
 
 
-async def _record_registration_consent(db: AsyncSession, user, data: dict) -> None:
+async def _record_registration_consent(
+    db: AsyncSession,
+    user,
+    data: dict,
+    *,
+    source: str = 'bot_registration',
+) -> None:
     if not data.get('legal_accepted') or settings.SKIP_RULES_ACCEPT:
         return
     from app.database.database import AsyncSessionLocal
@@ -2303,7 +2359,7 @@ async def _record_registration_consent(db: AsyncSession, user, data: dict) -> No
                 consent_db,
                 user,
                 ['public_offer', 'service_rules'],
-                source='bot_registration',
+                source=source,
             )
     except Exception as error:
         logger.warning(
