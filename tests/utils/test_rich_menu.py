@@ -199,7 +199,7 @@ async def test_builder_single_subscription_structure(monkeypatch):
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(subscription), DummyTexts(), AsyncMock())
 
     assert html_out.startswith('<p>')
-    assert 'Активна · осталось 12 дн.' in html_out
+    assert 'Активна · 12 дн.' in html_out
     assert '<h4>' not in html_out
     assert '<footer>' not in html_out
     assert '<hr/>' not in html_out
@@ -207,17 +207,17 @@ async def test_builder_single_subscription_structure(monkeypatch):
     assert 'Трафик: 12.5 ГБ / 100 ГБ' in html_out
     assert '1250' in html_out
     assert 'Устройства' not in html_out
-    assert html_out.count('(') == 1  # дата окончания в скобках
+    assert html_out.count('(') == 0  # дата окончания ушла на отдельную строку
 
 
 @pytest.mark.parametrize(
     ('status', 'days_left', 'expected'),
     [
-        ('active', 12, '✅ Активна · осталось 12 дн.'),
+        ('active', 12, '✅ Активна · 12 дн.'),
         ('active', 1, '✅ Активна · истекает завтра'),
         ('expired', -3, '⛔ Закончилась'),
         ('disabled', 5, '⚫ Отключена'),
-        ('limited', 5, '⚠️ Трафик исчерпан · осталось 5 дн.'),
+        ('limited', 5, '⚠️ Трафик исчерпан · 5 дн.'),
     ],
 )
 async def test_minimal_status_line_per_state(monkeypatch, status, days_left, expected):
@@ -1175,7 +1175,7 @@ async def test_far_future_end_date_in_single_block_renders_without_tg_time(monke
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(eternal), DummyTexts(), AsyncMock())
 
     assert '<tg-time' not in html_out
-    assert 'осталось' in html_out
+    assert '26725 дн.' in html_out
 
 
 async def test_try_send_decode_error_falls_back_to_classic(monkeypatch):

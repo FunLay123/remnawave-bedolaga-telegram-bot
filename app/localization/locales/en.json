@@ -924,7 +924,7 @@
   "MAIN_MENU_MIN_ACTIVE": "<tg-emoji emoji-id=\"5359415772844152891\">✅</tg-emoji> Активна",
   "MAIN_MENU_MIN_DAYS_LEFT": "осталось {days} дн.",
   "MAIN_MENU_MIN_DISABLED": "<tg-emoji emoji-id=\"5359689181872282374\">⚫</tg-emoji> Отключена",
-  "MAIN_MENU_MIN_EXPIRED": "<tg-emoji emoji-id=\"5269735794846769214\">⛔</tg-emoji> Закончилась {date}",
+  "MAIN_MENU_MIN_EXPIRED": "<tg-emoji emoji-id=\"5269735794846769214\">⛔</tg-emoji> Закончилась",
   "MAIN_MENU_MIN_LIMITED": "<tg-emoji emoji-id=\"5210854838350403906\">⚠️</tg-emoji> Трафик исчерпан",
   "MAIN_MENU_MIN_NONE": "Нет активной подписки",
   "MAIN_MENU_MIN_TODAY": "истекает сегодня",

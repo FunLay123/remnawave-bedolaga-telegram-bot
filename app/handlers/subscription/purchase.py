@@ -478,13 +478,23 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     premium_block = ('\n' + '\n'.join(premium_lines)) if premium_lines else ''
     devices_sep = '\n\n' if premium_lines else '\n'
 
+    end_date_text = ''
     if is_daily_tariff:
         # Для суточных тарифов без "Действует до" и срока
         message_template = f'{heading}\n\n{total_line}{premium_block}{devices_sep}{devices_line}'
     else:
+        end_date_text = format_local_datetime(subscription.end_date, '%d.%m.%Y')
+        end_time_text = format_local_datetime(subscription.end_date, '%H:%M')
+        expired_text = texts.t('SUBSCRIPTION_TIME_LEFT_EXPIRED', 'истёк')
+        time_line = (
+            f'{end_time_text} · {time_left_text}'
+            if time_left_text == expired_text
+            else f'{end_time_text} · осталось {time_left_text}'
+        )
         message_template = (
             f'{heading}\n\n'
-            '<tg-emoji emoji-id="5222148368955877900">📅</tg-emoji> Действует до: {end_date} ({time_left})\n'
+            '<tg-emoji emoji-id="5222148368955877900">📅</tg-emoji> Действует до: {end_date}\n'
+            f'{time_line}\n'
             f'{total_line}{premium_block}{devices_sep}{devices_line}'
         )
 
@@ -507,8 +517,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         warning=warning_text,
         tariff_info_block=tariff_info_block,
         subscription_type=subscription_type,
-        end_date=format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M'),
-        time_left=time_left_text,
+        end_date=end_date_text,
         traffic=traffic_used_display,
         servers=servers_display,
         devices_used=devices_used_str,

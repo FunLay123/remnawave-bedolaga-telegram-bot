@@ -586,9 +586,8 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
     if actual_status == 'disabled':
         return texts.t('MAIN_MENU_MIN_DISABLED', '<tg-emoji emoji-id="5359689181872282374">⚫</tg-emoji> Отключена')
     if actual_status == 'expired':
-        return texts.t(
-            'MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5269735794846769214">⛔</tg-emoji> Закончилась {date}'
-        ).replace('{date}', end_text or '—')
+        label = texts.t('MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5269735794846769214">⛔</tg-emoji> Закончилась')
+        return f'{label}<br>{end_text or "—"}'
 
     if actual_status == 'limited':
         label = texts.t(
@@ -606,12 +605,12 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
 
     days_left = local_days_until(end_date, datetime.now(UTC))
     if days_left > 1:
-        left = texts.t('MAIN_MENU_MIN_DAYS_LEFT', 'осталось {days} дн.').replace('{days}', str(days_left))
+        left = texts.t('MAIN_MENU_MIN_DAYS_LEFT', '{days} дн.').replace('{days}', str(days_left))
     elif days_left == 1:
         left = texts.t('MAIN_MENU_MIN_TOMORROW', 'истекает завтра')
     else:
         left = texts.t('MAIN_MENU_MIN_TODAY', 'истекает сегодня')
-    return f'{label} · {left} ({end_text})'
+    return f'{label} · {left}<br>до {end_text}'
 
 
 async def _build_single_subscription_block(user: User, texts, db: AsyncSession) -> str:
