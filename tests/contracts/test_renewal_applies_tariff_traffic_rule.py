@@ -32,6 +32,9 @@ APP = pathlib.Path(__file__).resolve().parents[2] / 'app'
 KNOWN_WITHOUT_RULE: dict[str, str] = {
     'app/database/models.py::Subscription.extend_subscription': 'сам метод модели — правило зовут его вызывающие',
     'app/database/crud/subscription.py::extend_subscription': 'само общее продление: правило внутри (уборка лимита)',
+    'app/database/crud/subscription.py::add_reward_days': (
+        'реферальный бонус: только срок, лимит и счётчики трафика остаются как есть'
+    ),
     'app/database/crud/subscription.py::activate_pending_subscription': (
         'активация оплаченной по счёту подписки: лимит тарифа задан при её оформлении'
     ),
