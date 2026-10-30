@@ -286,7 +286,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         status_display = texts.t('SUBSCRIPTION_STATUS_UNKNOWN', 'Неизвестно')
         status_emoji = '❓'
 
-    time_left_text = format_time_left(texts, subscription.end_date, current_time)
     warning_text = format_expiry_warning(texts, subscription.end_date, current_time)
 
     subscription_type = (
@@ -483,18 +482,10 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         # Для суточных тарифов без "Действует до" и срока
         message_template = f'{heading}\n\n{total_line}{premium_block}{devices_sep}{devices_line}'
     else:
-        end_date_text = format_local_datetime(subscription.end_date, '%d.%m.%Y')
-        end_time_text = format_local_datetime(subscription.end_date, '%H:%M')
-        expired_text = texts.t('SUBSCRIPTION_TIME_LEFT_EXPIRED', 'истёк')
-        time_line = (
-            f'{end_time_text} · {time_left_text}'
-            if time_left_text == expired_text
-            else f'{end_time_text} · осталось {time_left_text}'
-        )
+        end_date_text = format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M')
         message_template = (
             f'{heading}\n\n'
             '<tg-emoji emoji-id="5222148368955877900">📅</tg-emoji> Действует до: {end_date}\n'
-            f'{time_line}\n'
             f'{total_line}{premium_block}{devices_sep}{devices_line}'
         )
 

@@ -657,7 +657,7 @@ def get_main_menu_keyboard(
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text='Партнёрка',
+                    text='Партнёрка (+ 10 дней)',
                     callback_data='menu_referrals',
                     icon_custom_emoji_id='5343636681473935403',
                 )

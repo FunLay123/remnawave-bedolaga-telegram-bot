@@ -573,21 +573,19 @@ def _build_subscriptions_table(subscriptions, texts) -> str:
 
 
 def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
-    """Одна строка статуса: «✅ Активна · осталось 12 дн. (до 14.11.2026)»."""
+    """Одна строка статуса: «✅ Активна · 12 дн.»."""
     if not subscription:
         return texts.t('MAIN_MENU_MIN_NONE', 'Нет активной подписки')
 
     actual_status = (subscription.actual_status or '').lower()
     end_date = getattr(subscription, 'end_date', None)
-    end_text = format_local_datetime(end_date, '%d.%m.%Y') if end_date else ''
 
     if actual_status == 'pending':
         return texts.t('MAIN_MENU_MIN_NONE', 'Нет активной подписки')
     if actual_status == 'disabled':
         return texts.t('MAIN_MENU_MIN_DISABLED', '<tg-emoji emoji-id="5359689181872282374">⚫</tg-emoji> Отключена')
     if actual_status == 'expired':
-        label = texts.t('MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5269735794846769214">⛔</tg-emoji> Закончилась')
-        return f'{label}<br>{end_text or "—"}'
+        return texts.t('MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5269735794846769214">⛔</tg-emoji> Закончилась')
 
     if actual_status == 'limited':
         label = texts.t(
@@ -610,7 +608,7 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
         left = texts.t('MAIN_MENU_MIN_TOMORROW', 'истекает завтра')
     else:
         left = texts.t('MAIN_MENU_MIN_TODAY', 'истекает сегодня')
-    return f'{label} · {left}<br>до {end_text}'
+    return f'{label} · {left}'
 
 
 async def _build_single_subscription_block(user: User, texts, db: AsyncSession) -> str:
