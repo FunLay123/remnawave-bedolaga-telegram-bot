@@ -149,9 +149,9 @@ def build_days_only_referral_screen(
         f'{PAID} Оплатили: <b>{int(summary.get("paid_referrals_count") or 0)}</b>\n'
         f'{RECEIVED} Получено бонусом: <b>+{int(summary.get("total_earned_days") or 0)} дн.</b>\n\n'
         f'{TERMS} <b>За каждого друга</b>\n'
-        f'• +{trial_bonus_days} {_days_word(trial_bonus_days)} к триалу другу\n'
-        f'• +{purchase_bonus_days} {_days_word(purchase_bonus_days)} вам и другу\n'
-        f'  за первую покупку от {min_period_days} {_days_word(min_period_days)}\n\n'
+        f'  +{trial_bonus_days} {_days_word(trial_bonus_days)} к триалу другу\n'
+        f'  +{purchase_bonus_days} {_days_word(purchase_bonus_days)} вам и другу\n'
+        f'   за первую покупку от {min_period_days} {_days_word(min_period_days)}\n\n'
         f'<blockquote><code>{html.escape(bot_referral_link)}</code></blockquote>'
     )
 

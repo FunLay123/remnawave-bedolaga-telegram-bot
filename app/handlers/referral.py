@@ -598,7 +598,7 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
         return
 
     text = (
-        '<tg-emoji emoji-id="5258274739041883702">👥</tg-emoji> <b>Мои рефералы</b>\n\n'
+        '<tg-emoji emoji-id="5359415772844152891">👥</tg-emoji> <b>Мои рефералы</b>\n\n'
     )
     for item in referrals_data['referrals']:
         if item.get('username'):
