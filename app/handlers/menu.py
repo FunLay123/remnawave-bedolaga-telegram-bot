@@ -1219,7 +1219,8 @@ async def process_language_change(
             db,
             skip_callback_answer=True,
         )
-        await callback.answer(texts.t('LANGUAGE_SELECTED', '🌐 Язык интерфейса обновлен.'))
+        # Язык не менялся — не показываем «язык установлен».
+        await callback.answer()
         return
 
     updated_user = await update_user(db, db_user, language=resolved_language)
