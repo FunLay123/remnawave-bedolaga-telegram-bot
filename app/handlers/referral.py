@@ -583,8 +583,6 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
     считаются дни. «Пополнений» и «Заработано с него» в этой схеме либо всегда
     ноль, либо вводят в заблуждение.
     """
-    summary = await get_user_referral_summary(db, db_user.id)
-
     if not referrals_data['referrals']:
         await edit_or_answer_photo(
             callback,
