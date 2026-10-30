@@ -132,8 +132,7 @@ def payment_amount_range_error(min_amount_kopeks: int, max_amount_kopeks: int) -
 
     if lower > upper:
         return payment_amount_error_text(
-            'Пополнение этим способом сейчас недоступно: лимиты провайдера не пересекаются '
-            'с допустимым диапазоном'
+            'Пополнение этим способом сейчас недоступно: лимиты провайдера не пересекаются с допустимым диапазоном'
         )
 
     whole_min = (lower + 99) // 100

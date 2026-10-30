@@ -53,9 +53,7 @@ def test_device_buttons_carry_the_custom_icon():
 
 
 def test_limit_button_is_primary_and_named_limit():
-    keyboard = get_devices_management_keyboard(
-        _pagination(2).items, _pagination(2), 'ru', show_buy_devices=True
-    )
+    keyboard = get_devices_management_keyboard(_pagination(2).items, _pagination(2), 'ru', show_buy_devices=True)
 
     limit_buttons = [b for b in _buttons(keyboard) if b.callback_data == 'subscription_change_devices']
     assert len(limit_buttons) == 1

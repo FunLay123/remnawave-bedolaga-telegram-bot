@@ -63,9 +63,7 @@ async def test_toggle_enables_when_currently_disabled(monkeypatch):
     """callback без «enable/disable»: направление берётся из состояния подписки."""
     cb = SimpleNamespace(data='autopay_toggle', answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
     user = SimpleNamespace(language='ru', id=1)
-    subscription = SimpleNamespace(
-        id=10, user_id=1, is_trial=False, tariff_id=5, tariff=None, autopay_enabled=False
-    )
+    subscription = SimpleNamespace(id=10, user_id=1, is_trial=False, tariff_id=5, tariff=None, autopay_enabled=False)
 
     monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
     mock_update = AsyncMock(return_value=subscription)
@@ -81,9 +79,7 @@ async def test_toggle_enables_when_currently_disabled(monkeypatch):
 async def test_toggle_disables_when_currently_enabled(monkeypatch):
     cb = SimpleNamespace(data='autopay_toggle', answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
     user = SimpleNamespace(language='ru', id=1)
-    subscription = SimpleNamespace(
-        id=10, user_id=1, is_trial=False, tariff_id=5, tariff=None, autopay_enabled=True
-    )
+    subscription = SimpleNamespace(id=10, user_id=1, is_trial=False, tariff_id=5, tariff=None, autopay_enabled=True)
 
     monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
     mock_update = AsyncMock(return_value=subscription)
@@ -100,9 +96,7 @@ async def test_trial_subscription_still_rejected(monkeypatch):
     """Проверки при включении остаются: триал по-прежнему не может включить."""
     cb = SimpleNamespace(data='autopay_toggle', answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
     user = SimpleNamespace(language='ru', id=1)
-    subscription = SimpleNamespace(
-        id=10, user_id=1, is_trial=True, tariff_id=None, tariff=None, autopay_enabled=False
-    )
+    subscription = SimpleNamespace(id=10, user_id=1, is_trial=True, tariff_id=None, tariff=None, autopay_enabled=False)
 
     monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
     mock_update = AsyncMock(return_value=subscription)

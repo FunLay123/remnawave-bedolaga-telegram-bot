@@ -410,13 +410,17 @@ async def test_marker_is_written_once_for_a_paid_referral(monkeypatch):
         assert await ensure_marker_for_already_paid_referral(db, 2) is False
 
         rows = (
-            await db.execute(
-                select(ReferralEarning).where(
-                    ReferralEarning.user_id == 2,
-                    ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+            (
+                await db.execute(
+                    select(ReferralEarning).where(
+                        ReferralEarning.user_id == 2,
+                        ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert len(rows) == 1
         assert rows[0].days_granted == 0
         assert rows[0].amount_kopeks == 0
@@ -481,10 +485,12 @@ async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int
         return False
 
     paid_exists = await db.execute(
-        select(Subscription.id).where(
+        select(Subscription.id)
+        .where(
             Subscription.user_id == user_id,
             Subscription.is_trial.is_(False),
-        ).limit(1)
+        )
+        .limit(1)
     )
     if paid_exists.scalar_one_or_none() is None:
         return False
@@ -779,9 +785,7 @@ from app.services.referral_reward_service import (
     REASON_FIRST_PURCHASE_REGISTERED,
 )
 
-FirstPurchaseStatus = Literal[
-    'skipped', 'not_referred', 'already_registered', 'registered', 'rewarded', 'error'
-]
+FirstPurchaseStatus = Literal['skipped', 'not_referred', 'already_registered', 'registered', 'rewarded', 'error']
 
 
 @dataclass(frozen=True, slots=True)
@@ -814,10 +818,14 @@ async def _lock_subscription(db: AsyncSession, subscription_id: int, user_id: in
 
 async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscription | None:
     ids = (
-        await db.execute(
-            select(Subscription.id).where(Subscription.user_id == referrer_id).order_by(Subscription.id.asc())
+        (
+            await db.execute(
+                select(Subscription.id).where(Subscription.user_id == referrer_id).order_by(Subscription.id.asc())
+            )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
 
     locked: list[Subscription] = []
     for subscription_id in ids:
@@ -1404,19 +1412,15 @@ In both balance paths in `app/handlers/simple_subscription.py`, after `await db.
 In `app/handlers/menu.py`, in the quick activation branch, add the hook after the existing subscription is extended (`renewal_service.finalize`) or the new subscription and transaction are created:
 
 ```python
-        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+from app.services.referral_purchase_service import register_first_purchase_after_purchase
 
-        await register_first_purchase_after_purchase(
-            referee_id=db_user.id,
-            subscription_id=(
-                subscription.id if subscription is not None else new_subscription.id
-            ),
-            duration_days=best_period,
-            paid_amount_kopeks=(
-                pricing.final_total if subscription is not None else best_price
-            ),
-            source='menu_quick_activation',
-        )
+await register_first_purchase_after_purchase(
+    referee_id=db_user.id,
+    subscription_id=(subscription.id if subscription is not None else new_subscription.id),
+    duration_days=best_period,
+    paid_amount_kopeks=(pricing.final_total if subscription is not None else best_price),
+    source='menu_quick_activation',
+)
 ```
 
 Place it once after the `if subscription: ... else: ...` block, before the final `except`; both variables (`subscription`, `new_subscription`) are defined by then. Do not place it before `create_transaction`; the purchase must be committed first.
@@ -2008,13 +2012,17 @@ async def test_concurrent_first_purchase_grants_once(monkeypatch):
 
     async with maker() as db:
         markers = (
-            await db.execute(
-                getattr(__import__('sqlalchemy'), 'select')(ReferralEarning).where(
-                    ReferralEarning.user_id == 2,
-                    ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+            (
+                await db.execute(
+                    getattr(__import__('sqlalchemy'), 'select')(ReferralEarning).where(
+                        ReferralEarning.user_id == 2,
+                        ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
     assert len(markers) == 1
     assert sorted(result.status for result in results) == ['already_registered', 'rewarded']

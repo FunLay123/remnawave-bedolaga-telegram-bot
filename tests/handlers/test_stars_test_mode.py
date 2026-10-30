@@ -50,9 +50,7 @@ async def test_invoice_uses_callback_button_instead_of_stars_link(monkeypatch):
     assert pay_button.url is None
     assert pay_button.text == 'Оплатить 500 ★'
     assert 'Счёт на оплату' in message.answer.await_args.args[0]
-    test_state = next(
-        call.kwargs for call in state.update_data.await_args_list if 'stars_test_token' in call.kwargs
-    )
+    test_state = next(call.kwargs for call in state.update_data.await_args_list if 'stars_test_token' in call.kwargs)
     assert test_state['stars_test_amount_kopeks'] == 50_000
     assert test_state['stars_test_stars_amount'] == 500
     assert test_state['stars_test_token']

@@ -45,8 +45,7 @@ async def _get_stars_limits() -> tuple[int, int]:
 def _is_stars_test_allowed(db_user: User) -> bool:
     """Тестовый Stars — только при флаге и только администратору."""
     return bool(
-        settings.TELEGRAM_STARS_TEST_MODE
-        and settings.is_admin(telegram_id=getattr(db_user, 'telegram_id', None))
+        settings.TELEGRAM_STARS_TEST_MODE and settings.is_admin(telegram_id=getattr(db_user, 'telegram_id', None))
     )
 
 

@@ -223,15 +223,9 @@ def _confirm_price_line(texts, price: int, balance_kopeks: int) -> str:
     if price <= 0:
         return '\n\n<blockquote>Без доплаты</blockquote>'
 
-    line = (
-        '\n\n<tg-emoji emoji-id="5449444442056441600">💰</tg-emoji> '
-        f'{texts.format_price(price)}'
-    )
+    line = f'\n\n<tg-emoji emoji-id="5449444442056441600">💰</tg-emoji> {texts.format_price(price)}'
     if balance_kopeks >= price:
-        line += (
-            f' · баланс {texts.format_price(balance_kopeks)} → '
-            f'{texts.format_price(balance_kopeks - price)}'
-        )
+        line += f' · баланс {texts.format_price(balance_kopeks)} → {texts.format_price(balance_kopeks - price)}'
     else:
         line += f' · не хватает {texts.format_price(price - balance_kopeks)}'
     return line
@@ -1338,10 +1332,7 @@ async def show_premium_traffic_confirmation(
         new_remaining = round(old_remaining + gb, 2)
         remaining_line = texts.t(
             'CONFIRM_PREMIUM_TRAFFIC_REMAINING',
-            (
-                '\n<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> '
-                'Остаток: {old} → {new}'
-            ),
+            ('\n<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Остаток: {old} → {new}'),
         ).format(
             old=_format_traffic_gb(old_remaining),
             new=_format_traffic_gb(new_remaining),

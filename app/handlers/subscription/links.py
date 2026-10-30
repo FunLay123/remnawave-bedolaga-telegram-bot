@@ -229,19 +229,19 @@ async def handle_connect_subscription(
         # Ряд кнопок подключения через веб-редирект
         import_buttons: list[InlineKeyboardButton] = []
         if happ_url:
-                    import_buttons.append(
-                        InlineKeyboardButton(
-                            text='Happ', url=happ_url, style='primary', icon_custom_emoji_id='5267369899226866146'
-                        )
-                    )
-        
+            import_buttons.append(
+                InlineKeyboardButton(
+                    text='Happ', url=happ_url, style='primary', icon_custom_emoji_id='5267369899226866146'
+                )
+            )
+
         if incy_url:
             import_buttons.append(
                 InlineKeyboardButton(
                     text='INCY', url=incy_url, style='primary', icon_custom_emoji_id='5267274958974789753'
-                    )
                 )
-        
+            )
+
         if import_buttons:
             rows.append(import_buttons)
         else:
@@ -272,7 +272,7 @@ async def handle_connect_subscription(
             texts.t(
                 'SUBSCRIPTION_CONNECT_CHOICE_MESSAGE',
                 '<tg-emoji emoji-id="5206508932742269444">☔</tg-emoji> <b>Выберите приложение</b>\n'
-                '<blockquote>Настройки импортируются автоматически</blockquote>'
+                '<blockquote>Настройки импортируются автоматически</blockquote>',
             ),
             reply_markup=keyboard,
             parse_mode='HTML',

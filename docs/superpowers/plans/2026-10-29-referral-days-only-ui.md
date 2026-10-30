@@ -56,9 +56,7 @@ def test_referral_button_is_full_width_without_primary(monkeypatch):
     keyboard = get_main_menu_keyboard(language='ru')
     rows = keyboard.inline_keyboard
     referral_index = next(
-        index
-        for index, row in enumerate(rows)
-        if any(button.callback_data == 'menu_referrals' for button in row)
+        index for index, row in enumerate(rows) if any(button.callback_data == 'menu_referrals' for button in row)
     )
     referral_row = rows[referral_index]
 
@@ -69,9 +67,7 @@ def test_referral_button_is_full_width_without_primary(monkeypatch):
     assert button.style is None
 
     support_indexes = [
-        index
-        for index, row in enumerate(rows)
-        if any(button.callback_data == 'menu_support' for button in row)
+        index for index, row in enumerate(rows) if any(button.callback_data == 'menu_support' for button in row)
     ]
     if support_indexes:
         assert referral_index < support_indexes[0]

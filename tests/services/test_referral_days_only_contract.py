@@ -1,9 +1,9 @@
 from app.config import settings
 from app.services.referral_reward_service import (
-    REFEREE_DIRECTED_REASONS,
     REASON_FIRST_PURCHASE,
     REASON_FIRST_PURCHASE_REFEREE,
     REASON_FIRST_PURCHASE_REGISTERED,
+    REFEREE_DIRECTED_REASONS,
 )
 
 

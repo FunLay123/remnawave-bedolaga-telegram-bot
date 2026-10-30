@@ -117,12 +117,7 @@ def test_methods_keyboard_uses_registry(monkeypatch) -> None:
     )
 
     keyboard = get_payment_methods_keyboard(0, 'ru')
-    button = next(
-        button
-        for row in keyboard.inline_keyboard
-        for button in row
-        if button.callback_data == 'topup_stars'
-    )
+    button = next(button for row in keyboard.inline_keyboard for button in row if button.callback_data == 'topup_stars')
 
     assert button.text == 'Telegram Stars'
     assert button.icon_custom_emoji_id == '1234567890'

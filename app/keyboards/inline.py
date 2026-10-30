@@ -40,9 +40,7 @@ def pad_button_labels(
     оказывается на разном расстоянии от края. Равная длина ставит её в одну
     колонку.
     """
-    icon_buttons = [
-        row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)
-    ]
+    icon_buttons = [row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)]
     if not icon_buttons:
         return
 
@@ -1084,20 +1082,26 @@ def get_subscription_keyboard(
             else:
                 # Для обычного тарифа: [Продлить подписку], а «Автоплатёж» встаёт в ряд к «Устройства»
                 keyboard.append(
-                    [InlineKeyboardButton(text='Продлить подписку',
-                        callback_data='subscription_extend',
-                        style='primary',
-                        icon_custom_emoji_id='5334552404736104314')]
+                    [
+                        InlineKeyboardButton(
+                            text='Продлить подписку',
+                            callback_data='subscription_extend',
+                            style='primary',
+                            icon_custom_emoji_id='5334552404736104314',
+                        )
+                    ]
                 )
-                autopay_button = InlineKeyboardButton(text='Автоплатёж',
-                                                      callback_data='subscription_autopay',
-                                                      icon_custom_emoji_id='5454156248813432363')
+                autopay_button = InlineKeyboardButton(
+                    text='Автоплатёж', callback_data='subscription_autopay', icon_custom_emoji_id='5454156248813432363'
+                )
 
             # [Устройства] [Автоплатёж] — автоплатёж есть только у обычного тарифа
             devices_row = [
-                InlineKeyboardButton(text='Устройства',
-                                     callback_data='subscription_manage_devices',
-                                     icon_custom_emoji_id='5118590136149345664')
+                InlineKeyboardButton(
+                    text='Устройства',
+                    callback_data='subscription_manage_devices',
+                    icon_custom_emoji_id='5118590136149345664',
+                )
             ]
             if autopay_button is not None:
                 devices_row.append(autopay_button)
@@ -1172,12 +1176,16 @@ def get_subscription_keyboard(
     # [Перевыпустить] [Промокод]
     revoke_promo_row: list[InlineKeyboardButton] = []
     if has_subscription and settings.is_subscription_revoke_enabled():
-        revoke_promo_row.append(InlineKeyboardButton(text='Перевыпустить',
-                                                     callback_data='subscription_revoke',
-                                                     icon_custom_emoji_id='4911241630633165627'))
-    revoke_promo_row.append(InlineKeyboardButton(text='Промокод',
-                                                 callback_data='menu_promocode',
-                                                 icon_custom_emoji_id='5283232570660634549'))
+        revoke_promo_row.append(
+            InlineKeyboardButton(
+                text='Перевыпустить', callback_data='subscription_revoke', icon_custom_emoji_id='4911241630633165627'
+            )
+        )
+    revoke_promo_row.append(
+        InlineKeyboardButton(
+            text='Промокод', callback_data='menu_promocode', icon_custom_emoji_id='5283232570660634549'
+        )
+    )
     keyboard.append(revoke_promo_row)
 
     if gift_enabled and _GIFT_BUTTON_VISIBLE:
@@ -2743,7 +2751,11 @@ def get_premium_traffic_squads_keyboard(
     ]
     if show_ordinary:
         buttons.append(
-            [InlineKeyboardButton(text=texts.t('ORDINARY_TRAFFIC_BUTTON', '📊 Обычный трафик'), callback_data='ordinary_traffic')]
+            [
+                InlineKeyboardButton(
+                    text=texts.t('ORDINARY_TRAFFIC_BUTTON', '📊 Обычный трафик'), callback_data='ordinary_traffic'
+                )
+            ]
         )
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
@@ -2801,7 +2813,11 @@ def get_premium_traffic_packages_keyboard(
 
     if show_ordinary:
         buttons.append(
-            [InlineKeyboardButton(text=texts.t('ORDINARY_TRAFFIC_BUTTON', '📊 Обычный трафик'), callback_data='ordinary_traffic')]
+            [
+                InlineKeyboardButton(
+                    text=texts.t('ORDINARY_TRAFFIC_BUTTON', '📊 Обычный трафик'), callback_data='ordinary_traffic'
+                )
+            ]
         )
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 

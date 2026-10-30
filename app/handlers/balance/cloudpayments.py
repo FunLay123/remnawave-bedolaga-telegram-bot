@@ -154,7 +154,9 @@ async def process_cloudpayments_payment_amount(
         or amount_kopeks > settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS
     ):
         await message.answer(
-            payment_amount_range_error(settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS, settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS),
+            payment_amount_range_error(
+                settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS, settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS
+            ),
             reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
             parse_mode='HTML',
         )
@@ -265,7 +267,9 @@ async def process_cloudpayments_amount(
         or amount_kopeks > settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS
     ):
         await message.answer(
-            payment_amount_range_error(settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS, settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS),
+            payment_amount_range_error(
+                settings.CLOUDPAYMENTS_MIN_AMOUNT_KOPEKS, settings.CLOUDPAYMENTS_MAX_AMOUNT_KOPEKS
+            ),
             reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
             parse_mode='HTML',
         )

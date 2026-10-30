@@ -586,10 +586,14 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
     if actual_status == 'disabled':
         return texts.t('MAIN_MENU_MIN_DISABLED', '<tg-emoji emoji-id="5359689181872282374">⚫</tg-emoji> Отключена')
     if actual_status == 'expired':
-        return texts.t('MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5269735794846769214">⛔</tg-emoji> Закончилась {date}').replace('{date}', end_text or '—')
+        return texts.t(
+            'MAIN_MENU_MIN_EXPIRED', '<tg-emoji emoji-id="5269735794846769214">⛔</tg-emoji> Закончилась {date}'
+        ).replace('{date}', end_text or '—')
 
     if actual_status == 'limited':
-        label = texts.t('MAIN_MENU_MIN_LIMITED', '<tg-emoji emoji-id="5210854838350403906">⚠️</tg-emoji> Трафик исчерпан')
+        label = texts.t(
+            'MAIN_MENU_MIN_LIMITED', '<tg-emoji emoji-id="5210854838350403906">⚠️</tg-emoji> Трафик исчерпан'
+        )
     elif getattr(subscription, 'is_trial', False) or actual_status == 'trial':
         label = texts.t('MAIN_MENU_MIN_TRIAL', '<tg-emoji emoji-id="5359415772844152891">🎁</tg-emoji> Тестовая')
     elif actual_status == 'active':
