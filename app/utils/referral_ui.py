@@ -121,7 +121,7 @@ def build_days_only_referral_screen(
     if not has_eligible_subscription(user):
         text = (
             f'<blockquote><tg-emoji emoji-id="{GIFT_ICON}">🎁</tg-emoji> '
-            'Бонусные дни начисляются только\nпри наличии подписки.</blockquote>'
+            'Бонусные дни начисляются только при наличии подписки.</blockquote>'
         )
         if trial_available:
             cta = InlineKeyboardButton(
