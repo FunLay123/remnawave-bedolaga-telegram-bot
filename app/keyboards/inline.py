@@ -1000,6 +1000,7 @@ def get_insufficient_balance_keyboard(
 
 # «Подарить подписку» скрыта по редизайну; хендлеры остались, кнопку можно вернуть.
 _GIFT_BUTTON_VISIBLE = False
+DEVICES_BUTTON_ICON_ID = '5118590136149345664'
 
 
 def get_subscription_keyboard(
@@ -1101,7 +1102,7 @@ def get_subscription_keyboard(
                 InlineKeyboardButton(
                     text='Устройства',
                     callback_data='subscription_manage_devices',
-                    icon_custom_emoji_id='5118590136149345664',
+                    icon_custom_emoji_id=DEVICES_BUTTON_ICON_ID,
                 )
             ]
             if autopay_button is not None:
@@ -1172,7 +1173,15 @@ def get_subscription_keyboard(
                 )
 
     if has_subscription and is_trial:
-        keyboard.append([InlineKeyboardButton(text='Устройства', callback_data='subscription_manage_devices')])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text='Устройства',
+                    callback_data='subscription_manage_devices',
+                    icon_custom_emoji_id=DEVICES_BUTTON_ICON_ID,
+                )
+            ]
+        )
 
     # [Перевыпустить] [Промокод]
     revoke_promo_row: list[InlineKeyboardButton] = []

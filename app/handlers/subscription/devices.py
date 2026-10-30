@@ -824,10 +824,23 @@ async def handle_device_management(
         return
 
     if not subscription or subscription.is_trial:
-        await callback.answer(
-            texts.t('PAID_FEATURE_ONLY', '⚠️ Эта функция доступна только для платных подписок'),
-            show_alert=True,
+        paid_only_text = (
+            texts.t('PAID_FEATURE_ONLY', '⚠️ Эта функция доступна только для платных подписок').lstrip('⚠️ ').strip()
         )
+        try:
+            await callback.message.edit_text(
+                (f'<tg-emoji emoji-id="5359415772844152891">⚠</tg-emoji> <b>Устройства</b>\n\n{paid_only_text}'),
+                reply_markup=get_back_keyboard(
+                    db_user.language,
+                    callback_data=_devices_back_callback(sub_id),
+                ),
+                parse_mode='HTML',
+            )
+        except Exception as error:
+            logger.warning('Не удалось показать предупреждение об устройствах', error=error)
+            await callback.answer(paid_only_text, show_alert=True)
+            return
+        await callback.answer()
         return
 
     panel_user_id = _get_panel_user_id(subscription, db_user)

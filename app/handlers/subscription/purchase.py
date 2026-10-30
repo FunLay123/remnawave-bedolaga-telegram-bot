@@ -1404,12 +1404,42 @@ async def start_subscription_purchase(
 ):
     texts = get_texts(db_user.language)
 
-    # Проверяем режим продаж - если tariffs, перенаправляем на выбор тарифов
+    # В режиме тарифов показываем тарифы, если они реально есть.
+    # Если оператор включил tariffs, но активных тарифов не создал, не оставляем
+    # пользователя на пустом экране «Нет доступных тарифов»: ведём в классический
+    # выбор дней. Подписку/триал с tariff_id не трогаем — для неё тарифный поток
+    # остаётся единственным корректным.
     if settings.is_tariffs_mode():
-        from .tariff_purchase import show_tariffs_list
+        existing_subscription = getattr(db_user, 'subscription', None)
+        has_tariff_bound_subscription = bool(getattr(existing_subscription, 'tariff_id', None))
+        if settings.is_multi_tariff_enabled() or has_tariff_bound_subscription:
+            from .tariff_purchase import show_tariffs_list
 
-        await show_tariffs_list(callback, db_user, db, state)
-        return
+            await show_tariffs_list(callback, db_user, db, state)
+            return
+
+        from app.database.crud.tariff import get_all_active_tariffs
+
+        try:
+            active_tariffs = await get_all_active_tariffs(db)
+        except Exception as error:
+            logger.warning(
+                'Не удалось проверить наличие тарифов, показываем классические дни',
+                telegram_id=db_user.telegram_id,
+                error=error,
+            )
+            active_tariffs = []
+
+        if active_tariffs:
+            from .tariff_purchase import show_tariffs_list
+
+            await show_tariffs_list(callback, db_user, db, state)
+            return
+
+        logger.warning(
+            'SALES_MODE=tariffs, но активных тарифов нет — показываем классический выбор дней',
+            telegram_id=db_user.telegram_id,
+        )
 
     keyboard = get_subscription_period_keyboard(db_user.language, db_user)
     prompt_text = await _build_subscription_period_prompt(db_user, texts, db)
@@ -1420,8 +1450,9 @@ async def start_subscription_purchase(
         keyboard,
     )
 
-    # Multi-tariff note: this path is only reached in classic (non-tariff) mode.
-    # Tariff mode redirects to show_tariffs_list above. db_user.subscription is safe.
+    # This path is reached in classic mode, or in tariffs mode when there are no
+    # active tariffs to show. Multi-tariff always redirects to show_tariffs_list
+    # above, so db_user.subscription is safe for the single-subscription fallback.
     subscription = getattr(db_user, 'subscription', None)
 
     if settings.is_devices_selection_enabled():
@@ -2534,9 +2565,11 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
             await callback.answer()
             return
 
-        # Multi-tariff note: confirm_purchase runs in classic (non-tariff) mode only.
-        # In tariff mode, start_subscription_purchase redirects to show_tariffs_list.
-        # db_user.subscription is the correct single subscription for trial conversion.
+        # Multi-tariff note: confirm_purchase runs only when start_subscription_purchase
+        # took the classic day flow. In tariff mode with active tariffs it redirects
+        # to show_tariffs_list; the no-active-tariffs fallback deliberately uses this
+        # classic flow. db_user.subscription is the correct single subscription for
+        # trial conversion.
         existing_subscription = db_user.subscription
         if devices_selection_enabled:
             selected_devices = devices_selected
