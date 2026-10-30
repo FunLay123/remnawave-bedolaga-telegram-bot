@@ -599,9 +599,6 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
 
     text = (
         '<tg-emoji emoji-id="5258274739041883702">👥</tg-emoji> <b>Мои рефералы</b>\n\n'
-        f'Приглашено {int(summary.get("invited_count") or 0)}\n'
-        f'Оплатили {int(summary.get("paid_referrals_count") or 0)}\n'
-        f'Получено +{int(summary.get("total_earned_days") or 0)} дн.\n\n'
     )
     for item in referrals_data['referrals']:
         if item.get('username'):
