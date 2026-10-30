@@ -588,7 +588,7 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
     if not referrals_data['referrals']:
         await edit_or_answer_photo(
             callback,
-            '<blockquote>👥 У вас пока нет рефералов.</blockquote>',
+            '<blockquote><tg-emoji emoji-id="5258274739041883702">👥</tg-emoji> У вас пока нет рефералов.</blockquote>',
             types.InlineKeyboardMarkup(
                 inline_keyboard=[[types.InlineKeyboardButton(text='Назад', callback_data='menu_referrals')]]
             ),
