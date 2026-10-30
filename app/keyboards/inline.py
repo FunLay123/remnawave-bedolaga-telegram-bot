@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import PERIOD_PRICES, settings
 from app.database.models import User
+from app.legal_documents import LEGAL_EMOJI_ID
 from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts
 from app.utils.legacy_subscription import is_legacy_subscription as _legacy_subscription
@@ -2307,40 +2308,99 @@ def get_referral_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMar
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
+SUPPORT_URL = 'https://t.me/FunLay123'
+SUPPORT_BUTTON_ICON_ID = '5332588449335628124'
+
+
 def get_support_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
     texts = get_texts(language)
-    try:
-        from app.services.support_settings_service import SupportSettingsService
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text='Документы',
+                    callback_data='legal_docs',
+                    icon_custom_emoji_id=LEGAL_EMOJI_ID,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text='Написать в поддержку',
+                    url=SUPPORT_URL,
+                    icon_custom_emoji_id=SUPPORT_BUTTON_ICON_ID,
+                    style='primary',
+                )
+            ],
+            [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
+        ]
+    )
 
-        tickets_enabled = SupportSettingsService.is_tickets_enabled()
-        contact_enabled = SupportSettingsService.is_contact_enabled()
-    except Exception:
-        tickets_enabled = True
-        contact_enabled = True
+
+def get_legal_gate_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text='Публичная оферта', callback_data='legal_doc:offer:1:gate'),
+                InlineKeyboardButton(text='Правила сервиса', callback_data='legal_doc:rules:1:gate'),
+            ],
+            [
+                InlineKeyboardButton(text='Политика возвратов', callback_data='legal_doc:refund:1:gate'),
+                InlineKeyboardButton(text='Политика конфиденциальности', callback_data='legal_doc:privacy:1:gate'),
+            ],
+            [
+                InlineKeyboardButton(
+                    text='Принимаю',
+                    callback_data='legal_accept',
+                    icon_custom_emoji_id='5460980668378931880',
+                    style='primary',
+                )
+            ],
+        ]
+    )
+
+
+def get_legal_documents_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    texts = get_texts(language)
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text='Публичная оферта', callback_data='legal_doc:offer:1:hub')],
+            [InlineKeyboardButton(text='Политика возвратов', callback_data='legal_doc:refund:1:hub')],
+            [InlineKeyboardButton(text='Политика конфиденциальности', callback_data='legal_doc:privacy:1:hub')],
+            [InlineKeyboardButton(text='Правила сервиса', callback_data='legal_doc:rules:1:hub')],
+            [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
+        ]
+    )
+
+
+def get_legal_document_keyboard(
+    key: str,
+    page: int,
+    total: int,
+    origin: str,
+    language: str = DEFAULT_LANGUAGE,
+) -> InlineKeyboardMarkup:
+    texts = get_texts(language)
+    back = 'legal_gate' if origin == 'gate' else 'legal_docs'
     rows: list[list[InlineKeyboardButton]] = []
-    # Tickets
-    if tickets_enabled:
-        rows.append(
-            [
+    if total > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 1:
+            nav.append(
                 InlineKeyboardButton(
-                    text=texts.t('CREATE_TICKET_BUTTON', '🎫 Создать тикет'), callback_data='create_ticket'
+                    text='‹',
+                    callback_data=f'legal_doc:{key}:{page - 1}:{origin}',
                 )
-            ]
-        )
-        rows.append(
-            [InlineKeyboardButton(text=texts.t('MY_TICKETS_BUTTON', '📋 Мои тикеты'), callback_data='my_tickets')]
-        )
-    # Direct contact
-    if contact_enabled and settings.get_support_contact_url():
-        rows.append(
-            [
+            )
+        nav.append(InlineKeyboardButton(text=f'{page}/{total}', callback_data='noop'))
+        if page < total:
+            nav.append(
                 InlineKeyboardButton(
-                    text=texts.t('CONTACT_SUPPORT_BUTTON', '💬 Связаться с поддержкой'),
-                    url=settings.get_support_contact_url() or 'https://t.me/',
+                    text='›',
+                    callback_data=f'legal_doc:{key}:{page + 1}:{origin}',
                 )
-            ]
-        )
-    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
+            )
+        rows.append(nav)
+    rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=back)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

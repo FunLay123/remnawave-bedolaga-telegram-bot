@@ -8,6 +8,7 @@ def is_registration_process(event: TelegramObject, current_state: str | None) ->
         RegistrationStates.waiting_for_language.state,
         RegistrationStates.waiting_for_rules_accept.state,
         RegistrationStates.waiting_for_privacy_policy_accept.state,
+        RegistrationStates.waiting_for_legal_accept.state,
         RegistrationStates.waiting_for_referral_code.state,
     ]
 
@@ -16,10 +17,13 @@ def is_registration_process(event: TelegramObject, current_state: str | None) ->
         'rules_decline',
         'privacy_policy_accept',
         'privacy_policy_decline',
+        'legal_accept',
+        'legal_gate',
         'referral_skip',
     ]
 
     language_select_prefix = 'language_select:'
+    legal_document_prefix = 'legal_doc:'
 
     if current_state in registration_states:
         return True
@@ -27,7 +31,11 @@ def is_registration_process(event: TelegramObject, current_state: str | None) ->
     if (
         isinstance(event, CallbackQuery)
         and event.data
-        and (event.data in registration_callbacks or event.data.startswith(language_select_prefix))
+        and (
+            event.data in registration_callbacks
+            or event.data.startswith(language_select_prefix)
+            or event.data.startswith(legal_document_prefix)
+        )
     ):
         return True
 

@@ -8,6 +8,7 @@ from app.handlers import (
     balance,
     common,
     contests as user_contests,
+    legal_documents,
     menu,
     polls as user_polls,
     promocode,
@@ -186,6 +187,7 @@ async def setup_bot() -> tuple[Bot, Dispatcher]:
     dp.callback_query.middleware(SubscriptionStatusMiddleware())
     dp.pre_checkout_query.middleware(SubscriptionStatusMiddleware())
     start.register_handlers(dp)
+    legal_documents.register_handlers(dp)
     menu.register_handlers(dp)
     subscription.register_handlers(dp)
     register_gift_handlers(dp)

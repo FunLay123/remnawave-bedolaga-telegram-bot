@@ -141,6 +141,7 @@ class AuthMiddleware(BaseMiddleware):
                         RegistrationStates.waiting_for_language.state,
                         RegistrationStates.waiting_for_rules_accept.state,
                         RegistrationStates.waiting_for_privacy_policy_accept.state,
+                        RegistrationStates.waiting_for_legal_accept.state,
                         RegistrationStates.waiting_for_referral_code.state,
                     ]
 
@@ -157,9 +158,12 @@ class AuthMiddleware(BaseMiddleware):
                                     'rules_decline',
                                     'privacy_policy_accept',
                                     'privacy_policy_decline',
+                                    'legal_accept',
+                                    'legal_gate',
                                     'referral_skip',
                                 ]
                                 or event.data.startswith('language_select:')
+                                or event.data.startswith('legal_doc:')
                             )
                         )
                     )

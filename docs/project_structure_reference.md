@@ -95,6 +95,7 @@
 - `app/external/`
 - `app/handlers/`
 - `app/keyboards/`
+- `app/legal_documents/`
 - `app/lib/`
 - `app/localization/`
 - `app/logging_config.py` — Python-модуль
@@ -964,6 +965,9 @@
 - `app/handlers/gift_activation.py` — Python-модуль
   Классы: нет
   Функции: `handle_gift_activate` — Handle gift_activate:{purchase_id} callback from Telegram notification., `register_handlers`
+- `app/handlers/legal_documents.py` — Python-модуль
+  Классы: нет
+  Функции: `show_documents`, `show_legal_gate`, `show_document`, `register_handlers`
 - `app/handlers/menu.py` — Python-модуль
   Классы: нет
   Функции: `build_main_menu_keyboard` — Клавиатура главного меню: show_main_menu, handle_back_to_menu и живое меню (live_menu_service)., `show_main_menu`, `handle_profile_unavailable`, `show_service_rules`, `show_info_menu`, `show_promo_groups_info`, `show_faq_pages`, `show_faq_page`, `show_privacy_policy`, `show_public_offer`, `show_info_page`, `show_language_menu`, `process_language_change`, `handle_back_to_menu`, `get_main_menu_text`, `handle_activate_button` — Умная кнопка активации — система сама решает что делать:, `register_handlers`
@@ -990,7 +994,7 @@
   Функции: `handle_pre_checkout_query`, `handle_successful_payment`, `register_stars_handlers`
 - `app/handlers/start.py` — Python-модуль
   Классы: нет
-  Функции: `answer_menu_with_media` — Отвечает меню с медиа-шапкой на входящее сообщение (например, /start)., `send_menu_with_media` — Отправляет меню с медиа-шапкой: видео → фото-логотип → обычный текст., `handle_potential_referral_code`, `cmd_start`, `process_language_selection`, `process_rules_accept` — Обрабатывает принятие или отклонение правил пользователем., `process_privacy_policy_accept`, `process_referral_code_input`, `process_referral_code_skip`, `complete_registration_from_callback`, `complete_registration`, `get_referral_code_keyboard`, `get_main_menu_text`, `get_main_menu_text_simple`, `required_sub_channel_check`, `process_webauth_confirm` — Handle web auth confirmation or denial., `register_handlers`
+  Функции: `answer_menu_with_media` — Отвечает меню с медиа-шапкой на входящее сообщение (например, /start)., `send_menu_with_media` — Отправляет меню с медиа-шапкой: видео → фото-логотип → обычный текст., `handle_potential_referral_code`, `cmd_start`, `process_language_selection`, `process_legal_accept`, `process_rules_accept` — Обрабатывает принятие или отклонение правил пользователем., `process_privacy_policy_accept`, `process_referral_code_input`, `process_referral_code_skip`, `complete_registration_from_callback`, `complete_registration`, `get_referral_code_keyboard`, `get_main_menu_text`, `get_main_menu_text_simple`, `required_sub_channel_check`, `process_webauth_confirm` — Handle web auth confirmation or denial., `register_handlers`
 - `app/handlers/subscription/`
 - `app/handlers/support.py` — Python-модуль
   Классы: нет
@@ -1303,7 +1307,7 @@
   Функции: `is_group_safe_callback` — Можно ли обрабатывать это нажатие вне лички., `strip_group_unsafe_buttons` — Оставляет для группы только URL-кнопки и разрешённые callback'и.
 - `app/keyboards/inline.py` — Python-модуль
   Классы: нет
-  Функции: `pad_button_labels` — Добить подписи кнопок с кастомной иконкой до равной длины., `get_main_menu_keyboard_async` — Асинхронная версия get_main_menu_keyboard с поддержкой конструктора меню., `get_rules_keyboard`, `get_privacy_policy_keyboard`, `get_channel_sub_keyboard` — Subscription keyboard for required channels., `get_post_registration_keyboard`, `get_language_selection_keyboard`, `get_main_menu_keyboard`, `get_info_menu_keyboard`, `get_happ_download_button_row`, `get_happ_cryptolink_keyboard`, `get_happ_download_platform_keyboard`, `get_happ_download_link_keyboard`, `get_back_keyboard`, `get_server_status_keyboard`, `get_insufficient_balance_keyboard`, `get_subscription_keyboard`, `get_payment_methods_keyboard_with_cart`, `get_subscription_confirm_keyboard_with_cart`, `get_insufficient_balance_keyboard_with_cart`, `get_trial_keyboard`, `get_subscription_period_keyboard` — Generate subscription period selection keyboard with personalized pricing., `get_traffic_packages_keyboard`, `get_countries_keyboard`, `get_devices_keyboard`, `get_subscription_confirm_keyboard`, `get_balance_keyboard`, `get_payment_methods_keyboard`, `get_yookassa_payment_keyboard`, `get_autopay_notification_keyboard`, `get_referral_keyboard`, `get_support_keyboard`, `get_pagination_keyboard`, `get_confirmation_keyboard`, `get_autopay_keyboard` — Экран автоплатежа: статус и один переключатель., `get_saved_cards_keyboard`, `get_confirm_unlink_keyboard`, `get_autopay_days_keyboard`, `get_autopay_period_keyboard` — Period picker for autopay. `current_period=None` means "use default"., `get_add_traffic_keyboard` — Args:, `get_add_traffic_keyboard_from_tariff` — Клавиатура для докупки трафика из настроек тарифа., `get_premium_traffic_squads_keyboard` — Клавиатура выбора сервера для докупки премиум-трафика (посквадных лимитов)., `get_premium_traffic_packages_keyboard` — Клавиатура выбора объёма докупки премиум-трафика для одного сервера., `get_change_devices_keyboard`, `get_confirm_change_devices_keyboard`, `get_confirm_traffic_purchase_keyboard` — Подтверждение покупки трафика — как у изменения лимита устройств., `get_reset_traffic_confirm_keyboard`, `get_manage_countries_keyboard`, `get_device_selection_keyboard`, `get_connection_guide_keyboard`, `get_app_selection_keyboard`, `get_specific_app_keyboard`, `get_extend_subscription_keyboard_with_prices`, `get_cryptobot_payment_keyboard`, `get_devices_management_keyboard` — Кнопки списка устройств: одна полная кнопка на устройство., `get_updated_subscription_settings_keyboard`, `get_device_management_help_keyboard`, `get_ticket_cancel_keyboard`, `get_my_tickets_keyboard`, `get_ticket_view_keyboard`, `get_ticket_reply_cancel_keyboard`, `get_admin_tickets_keyboard`, `get_admin_ticket_view_keyboard`, `get_ticket_notification_keyboard` — Клавиатура для уведомления о тикете (личный или групповой админ-чат)., `get_admin_ticket_reply_cancel_keyboard`
+  Функции: `pad_button_labels` — Добить подписи кнопок с кастомной иконкой до равной длины., `get_main_menu_keyboard_async` — Асинхронная версия get_main_menu_keyboard с поддержкой конструктора меню., `get_rules_keyboard`, `get_privacy_policy_keyboard`, `get_channel_sub_keyboard` — Subscription keyboard for required channels., `get_post_registration_keyboard`, `get_language_selection_keyboard`, `get_main_menu_keyboard`, `get_info_menu_keyboard`, `get_happ_download_button_row`, `get_happ_cryptolink_keyboard`, `get_happ_download_platform_keyboard`, `get_happ_download_link_keyboard`, `get_back_keyboard`, `get_server_status_keyboard`, `get_insufficient_balance_keyboard`, `get_subscription_keyboard`, `get_payment_methods_keyboard_with_cart`, `get_subscription_confirm_keyboard_with_cart`, `get_insufficient_balance_keyboard_with_cart`, `get_trial_keyboard`, `get_subscription_period_keyboard` — Generate subscription period selection keyboard with personalized pricing., `get_traffic_packages_keyboard`, `get_countries_keyboard`, `get_devices_keyboard`, `get_subscription_confirm_keyboard`, `get_balance_keyboard`, `get_payment_methods_keyboard`, `get_yookassa_payment_keyboard`, `get_autopay_notification_keyboard`, `get_referral_keyboard`, `get_support_keyboard`, `get_legal_gate_keyboard`, `get_legal_documents_keyboard`, `get_legal_document_keyboard`, `get_pagination_keyboard`, `get_confirmation_keyboard`, `get_autopay_keyboard` — Экран автоплатежа: статус и один переключатель., `get_saved_cards_keyboard`, `get_confirm_unlink_keyboard`, `get_autopay_days_keyboard`, `get_autopay_period_keyboard` — Period picker for autopay. `current_period=None` means "use default"., `get_add_traffic_keyboard` — Args:, `get_add_traffic_keyboard_from_tariff` — Клавиатура для докупки трафика из настроек тарифа., `get_premium_traffic_squads_keyboard` — Клавиатура выбора сервера для докупки премиум-трафика (посквадных лимитов)., `get_premium_traffic_packages_keyboard` — Клавиатура выбора объёма докупки премиум-трафика для одного сервера., `get_change_devices_keyboard`, `get_confirm_change_devices_keyboard`, `get_confirm_traffic_purchase_keyboard` — Подтверждение покупки трафика — как у изменения лимита устройств., `get_reset_traffic_confirm_keyboard`, `get_manage_countries_keyboard`, `get_device_selection_keyboard`, `get_connection_guide_keyboard`, `get_app_selection_keyboard`, `get_specific_app_keyboard`, `get_extend_subscription_keyboard_with_prices`, `get_cryptobot_payment_keyboard`, `get_devices_management_keyboard` — Кнопки списка устройств: одна полная кнопка на устройство., `get_updated_subscription_settings_keyboard`, `get_device_management_help_keyboard`, `get_ticket_cancel_keyboard`, `get_my_tickets_keyboard`, `get_ticket_view_keyboard`, `get_ticket_reply_cancel_keyboard`, `get_admin_tickets_keyboard`, `get_admin_ticket_view_keyboard`, `get_ticket_notification_keyboard` — Клавиатура для уведомления о тикете (личный или групповой админ-чат)., `get_admin_ticket_reply_cancel_keyboard`
 - `app/keyboards/reply.py` — Python-модуль
   Классы: нет
   Функции: `get_main_reply_keyboard`, `get_admin_reply_keyboard`, `get_cancel_keyboard`, `get_confirmation_reply_keyboard`, `get_skip_keyboard`, `remove_keyboard`, `get_contact_keyboard`, `get_location_keyboard`
@@ -1313,6 +1317,16 @@
 - `app/keyboards/withdrawal.py` — Python-модуль
   Классы: нет
   Функции: `get_withdrawal_request_keyboard` — Клавиатура заявки по её статусу и роли получателя; ``None`` — кнопок нет.
+
+### app/legal_documents
+
+- `app/legal_documents/__init__.py` — Python-модуль
+  Классы: `LegalDocument`
+  Функции: `load_document_text`, `document_pages`, `entry_gate_text`
+- `app/legal_documents/offer.html` — файл
+- `app/legal_documents/privacy.html` — файл
+- `app/legal_documents/refund.html` — файл
+- `app/legal_documents/rules.html` — файл
 
 ### app/lib
 
@@ -2723,11 +2737,17 @@
 ### docs/superpowers
 
 - `docs/superpowers/plans/`
+- `docs/superpowers/specs/`
 
 #### docs/superpowers/plans
 
 - `docs/superpowers/plans/2026-10-29-referral-days-only-backend.md` — файл
 - `docs/superpowers/plans/2026-10-29-referral-days-only-ui.md` — файл
+- `docs/superpowers/plans/2026-10-30-legal-documents-support-menu.md` — файл
+
+#### docs/superpowers/specs
+
+- `docs/superpowers/specs/2026-10-30-legal-documents-support-menu-design.md` — файл
 
 ## migrations
 

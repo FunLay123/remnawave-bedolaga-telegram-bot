@@ -84,7 +84,7 @@ from app.services.support_settings_service import SupportSettingsService
 from app.services.web_auth_service import WEB_AUTH_TOKEN_MIN_LENGTH, link_web_auth_token
 from app.states import RegistrationStates
 from app.utils.gift_links import InvalidGiftTokenError, parse_gift_claim_input
-from app.utils.long_messages import answer_long_text, edit_long_text, send_long_text
+from app.utils.long_messages import answer_long_text, edit_long_text
 from app.utils.rich_menu import try_answer_rich_main_menu, try_send_rich_main_menu
 from app.utils.telegram_html import html_to_telegram
 from app.utils.user_utils import generate_unique_referral_code
@@ -1008,6 +1008,7 @@ async def handle_potential_referral_code(message: types.Message, state: FSMConte
     if current_state not in [
         RegistrationStates.waiting_for_rules_accept.state,
         RegistrationStates.waiting_for_privacy_policy_accept.state,
+        RegistrationStates.waiting_for_legal_accept.state,
         RegistrationStates.waiting_for_referral_code.state,
         None,
     ]:
@@ -1060,13 +1061,8 @@ async def handle_potential_referral_code(message: types.Message, state: FSMConte
         )
 
         if current_state != RegistrationStates.waiting_for_referral_code.state:
-            language = data.get('language', DEFAULT_LANGUAGE)
-            texts = get_texts(language)
-
-            rules_text = await _rules_for_telegram(language)
-            await answer_long_text(message, rules_text, reply_markup=get_rules_keyboard(language))
-            await state.set_state(RegistrationStates.waiting_for_rules_accept)
-            logger.info('📋 Правила отправлены после ввода реферального кода')
+            await _send_legal_gate(message.bot, message.chat.id, state, message=message)
+            logger.info('📄 Условия отправлены после ввода реферального кода')
         else:
             await complete_registration(message, state, db)
 
@@ -1095,13 +1091,8 @@ async def handle_potential_referral_code(message: types.Message, state: FSMConte
         )
 
         if current_state != RegistrationStates.waiting_for_referral_code.state:
-            language = data.get('language', DEFAULT_LANGUAGE)
-            texts = get_texts(language)
-
-            rules_text = await _rules_for_telegram(language)
-            await answer_long_text(message, rules_text, reply_markup=get_rules_keyboard(language))
-            await state.set_state(RegistrationStates.waiting_for_rules_accept)
-            logger.info('📋 Правила отправлены после принятия промокода')
+            await _send_legal_gate(message.bot, message.chat.id, state, message=message)
+            logger.info('📄 Условия отправлены после принятия промокода')
         else:
             await complete_registration(message, state, db)
 
@@ -1134,6 +1125,29 @@ async def _prompt_language_selection(message: types.Message, state: FSMContext) 
         _get_language_prompt_text(),
         reply_markup=get_language_selection_keyboard(),
     )
+
+
+async def _send_legal_gate(
+    bot,
+    chat_id: int,
+    state: FSMContext,
+    *,
+    message: types.Message | None = None,
+) -> None:
+    from app.keyboards.inline import get_legal_gate_keyboard
+    from app.legal_documents import entry_gate_text
+
+    data = await state.get_data() or {}
+    if data.get('legal_accepted'):
+        data['legal_accepted'] = False
+        await state.set_data(data)
+
+    text = entry_gate_text()
+    if message is not None:
+        await message.answer(text, reply_markup=get_legal_gate_keyboard(), parse_mode='HTML')
+    else:
+        await bot.send_message(chat_id, text, reply_markup=get_legal_gate_keyboard(), parse_mode='HTML')
+    await state.set_state(RegistrationStates.waiting_for_legal_accept)
 
 
 async def _continue_registration_after_language(
@@ -1186,17 +1200,20 @@ async def _continue_registration_after_language(
                 await _complete_registration_wrapper()
         return
 
-    rules_text = await _rules_for_telegram(language)
     try:
-        await answer_long_text(target_message, rules_text, reply_markup=get_rules_keyboard(language))
+        await _send_legal_gate(
+            target_message.bot,
+            target_message.chat.id,
+            state,
+            message=target_message,
+        )
     except TelegramForbiddenError:
         logger.warning(
-            '⚠️ Пользователь заблокировал бота, пропускаем отправку правил',
+            '⚠️ Пользователь заблокировал бота, пропускаем отправку условий',
             from_user_id=callback.from_user.id if callback else message.from_user.id,
         )
         return
-    await state.set_state(RegistrationStates.waiting_for_rules_accept)
-    logger.info('📋 LANGUAGE: Правила отправлены после выбора языка')
+    logger.info('📄 LANGUAGE: Условия отправлены после выбора языка')
 
 
 async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession, db_user=None):
@@ -1855,17 +1872,12 @@ async def process_language_selection(
     data['language'] = resolved_language
     await state.set_data(data)
 
-    texts = get_texts(resolved_language)
-
+    # После выбора языка сразу уходим в регистрацию. Подпись «язык установлен»
+    # при заходе только шумит: пользователь и так видит следующий экран.
     try:
-        await callback.message.edit_text(
-            texts.t('LANGUAGE_SELECTED', '🌐 Язык интерфейса обновлен.'),
-        )
+        await callback.message.delete()
     except Exception as error:
-        logger.warning('⚠️ LANGUAGE: Не удалось обновить сообщение выбора языка', error=error)
-        await callback.message.answer(
-            texts.t('LANGUAGE_SELECTED', '🌐 Язык интерфейса обновлен.'),
-        )
+        logger.warning('⚠️ LANGUAGE: Не удалось удалить сообщение выбора языка', error=error)
 
     await callback.answer()
 
@@ -1987,6 +1999,19 @@ async def _continue_registration_after_rules(
         except Exception as e:
             logger.error('Ошибка при показе вопроса о реферальном коде', error=e)
             await complete_registration_from_callback(callback, state, db)
+
+
+async def process_legal_accept(callback: types.CallbackQuery, state: FSMContext, db: AsyncSession):
+    data = await state.get_data() or {}
+    data['legal_accepted'] = True
+    await state.set_data(data)
+    language = data.get('language', DEFAULT_LANGUAGE)
+    try:
+        await callback.message.edit_text('✅ Условия приняты', reply_markup=None)
+    except Exception as error:
+        logger.warning('Не удалось обновить экран принятия условий', error=error)
+    await callback.answer()
+    await _continue_registration_after_rules(callback, state, db, language)
 
 
 async def process_rules_accept(callback: types.CallbackQuery, state: FSMContext, db: AsyncSession):
@@ -2264,6 +2289,30 @@ async def process_referral_code_skip(callback: types.CallbackQuery, state: FSMCo
     await complete_registration_from_callback(callback, state, db)
 
 
+async def _record_registration_consent(db: AsyncSession, user, data: dict) -> None:
+    if not data.get('legal_accepted') or settings.SKIP_RULES_ACCEPT:
+        return
+    from app.database.database import AsyncSessionLocal
+    from app.services.legal_consent_service import record_consent
+
+    # Отдельная сессия: сбой записи согласия не должен откатывать
+    # регистрационную сессию и оставлять пользователя без меню.
+    try:
+        async with AsyncSessionLocal() as consent_db:
+            await record_consent(
+                consent_db,
+                user,
+                ['public_offer', 'service_rules'],
+                source='bot_registration',
+            )
+    except Exception as error:
+        logger.warning(
+            'Не удалось записать согласие с юридическими документами',
+            user_id=getattr(user, 'id', None),
+            error=error,
+        )
+
+
 async def complete_registration_from_callback(callback: types.CallbackQuery, state: FSMContext, db: AsyncSession):
     logger.info('🎯 COMPLETE: Завершение регистрации для пользователя', from_user_id=callback.from_user.id)
 
@@ -2474,6 +2523,8 @@ async def complete_registration_from_callback(callback: types.CallbackQuery, sta
         await db.commit()
         await db.refresh(existing_user, ['subscriptions'])
         user = existing_user
+
+    await _record_registration_consent(db, user, data)
 
     if referrer_id and referrer_id != user.id:
         try:
@@ -2833,6 +2884,8 @@ async def complete_registration(message: types.Message, state: FSMContext, db: A
         await db.refresh(existing_user, ['subscriptions'])
         user = existing_user
 
+    await _record_registration_consent(db, user, data)
+
     if referrer_id and referrer_id != user.id:
         try:
             await process_referral_registration(db, user.id, referrer_id, message.bot)
@@ -3078,8 +3131,6 @@ async def get_main_menu_text_simple(user_name, texts, db: AsyncSession):
 async def required_sub_channel_check(
     query: types.CallbackQuery, bot: Bot, state: FSMContext, db: AsyncSession, db_user=None
 ):
-    from app.utils.message_patch import _cache_logo_file_id, caption_exceeds_telegram_limit, get_logo_media
-
     language = DEFAULT_LANGUAGE
     texts = get_texts(language)
 
@@ -3284,8 +3335,6 @@ async def required_sub_channel_check(
             if pinned_message and not pinned_message.send_before_menu:
                 await _send_pinned_message(bot, db, user, pinned_message)
         else:
-            from app.keyboards.inline import get_rules_keyboard
-
             state_data['language'] = language
             await state.set_data(state_data)
 
@@ -3305,24 +3354,7 @@ async def required_sub_channel_check(
                 )
                 await state.set_state(RegistrationStates.waiting_for_referral_code)
             else:
-                rules_text = await _rules_for_telegram(language)
-
-                if settings.ENABLE_LOGO_MODE and not caption_exceeds_telegram_limit(rules_text):
-                    _result = await bot.send_photo(
-                        chat_id=query.from_user.id,
-                        photo=get_logo_media(),
-                        caption=rules_text,
-                        reply_markup=get_rules_keyboard(language),
-                    )
-                    _cache_logo_file_id(_result)
-                else:
-                    await send_long_text(
-                        bot,
-                        query.from_user.id,
-                        rules_text,
-                        reply_markup=get_rules_keyboard(language),
-                    )
-                await state.set_state(RegistrationStates.waiting_for_rules_accept)
+                await _send_legal_gate(bot, query.from_user.id, state)
 
     except TelegramBadRequest as e:
         error_msg = str(e).lower()
@@ -3400,6 +3432,13 @@ def register_handlers(dp: Dispatcher):
     logger.debug('Зарегистрирован process_privacy_policy_accept')
 
     dp.callback_query.register(
+        process_legal_accept,
+        F.data == 'legal_accept',
+        StateFilter(RegistrationStates.waiting_for_legal_accept),
+    )
+    logger.debug('Зарегистрирован process_legal_accept')
+
+    dp.callback_query.register(
         process_language_selection,
         F.data.startswith('language_select:'),
         StateFilter(RegistrationStates.waiting_for_language),
@@ -3416,7 +3455,11 @@ def register_handlers(dp: Dispatcher):
 
     dp.message.register(
         handle_potential_referral_code,
-        StateFilter(RegistrationStates.waiting_for_rules_accept, RegistrationStates.waiting_for_referral_code),
+        StateFilter(
+            RegistrationStates.waiting_for_rules_accept,
+            RegistrationStates.waiting_for_legal_accept,
+            RegistrationStates.waiting_for_referral_code,
+        ),
     )
     logger.debug('Зарегистрирован handle_potential_referral_code')
 
