@@ -51,9 +51,10 @@ async def test_days_only_list_shows_paid_status_and_days(monkeypatch):
     )
     captured = {}
 
-    async def fake_edit(callback, text, keyboard):
+    async def fake_edit(callback, text, keyboard, parse_mode='HTML', *, force_text=False):
         captured['text'] = text
         captured['keyboard'] = keyboard
+        captured['force_text'] = force_text
 
     monkeypatch.setattr(referral_handler, 'edit_or_answer_photo', fake_edit)
 
@@ -71,3 +72,4 @@ async def test_days_only_list_shows_paid_status_and_days(monkeypatch):
     assert 'пробует' in captured['text']
     assert 'Пополнений:' not in captured['text']
     assert 'Заработано с него' not in captured['text']
+    assert captured['force_text'] is True

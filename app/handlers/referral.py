@@ -592,6 +592,7 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
             types.InlineKeyboardMarkup(
                 inline_keyboard=[[types.InlineKeyboardButton(text='Назад', callback_data='menu_referrals')]]
             ),
+            force_text=True,
         )
         await callback.answer()
         return
@@ -608,17 +609,11 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
         else:
             name = html_escape(str(item.get('full_name') or ''))
         if item.get('has_first_purchase'):
-            text += (
-                '<tg-emoji emoji-id="5449444442056441600">•</tg-emoji> '
-                f'{name} — <tg-emoji emoji-id="5116414868357907335">✅</tg-emoji> оплатил'
-            )
+            text += f'• {name} — <tg-emoji emoji-id="5116414868357907335">✅</tg-emoji> оплатил'
             if item.get('days_earned'):
                 text += f', +{int(item["days_earned"])} дн.'
         else:
-            text += (
-                '<tg-emoji emoji-id="5449444442056441600">•</tg-emoji> '
-                f'{name} — <tg-emoji emoji-id="5123359615727174427">⏳</tg-emoji> пробует'
-            )
+            text += f'• {name} — <tg-emoji emoji-id="5123359615727174427">⏳</tg-emoji> пробует'
         text += '\n'
 
     rows = []
@@ -641,7 +636,7 @@ async def _show_days_only_referral_list(callback, db_user, db, referrals_data, p
         rows.append(navigation)
     rows.append([types.InlineKeyboardButton(text='Назад', callback_data='menu_referrals')])
 
-    await edit_or_answer_photo(callback, text, types.InlineKeyboardMarkup(inline_keyboard=rows))
+    await edit_or_answer_photo(callback, text, types.InlineKeyboardMarkup(inline_keyboard=rows), force_text=True)
     await callback.answer()
 
 
