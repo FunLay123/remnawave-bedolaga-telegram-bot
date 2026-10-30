@@ -1,5 +1,6 @@
 """Тесты rich-меню (Bot API 10.1): билдер HTML, delivery-хелперы, fallback-флаг."""
 
+import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -128,14 +129,19 @@ async def test_builder_keeps_premium_emoji_from_operator_texts(monkeypatch):
     поддерживают, и в классическом меню он работал.
     """
     _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
-    user = _make_user(_make_subscription(datetime.now(UTC)))
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: True)
+    subscription = _make_subscription(datetime.now(UTC))
+
+    async def fake_get_all(db, user_id):
+        return [subscription]
+
+    monkeypatch.setattr(rich_menu, 'get_all_subscriptions_by_user_id', fake_get_all)
+    user = _make_user(subscription)
 
     html_out = await rich_menu.build_main_menu_rich_html(user, PremiumEmojiTexts(), AsyncMock())
 
     assert '&lt;tg-emoji' not in html_out, 'тег премиум-эмодзи ушёл клиенту экранированным'
-    # в минималистичном меню из оформляемых текстов остался только баланс
+    # в мультитарифе баланс по-прежнему собирается из оформляемого текста
     assert html_out.count(f'<tg-emoji emoji-id="{PremiumEmojiTexts.EMOJI_ID}">') == 1
     assert 'Баланс:' in html_out
     # плейсхолдер шаблона по-прежнему подставляется
@@ -145,9 +151,14 @@ async def test_builder_keeps_premium_emoji_from_operator_texts(monkeypatch):
 async def test_builder_strips_disallowed_markup_from_operator_texts(monkeypatch):
     """Из текстов пропускаем только подмножество sanitize_html, а не любой HTML."""
     _patch_content_sources(monkeypatch)
-    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
-    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
-    user = _make_user(_make_subscription(datetime.now(UTC)))
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: True)
+    subscription = _make_subscription(datetime.now(UTC))
+
+    async def fake_get_all(db, user_id):
+        return [subscription]
+
+    monkeypatch.setattr(rich_menu, 'get_all_subscriptions_by_user_id', fake_get_all)
+    user = _make_user(subscription)
 
     html_out = await rich_menu.build_main_menu_rich_html(user, HostileTexts(), AsyncMock())
 
@@ -187,12 +198,13 @@ async def test_builder_single_subscription_structure(monkeypatch):
     subscription = _make_subscription(now, days_left=12)
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(subscription), DummyTexts(), AsyncMock())
 
-    assert html_out.startswith('<blockquote>✅ Активна · осталось 1')
+    assert html_out.startswith('<p>')
+    assert 'Активна · осталось 12 дн.' in html_out
     assert '<h4>' not in html_out
     assert '<footer>' not in html_out
     assert '<hr/>' not in html_out
     assert 'Егор' not in html_out
-    assert '📊 Трафик: 12.5 ГБ / 100 ГБ' in html_out
+    assert 'Трафик: 12.5 ГБ / 100 ГБ' in html_out
     assert '1250' in html_out
     assert 'Устройства' not in html_out
     assert html_out.count('(') == 1  # дата окончания в скобках
@@ -216,7 +228,9 @@ async def test_minimal_status_line_per_state(monkeypatch, status, days_left, exp
 
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(subscription), DummyTexts(), AsyncMock())
 
-    assert expected in html_out
+    # Статусные эмодзи приходят в tg-emoji-обёртке; проверяем формулировку, не разметку.
+    plain = re.sub(r'</?tg-emoji[^>]*>', '', html_out)
+    assert expected in plain
 
 
 async def test_minimal_menu_without_subscription_has_no_trial_link(monkeypatch):
@@ -227,7 +241,7 @@ async def test_minimal_menu_without_subscription_has_no_trial_link(monkeypatch):
 
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(None, trial_used=False), DummyTexts(), AsyncMock())
 
-    assert html_out.startswith('<blockquote>Нет активной подписки<br>')
+    assert html_out.startswith('<p>Нет активной подписки')
     assert 'trial' not in html_out
 
 
@@ -705,9 +719,9 @@ async def test_usage_row_in_multi_tariff_table(monkeypatch):
 
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(active), DummyTexts(), AsyncMock())
 
-    # Расход и кнопка подключения — в нижней colspan-строке ряда (узкая 4-я
+    # Расход и лимит устройств — в нижней colspan-строке ряда (узкая 4-я
     # колонка не влезала на мобильных: таблица уезжала за край экрана).
-    assert '<td colspan="3">📊 12.5 ГБ / 100 ГБ · 📱 3 · ' in html_out
+    assert '<td colspan="3">📊 12.5 ГБ / 100 ГБ · 📱 3</td>' in html_out
     assert '<td colspan="4"' not in html_out
 
 
@@ -832,7 +846,7 @@ async def test_logo_can_be_disabled_explicitly(monkeypatch, tmp_path, value):
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(None), DummyTexts(), AsyncMock())
 
     assert '<img' not in html_out
-    assert html_out.startswith('<blockquote>')  # меню собралось, просто без логотипа
+    assert html_out.startswith('<p>')  # меню собралось, просто без логотипа
 
 
 async def test_non_http_logo_value_disables_logo_instead_of_breaking_menu(monkeypatch, tmp_path):
@@ -898,8 +912,13 @@ async def test_unknown_send_error_without_logo_falls_back_to_classic(monkeypatch
     assert bot.send_rich_message.await_count == 1
 
 
-async def test_connect_link_for_active_subscription_in_table(monkeypatch):
-    """Активная строка таблицы получает «кнопку» подключения — ссылку на subscription_url."""
+async def test_connect_link_is_not_duplicated_in_table(monkeypatch):
+    """Подключение живёт в кнопке меню, а не ссылкой в строке таблицы.
+
+    Ссылку в colspan-строке отключили 2026-10-01 (bf06f90b): она дублировала
+    кнопку и раздувала строку расхода. Тест сторожит, чтобы она не вернулась
+    вторым путём.
+    """
     _patch_content_sources(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: True)
 
@@ -913,7 +932,8 @@ async def test_connect_link_for_active_subscription_in_table(monkeypatch):
 
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(active), DummyTexts(), AsyncMock())
 
-    assert '<a href="https://sub.example.com/u/abc"><b>⚡ Подключить</b></a>' in html_out
+    assert '⚡ Подключить' not in html_out
+    assert 'https://sub.example.com/u/abc' not in html_out
 
 
 async def test_connect_link_hidden_when_subscription_link_hidden(monkeypatch):

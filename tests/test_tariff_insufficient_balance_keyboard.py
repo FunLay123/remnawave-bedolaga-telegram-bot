@@ -98,15 +98,16 @@ def test_falls_back_to_topup_without_direct_payment_methods(monkeypatch):
     assert 'balance_topup' in _callbacks(keyboard)
 
 
-def test_extend_inlines_prefilled_payment_when_autopurchase_enabled(monkeypatch):
+def test_extend_offers_single_topup_button_when_autopurchase_enabled(monkeypatch):
     monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
     monkeypatch.setattr(settings, 'TELEGRAM_STARS_ENABLED', True)
 
     keyboard = get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=50000)
     callbacks = _callbacks(keyboard)
 
-    assert 'topup_amount|stars|50000' in callbacks
-    assert 'balance_topup' not in callbacks
+    # отдельные topup_amount|… больше не нужны: сумма недостачи лежит в корзине
+    assert 'balance_topup' in callbacks
+    assert not any((c or '').startswith('topup_amount|') for c in callbacks)
     assert 'subscription_extend' in callbacks
     assert not any((c or '').startswith('tariff_select:') for c in callbacks)
     assert not any((c or '').startswith('tariff_sbp:') for c in callbacks)
@@ -124,8 +125,8 @@ def test_extend_classic_topup_when_autopurchase_disabled(monkeypatch):
     assert not any((c or '').startswith('topup_amount|') for c in callbacks)
 
 
-def test_extend_prefilled_amount_is_missing_not_full_price(monkeypatch):
-    """Частичная нехватка: доплата = missing (260), не цена (630) и не баланс (370)."""
+def test_extend_topup_amount_is_missing_not_full_price(monkeypatch):
+    """Частичная нехватка: на кнопке missing (260), не цена (630) и не баланс (370)."""
     monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
     monkeypatch.setattr(settings, 'TELEGRAM_STARS_ENABLED', True)
 
@@ -134,12 +135,13 @@ def test_extend_prefilled_amount_is_missing_not_full_price(monkeypatch):
     missing = price - balance  # 26000
 
     keyboard = get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=missing)
-    callbacks = _callbacks(keyboard)
+    buttons = [button for row in keyboard.inline_keyboard for button in row]
+    texts = [button.text for button in buttons]
 
-    assert f'topup_amount|stars|{missing}' in callbacks
-    assert f'topup_amount|stars|{price}' not in callbacks
-    assert f'topup_amount|stars|{balance}' not in callbacks
-    assert 'subscription_extend' in callbacks
+    assert f'Пополнить на {settings.format_price(missing)}' in texts
+    assert f'Пополнить на {settings.format_price(price)}' not in texts
+    assert f'Пополнить на {settings.format_price(balance)}' not in texts
+    assert 'subscription_extend' in [button.callback_data for button in buttons]
 
 
 def test_extend_back_points_at_the_subscription_in_multi_tariff(monkeypatch):

@@ -1281,7 +1281,7 @@ class TestNotifications:
 
         await service._notify_exhausted(_target(display_name=''), _state())
 
-        assert sent and 'ремиум' in sent[0]
+        assert sent and 'Белые списки' in sent[0]
 
     async def test_message_carries_used_and_limit(self, monkeypatch):
         service = PremiumTrafficService()
