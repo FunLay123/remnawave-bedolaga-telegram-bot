@@ -25,6 +25,7 @@ from app.database.models import (
     UserPromoGroup,
 )
 from app.utils.miniapp_buttons import build_subscription_extend_button
+from app.utils.notification_emoji import style_notification_text
 
 
 logger = structlog.get_logger(__name__)
@@ -390,7 +391,7 @@ async def _process_single_subscription(
                         msg += f'\n📦 Тариф: «{subscription.tariff.name}»'
                     await bot.send_message(
                         chat_id=user.telegram_id,
-                        text=msg,
+                        text=style_notification_text(msg),
                         parse_mode='HTML',
                         reply_markup=keyboard,
                     )
@@ -443,7 +444,7 @@ async def _process_single_subscription(
                 msg += f'\n📦 Тариф: «{subscription.tariff.name}»'
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=msg,
+                text=style_notification_text(msg),
                 parse_mode='HTML',
                 reply_markup=keyboard,
             )

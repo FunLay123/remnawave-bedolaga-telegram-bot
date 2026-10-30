@@ -28,6 +28,7 @@ from app.utils.gift_links import (
     build_gift_claim_artifacts,
     build_telegram_gift_share_url,
 )
+from app.utils.notification_emoji import style_notification_text
 from app.utils.timezone import format_local_datetime
 
 
@@ -445,7 +446,7 @@ async def send_gift_result_message(
     try:
         return await bot.send_message(
             chat_id=target_chat_id,
-            text=text,
+            text=style_notification_text(text),
             reply_markup=keyboard,
             parse_mode='HTML',
         )

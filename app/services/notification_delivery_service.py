@@ -18,6 +18,7 @@ from app.services.notification_types import (
     MARKETING_NOTIFICATION_TYPES,
     NotificationType,
 )
+from app.utils.notification_emoji import style_notification_text
 from app.utils.timezone import format_email_datetime
 
 
@@ -245,6 +246,8 @@ class NotificationDeliveryService:
                 telegram_id=user.telegram_id,
             )
             return False
+
+        message = style_notification_text(message, notification_type=notification_type)
 
         from aiogram.exceptions import (
             TelegramBadRequest,

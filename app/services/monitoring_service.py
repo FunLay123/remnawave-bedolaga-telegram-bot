@@ -80,6 +80,7 @@ from app.utils.cache import cache
 from app.utils.formatters import format_username_link
 from app.utils.message_patch import caption_exceeds_telegram_limit
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button, build_subscription_extend_button
+from app.utils.notification_emoji import style_notification_text
 from app.utils.promo_offer import get_user_active_promo_discount_percent
 from app.utils.rich_notify import try_send_rich_notification
 from app.utils.subscription_time import ends_within_days
@@ -223,6 +224,8 @@ class MonitoringService:
         if not chat_id:
             logger.debug('Пропуск уведомления: chat_id не указан (email-пользователь)')
             return None
+
+        text = style_notification_text(text)
 
         # Skip blocked/deleted users to save Telegram rate limits
         if user and user.status in (UserStatus.BLOCKED.value, UserStatus.DELETED.value):
@@ -1626,7 +1629,7 @@ class MonitoringService:
                             ):
                                 await self.bot.send_message(
                                     chat_id=user.telegram_id,
-                                    text=(
+                                    text=style_notification_text(
                                         '⚠️ <b>Автоплатёж приостановлен</b>\n\n'
                                         'Ваша подписка была создана до введения тарифов. '
                                         'Для работы автоплатежа необходимо выбрать тариф.\n\n'
@@ -2700,6 +2703,7 @@ class MonitoringService:
                         limit=traffic_limit,
                         percent=current_percent,
                     )
+                    message = style_notification_text(message)
                     await self.bot.send_message(
                         user.telegram_id,
                         message,
@@ -2804,6 +2808,7 @@ class MonitoringService:
                         balance=f'{balance_rub:.0f}',
                         threshold=f'{threshold_rub:.0f}',
                     )
+                    message = style_notification_text(message)
 
                     # Build inline keyboard with cabinet top-up button
                     keyboard = None

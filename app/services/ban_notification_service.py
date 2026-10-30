@@ -18,6 +18,7 @@ from app.services.notification_delivery_service import (
     notification_delivery_service,
 )
 from app.services.remnawave_service import remnawave_service
+from app.utils.notification_emoji import style_notification_text
 
 
 logger = structlog.get_logger(__name__)
@@ -150,7 +151,10 @@ class BanNotificationService:
         # Отправляем сообщение с кнопкой удаления
         try:
             await self._bot.send_message(
-                chat_id=user.telegram_id, text=message_text, parse_mode='HTML', reply_markup=get_delete_keyboard()
+                chat_id=user.telegram_id,
+                text=style_notification_text(message_text),
+                parse_mode='HTML',
+                reply_markup=get_delete_keyboard(),
             )
             logger.info(
                 'Уведомление о бане отправлено пользователю',
@@ -202,7 +206,10 @@ class BanNotificationService:
         # Отправляем сообщение с кнопкой удаления
         try:
             await self._bot.send_message(
-                chat_id=user.telegram_id, text=message_text, parse_mode='HTML', reply_markup=get_delete_keyboard()
+                chat_id=user.telegram_id,
+                text=style_notification_text(message_text),
+                parse_mode='HTML',
+                reply_markup=get_delete_keyboard(),
             )
             logger.info(
                 'Уведомление о разбане отправлено пользователю',
@@ -264,7 +271,10 @@ class BanNotificationService:
         # Отправляем сообщение с кнопкой удаления
         try:
             await self._bot.send_message(
-                chat_id=user.telegram_id, text=message_text, parse_mode='HTML', reply_markup=get_delete_keyboard()
+                chat_id=user.telegram_id,
+                text=style_notification_text(message_text),
+                parse_mode='HTML',
+                reply_markup=get_delete_keyboard(),
             )
             logger.info(
                 'Предупреждение отправлено пользователю',
@@ -341,7 +351,10 @@ class BanNotificationService:
         # Отправляем сообщение с кнопкой удаления
         try:
             await self._bot.send_message(
-                chat_id=user.telegram_id, text=message_text, parse_mode='HTML', reply_markup=get_delete_keyboard()
+                chat_id=user.telegram_id,
+                text=style_notification_text(message_text),
+                parse_mode='HTML',
+                reply_markup=get_delete_keyboard(),
             )
             logger.info(
                 'Уведомление о WiFi бане отправлено пользователю',
@@ -417,7 +430,10 @@ class BanNotificationService:
         # Отправляем сообщение с кнопкой удаления
         try:
             await self._bot.send_message(
-                chat_id=user.telegram_id, text=message_text, parse_mode='HTML', reply_markup=get_delete_keyboard()
+                chat_id=user.telegram_id,
+                text=style_notification_text(message_text),
+                parse_mode='HTML',
+                reply_markup=get_delete_keyboard(),
             )
             logger.info(
                 'Уведомление о Mobile бане отправлено пользователю',
@@ -498,7 +514,7 @@ class BanNotificationService:
         try:
             await self._bot.send_message(
                 chat_id=user.telegram_id,
-                text=message_text,
+                text=style_notification_text(message_text),
                 parse_mode='HTML',
                 reply_markup=get_delete_keyboard(),
             )

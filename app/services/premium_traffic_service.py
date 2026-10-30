@@ -42,6 +42,7 @@ from app.database.crud.premium_traffic import (
 from app.database.database import AsyncSessionLocal
 from app.database.models import Subscription, SubscriptionPremiumTraffic, SubscriptionStatus, Tariff
 from app.services.remnawave_service import RemnaWaveService
+from app.utils.notification_emoji import style_notification_text
 from app.utils.panel_node_usage import normalize_node_usage
 from app.utils.premium_traffic import (
     BYTES_IN_GB,
@@ -1155,6 +1156,7 @@ class PremiumTrafficService:
             used=round((state.used_bytes or 0) / BYTES_IN_GB, 1),
             limit=round(state.total_limit_bytes / BYTES_IN_GB, 1),
         )
+        message = style_notification_text(message)
         try:
             await self._bot.send_message(user.telegram_id, message, parse_mode='HTML')
         except Exception as error:

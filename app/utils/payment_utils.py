@@ -4,6 +4,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.localization.texts import get_texts
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_button_styles import apply_button_style
 
 
@@ -106,7 +107,7 @@ def payment_success_text(
             )
         lines.append(f'{PAYMENT_SUB_BULLET} {balance_line}')
 
-    return '\n'.join(lines)
+    return style_notification_text('\n'.join(lines))
 
 
 def payment_support_text(user_id: str) -> str:

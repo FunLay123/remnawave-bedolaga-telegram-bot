@@ -57,6 +57,7 @@ from app.services.subscription_service import SubscriptionService
 from app.services.traffic_reset_policy import lift_panel_traffic_limit, should_reset_traffic_on_daily_charge
 from app.services.user_cart_service import user_cart_service
 from app.utils.formatters import format_days_declension
+from app.utils.notification_emoji import style_notification_text
 from app.utils.pricing_utils import format_period_description
 from app.utils.timezone import format_local_datetime
 
@@ -788,7 +789,7 @@ async def _auto_extend_subscription(
 
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=full_message,
+                text=style_notification_text(full_message),
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
@@ -1158,7 +1159,7 @@ async def _auto_purchase_tariff(
 
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=f'{message}\n\n{hint}',
+                text=style_notification_text(f'{message}\n\n{hint}'),
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
@@ -1515,7 +1516,7 @@ async def _auto_purchase_daily_tariff(
 
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=message,
+                text=style_notification_text(message),
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
@@ -1869,7 +1870,7 @@ async def _auto_add_devices(
 
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=message,
+                text=style_notification_text(message),
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
@@ -2226,7 +2227,7 @@ async def _auto_add_traffic(
 
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=message,
+                text=style_notification_text(message),
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
@@ -2616,7 +2617,7 @@ async def try_auto_extend_expired_after_topup(
 
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=full_message,
+                text=style_notification_text(full_message),
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
@@ -3036,7 +3037,7 @@ async def try_resume_disabled_daily_after_topup(
 
             await bot.send_message(
                 chat_id=user.telegram_id,
-                text=message,
+                text=style_notification_text(message),
                 reply_markup=keyboard,
                 parse_mode='HTML',
             )
@@ -3367,7 +3368,7 @@ async def _auto_purchase_gift(
                     'GIFT_AUTO_PURCHASE_FAILED',
                     '❌ Не удалось автоматически оформить подарок: выбранный тариф или услуга более недоступны.',
                 )
-                await bot.send_message(chat_id=user.telegram_id, text=err_msg)
+                await bot.send_message(chat_id=user.telegram_id, text=style_notification_text(err_msg))
             except Exception as notify_err:
                 logger.warning('Не удалось уведомить пользователя о сбое автопокупки подарка', error=str(notify_err))
         return False
@@ -3751,7 +3752,7 @@ async def _process_legacy_generic_cart(
 
                 await bot.send_message(
                     chat_id=user.telegram_id,
-                    text=full_message,
+                    text=style_notification_text(full_message),
                     reply_markup=keyboard,
                     parse_mode='HTML',
                 )
