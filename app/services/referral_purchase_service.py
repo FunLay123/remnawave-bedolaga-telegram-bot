@@ -696,7 +696,7 @@ async def _post_commit_effects(
                     await bot.send_message(
                         chat_id=referrer.telegram_id,
                         text=(
-                            '<tg-emoji emoji-id="5335020345717973061">🎉</tg-emoji> '
+                            '<tg-emoji emoji-id="5235695112419303615">🎉</tg-emoji> '
                             '<b>Друг купил подписку</b>\n\n'
                             f'Вам +{referrer_days_text} к текущей подписке.'
                         ),

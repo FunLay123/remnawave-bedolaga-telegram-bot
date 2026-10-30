@@ -66,10 +66,10 @@ async def test_days_only_list_shows_paid_status_and_days(monkeypatch):
     await referral_handler.show_detailed_referral_list(callback, db_user, db)
 
     assert '@ivan' in captured['text']
-    assert 'оплатил' in captured['text']
+    assert 'Оплатил' in captured['text']
     assert '+10 дн.' in captured['text']
     assert '@maria' in captured['text']
-    assert 'пробует' in captured['text']
+    assert 'Пробует' in captured['text']
     assert 'Пополнений:' not in captured['text']
     assert 'Заработано с него' not in captured['text']
     assert captured['force_text'] is True

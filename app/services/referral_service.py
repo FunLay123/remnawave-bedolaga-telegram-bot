@@ -699,7 +699,7 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
 
                 trial_bonus_days = settings.REFERRAL_TRIAL_BONUS_DAYS
                 welcome_message = (
-                    f'🎉 <b>Добро пожаловать!</b>\n\n'
+                    f'<tg-emoji emoji-id="5359415772844152891">🎉</tg-emoji> <b>Добро пожаловать!</b>\n\n'
                     f'Вы перешли по реферальной ссылке пользователя '
                     f'<b>{html.escape(referrer.full_name)}</b>!'
                 )
@@ -715,7 +715,7 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                     and not settings.is_trial_disabled_for_user(getattr(new_user, 'auth_type', None))
                 ):
                     welcome_message += (
-                        f'\n\n🎁 Вам +{trial_bonus_days} {_pluralize_days_ru(trial_bonus_days)} к пробному периоду.'
+                        f'\n\n<tg-emoji emoji-id="5235695112419303615">🎁</tg-emoji> Вам +{trial_bonus_days} {_pluralize_days_ru(trial_bonus_days)} к пробному периоду.'
                     )
                 await send_referral_notification(
                     bot,
@@ -728,10 +728,10 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
 
                 first_purchase_bonus_days = settings.REFERRAL_FIRST_PURCHASE_BONUS_DAYS
                 inviter_message = (
-                    f'👥 <b>Новый реферал!</b>\n\n'
-                    f'По вашей ссылке зарегистрировался пользователь '
+                    f'<tg-emoji emoji-id="5235695112419303615">👥</tg-emoji> <b>Новый реферал!</b>\n\n'
+                    f'По вашей ссылке зарегистрировался '
                     f'<b>{html.escape(new_user.full_name)}</b>!\n\n'
-                    f'🎁 Когда он впервые купит подписку от '
+                    f'Когда он впервые купит подписку от '
                     f'{settings.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS} дней, '
                     f'вы получите +{first_purchase_bonus_days} '
                     f'{_pluralize_days_ru(first_purchase_bonus_days)}.'

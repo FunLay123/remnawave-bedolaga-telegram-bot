@@ -110,8 +110,8 @@ def test_terms_block_uses_referral_settings(monkeypatch):
         trial_available=False,
     )
 
-    assert '• +7 дней к триалу другу' in text
-    assert '• +21 день вам и другу' in text
+    assert '+7 дней к триалу другу' in text
+    assert '+21 день вам и другу' in text
     assert 'за первую покупку от 60 дней' in text
 
 
