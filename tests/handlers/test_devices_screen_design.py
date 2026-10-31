@@ -90,7 +90,7 @@ def test_change_buttons_have_no_unicode_plus_minus():
 
 def _plain(text: str) -> str:
     """Типографские пробелы выравнивания → обычные, чтобы утверждения читались."""
-    for pad in ('\u00a0', '\u2007', '\u2002'):
+    for pad in (' ', ' ', ' ', '‍'):
         text = text.replace(pad, ' ')
     return text.strip()
 
@@ -111,12 +111,12 @@ def test_increase_price_uses_dot_separator_without_discount():
         assert 'скидка' not in text, text
 
 
-def test_decrease_button_has_no_price_suffix():
+def test_decrease_button_shows_zero_price():
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
     keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
 
     decrease = next(b for b in _buttons(keyboard) if b.callback_data == 'change_devices_3')
-    assert _plain(decrease.text) == '3 устройства'
+    assert ' '.join(_plain(decrease.text).split()) == '3 • 0₽'
 
 
 @pytest.mark.parametrize(
@@ -136,7 +136,7 @@ def test_device_declension(count, word):
     assert _get_device_declension(count) == word
 
 
-def test_labels_use_correct_declension():
+def test_labels_start_with_the_device_number():
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
     keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
 
@@ -145,10 +145,10 @@ def test_labels_use_correct_declension():
         for b in _buttons(keyboard)
         if b.callback_data.startswith('change_devices_')
     }
-    assert labels[3].startswith('3 устройства')
-    assert labels[4].startswith('4 устройства')
-    assert labels[5].startswith('5 устройств')
-    assert labels[10].startswith('10 устройств')
+    assert labels[3].startswith('3 • ')
+    assert labels[4].startswith('4 • ')
+    assert labels[5].startswith('5 • ')
+    assert labels[10].startswith('10 • ')
 
 
 def test_labels_are_padded_to_equal_length():

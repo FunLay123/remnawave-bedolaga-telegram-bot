@@ -11,6 +11,7 @@ from app.database.models import User
 from app.legal_documents import LEGAL_EMOJI_ID
 from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts
+from app.utils.device_display import device_display_name
 from app.utils.legacy_subscription import is_legacy_subscription as _legacy_subscription
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button
 from app.utils.payment_button_styles import apply_button_style
@@ -39,7 +40,7 @@ def pad_button_labels(
     Telegram центрирует содержимое инлайн-кнопки, поэтому при разной длине
     подписей («14 дней — 70 ₽» и «180 дней — 699 ₽») кастомная иконка
     оказывается на разном расстоянии от края. Равная длина ставит её в одну
-    колонку.
+    колонку. Хвостовой ZWJ не даёт Telegram срезать padding.
     """
     icon_buttons = [row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)]
     if not icon_buttons:
@@ -48,6 +49,10 @@ def pad_button_labels(
     max_len = max(len(button.text) for button in icon_buttons)
     for button in icon_buttons:
         button.text = button.text + '\u2007' * (max_len - len(button.text))
+        # Telegram срезает хвостовые пробелы, из-за чего иконка уезжает.
+        # ZWJ не даёт ему это сделать и сам по себе не рисуется.
+        if not button.text.endswith('\u200d'):
+            button.text += '\u200d'
 
 
 async def get_main_menu_keyboard_async(
@@ -3025,22 +3030,14 @@ def get_change_devices_keyboard(
             entries.append((devices_count, None, False))
 
     max_number_width = max(len(str(count)) for count, _, _ in entries)
-    max_word_width = max(len(_get_device_declension(count)) for count, _, _ in entries)
-    max_price_width = max((len(f'+{price}₽') for _, price, _ in entries if price is not None), default=0)
+    max_price_width = max((len(f'+{price}₽') for _, price, _ in entries if price is not None), default=3)
 
     labels = []
-    for devices_count, price_rub, is_free in entries:
+    for devices_count, price_rub, _is_free in entries:
         number = str(devices_count).rjust(max_number_width, figure_space)
-        word = _get_device_declension(devices_count)
-        word += en_space * (max_word_width - len(word))
-        if price_rub is not None:
-            price = f'+{price_rub}₽'.rjust(max_price_width, figure_space)
-            tail = f'  •   {price}{period_text}'
-        elif is_free:
-            tail = '  •  бесплатно'
-        else:
-            tail = ''
-        labels.append(f'{number} {word}{tail}'.replace(' ', nbsp))
+        price_text = f'+{price_rub}₽' if price_rub is not None else '0₽'
+        price = price_text.rjust(max_price_width, figure_space)
+        labels.append(f'{number} • {price}{period_text}'.replace(' ', nbsp))
 
     # Кнопки без цены короче — добиваем хвостом, чтобы и они стояли по центру
     # тех же колонок.
@@ -3051,11 +3048,12 @@ def get_change_devices_keyboard(
                 InlineKeyboardButton(
                     text=label.ljust(max_label_width, en_space),
                     callback_data=f'change_devices_{devices_count}',
-                    # icon_custom_emoji_id='5258466217273871977',
+                    icon_custom_emoji_id='5258466217273871977',
                 )
             ]
         )
 
+    pad_button_labels(buttons, ('change_devices_',))
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -3582,18 +3580,9 @@ def get_devices_management_keyboard(
     keyboard = []
 
     for i, device in enumerate(devices):
-        # Локальный alias (если юзер задал) приоритетнее платформенной строки.
-        # `local_name` проставляется в attach_aliases_to_devices() ДО рендера.
-        local_name = (device.get('local_name') or '').strip()
-        if local_name:
-            device_info = local_name
-        else:
-            platform = device.get('platform', 'Unknown')
-            device_model = device.get('deviceModel', 'Unknown')
-            device_info = f'{platform} - {device_model}'
-
-        if len(device_info) > 35:
-            device_info = device_info[:32] + '...'
+        device_info = device_display_name(device)
+        if len(device_info) > 45:
+            device_info = device_info[:42] + '...'
 
         # Тап = сброс устройства. Кнопка одна в ряду — на всю ширину.
         keyboard.append(
@@ -3606,8 +3595,8 @@ def get_devices_management_keyboard(
             ]
         )
 
-    # Выравниваем иконки-крестики: Telegram центрирует подпись, и у устройств
-    # с разной длиной названия иконка иначе уезжает в сторону.
+    # Выравниваем иконки: Telegram центрирует подпись, а ZWJ внутри
+    # pad_button_labels не даёт срезать хвостовой padding.
     pad_button_labels(keyboard, ('reset_device_',))
 
     if pagination.total_pages > 1:
