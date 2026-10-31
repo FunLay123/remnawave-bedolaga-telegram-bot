@@ -39,6 +39,16 @@ class TrialActivationReversionResult:
     subscription_rolled_back: bool = True
 
 
+def is_trial_available_for_user(user: User) -> bool:
+    """Может ли пользователь активировать пробный период."""
+    return bool(
+        settings.TRIAL_DURATION_DAYS > 0
+        and settings.TRIAL_DISABLED_FOR != 'all'
+        and not settings.is_trial_disabled_for_user(getattr(user, 'auth_type', None))
+        and not user.is_trial_already_used()
+    )
+
+
 def get_effective_trial_days(user: User, base_days: int) -> int:
     """Базовая длительность триала плюс бонус приглашённому."""
     base = max(0, int(base_days or 0))

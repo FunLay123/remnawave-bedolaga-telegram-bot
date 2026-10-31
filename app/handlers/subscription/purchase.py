@@ -54,6 +54,7 @@ from app.services.trial_activation_service import (
     TrialPaymentInsufficientFunds,
     charge_trial_activation_if_required,
     get_effective_trial_days,
+    is_trial_available_for_user,
     revert_trial_activation,
     rollback_trial_subscription_activation,
 )
@@ -193,12 +194,7 @@ from .traffic import (
 
 def is_trial_offered(db_user: User) -> bool:
     """Показывать ли кнопку «Пробный период» (раньше это решало главное меню)."""
-    return bool(
-        settings.TRIAL_DURATION_DAYS > 0
-        and settings.TRIAL_DISABLED_FOR != 'all'
-        and not settings.is_trial_disabled_for_user(getattr(db_user, 'auth_type', None))
-        and not db_user.is_trial_already_used()
-    )
+    return is_trial_available_for_user(db_user)
 
 
 # Блок «Подключённые устройства» скрыт с экрана подписки по редизайну.
@@ -806,10 +802,12 @@ async def activate_trial(
     db: AsyncSession,
     *,
     from_referral: bool = False,
+    refresh_menu: bool = False,
 ):
     from app.services.trial_activation_service import get_trial_activation_charge_amount
 
     texts = get_texts(db_user.language)
+    refresh_menu = refresh_menu or getattr(callback, 'data', None) == 'trial_activate_menu'
 
     # Проверка ограничения на покупку/продление подписки
     if getattr(db_user, 'restriction_subscription', False):
@@ -1142,6 +1140,20 @@ async def activate_trial(
             )
         except Exception as e:
             logger.error('Ошибка отправки уведомления о триале', error=e)
+
+        if refresh_menu:
+            try:
+                await db.refresh(db_user, attribute_names=['subscriptions'])
+                from app.handlers.menu import show_main_menu
+
+                await show_main_menu(callback, db_user, db, skip_callback_answer=True)
+            except Exception as ui_error:
+                logger.warning(
+                    'Не удалось обновить главное меню после активации триала',
+                    error=ui_error,
+                )
+            await callback.answer(texts.t('TRIAL_ACTIVATED_TOAST', 'Триал активирован'))
+            return
 
         subscription_link = get_display_subscription_link(subscription)
         hide_subscription_link = settings.should_hide_subscription_link()
@@ -4331,7 +4343,7 @@ def register_handlers(dp: Dispatcher):
 
     dp.callback_query.register(show_trial_offer, F.data == 'menu_trial')
 
-    dp.callback_query.register(activate_trial, F.data == 'trial_activate')
+    dp.callback_query.register(activate_trial, F.data.in_(['trial_activate', 'trial_activate_menu']))
 
     # Хендлеры платного триала
     dp.callback_query.register(handle_trial_pay_with_balance, F.data == 'trial_pay_with_balance')

@@ -164,6 +164,12 @@ async def get_main_menu_keyboard_async(
 
         return await MenuLayoutService.build_keyboard(db, context)
 
+    trial_available = False
+    if not has_active_subscription and user is not None:
+        from app.services.trial_activation_service import is_trial_available_for_user
+
+        trial_available = is_trial_available_for_user(user)
+
     # Fallback на синхронную версию
     return get_main_menu_keyboard(
         language=language,
@@ -175,6 +181,7 @@ async def get_main_menu_keyboard_async(
         subscription=subscription,
         show_resume_checkout=show_resume_checkout,
         has_saved_cart=has_saved_cart,
+        trial_available=trial_available,
         is_moderator=is_moderator,
         custom_buttons=custom_buttons,
     )
@@ -603,6 +610,7 @@ def get_main_menu_keyboard(
     subscription=None,
     show_resume_checkout: bool = False,
     has_saved_cart: bool = False,  # Новый параметр для отображения уведомления о сохраненной корзине
+    trial_available: bool = False,
     *,
     is_moderator: bool = False,
     custom_buttons: list[InlineKeyboardButton] | None = None,
@@ -629,13 +637,21 @@ def get_main_menu_keyboard(
             balance=balance_kopeks,
         )
 
+    trial_cta = trial_available and not has_active_subscription
+    if trial_cta:
+        connect_text = 'Активировать триал'
+        connect_callback = 'trial_activate_menu'
+    else:
+        connect_text = 'Подключиться'
+        connect_callback = 'subscription_connect' if has_active_subscription else 'menu_subscription'
+
     keyboard: list[list[InlineKeyboardButton]] = [
         [
             InlineKeyboardButton(
-                text='Подключиться',
+                text=connect_text,
                 # С подпиской — сразу выбор приложения; без неё подключаться не к чему,
-                # ведём на экран подписки, где есть покупка и пробный период.
-                callback_data='subscription_connect' if has_active_subscription else 'menu_subscription',
+                # ведём на активацию триала или на экран подписки с покупкой.
+                callback_data=connect_callback,
                 icon_custom_emoji_id='5084923566848213749',
                 style='primary',
             )
