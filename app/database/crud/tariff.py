@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 import structlog
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -646,6 +648,56 @@ async def sync_default_tariff_from_config(db: AsyncSession) -> Tariff | None:
     return None
 
 
+async def assign_single_tariff_to_legacy_subscriptions(db: AsyncSession) -> int:
+    """Помечает старые платные подписки единственным активным тарифом.
+
+    Импортированные из панели подписки не знают, к какому тарифу бота они
+    относятся: ``tariff_id`` у них пустой, и UI показывает «Перейти на тариф».
+    Если активный тариф ровно один, выбора всё равно нет — проставляем его.
+
+    Меняем только метку тарифа. Текущие лимиты, сквады и срок подписки не
+    трогаем: иначе импорт мог бы молча урезать уже оплаченный доступ.
+    """
+    from app.config import settings
+
+    if settings.is_multi_tariff_enabled():
+        return 0
+
+    tariffs = await get_all_active_tariffs(db)
+    if len(tariffs) != 1:
+        return 0
+
+    tariff = tariffs[0]
+    if getattr(tariff, 'is_daily', False):
+        # Суточный тариф — другой способ списания; не переносим на него
+        # старые периодические подписки автоматически.
+        return 0
+
+    result = await db.execute(
+        select(Subscription).where(
+            Subscription.tariff_id.is_(None),
+            Subscription.is_trial.is_(False),
+        )
+    )
+    subscriptions = result.scalars().all()
+    if not subscriptions:
+        return 0
+
+    now = datetime.now(UTC)
+    for subscription in subscriptions:
+        subscription.tariff_id = tariff.id
+        subscription.updated_at = now
+
+    await db.commit()
+    logger.info(
+        'Автоназначен единственный тариф старым подпискам',
+        tariff_id=tariff.id,
+        tariff_name=tariff.name,
+        subscriptions_count=len(subscriptions),
+    )
+    return len(subscriptions)
+
+
 async def load_period_prices_from_db(db: AsyncSession) -> None:
     """
     Загружает периоды/цены из тарифа в PERIOD_PRICES.
@@ -699,5 +751,7 @@ async def ensure_tariffs_synced(db: AsyncSession) -> None:
         await sync_default_tariff_from_config(db)
         # Загружаем периоды из БД в PERIOD_PRICES
         await load_period_prices_from_db(db)
+        # Один активный тариф — автоматически надеваем его на legacy-подписки.
+        await assign_single_tariff_to_legacy_subscriptions(db)
     except Exception as e:
         logger.error('Ошибка синхронизации тарифов', e=e)

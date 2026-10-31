@@ -2533,6 +2533,7 @@ async def sync_all_users(callback: types.CallbackQuery, db_user: User, db: Async
 • 🔄 Обновлено: {stats['updated']}
 • 🗑️ Деактивировано: {stats.get('deleted', 0)}
 • ❌ Ошибок: {stats['errors']}
+• 🏷️ Автоназначен тариф: {stats.get('tariffs_assigned', 0)}
 
 🌐 <b>Серверы:</b> создано {server_stats.get('created', 0)}, обновлено {server_stats.get('updated', 0)}, \
 удалено {server_stats.get('removed', 0)} из {server_stats.get('total', 0)}

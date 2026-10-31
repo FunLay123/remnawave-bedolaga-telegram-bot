@@ -2007,6 +2007,18 @@ class RemnaWaveService:
                         except Exception:
                             pass
 
+            try:
+                from app.database.crud.tariff import assign_single_tariff_to_legacy_subscriptions
+
+                assigned = await assign_single_tariff_to_legacy_subscriptions(db)
+                if assigned:
+                    stats['tariffs_assigned'] = assigned
+            except Exception as tariff_error:
+                logger.warning(
+                    'Не удалось автоматически назначить единственный тариф старым подпискам',
+                    error=tariff_error,
+                )
+
             logger.info(
                 '🎯 Синхронизация завершена',
                 stats=stats['created'],
