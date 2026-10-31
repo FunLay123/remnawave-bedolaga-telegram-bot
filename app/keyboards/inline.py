@@ -31,52 +31,23 @@ logger = structlog.get_logger(__name__)
 PERIOD_BUTTON_ICON_ID = '5334829606220354437'
 
 
-_BUTTON_MEASURE_FONT = None
-
-
-def _button_text_width(text: str) -> float:
-    """Ширина подписи в референсном шрифте.
-
-    Telegram рисует кнопки пропорциональным системным шрифтом, поэтому
-    равенство количества символов не гарантирует равенство ширины. Pillow
-    даёт достаточно близкую оценку; если его нет — откатываемся на длину.
-    """
-    global _BUTTON_MEASURE_FONT
-    if _BUTTON_MEASURE_FONT is None:
-        try:
-            from PIL import ImageFont
-
-            _BUTTON_MEASURE_FONT = ImageFont.load_default(size=16)
-        except Exception:
-            _BUTTON_MEASURE_FONT = False
-    if _BUTTON_MEASURE_FONT is False:
-        return float(len(text))
-    return float(_BUTTON_MEASURE_FONT.getlength(text))
-
-
 def pad_button_labels(
     buttons: list[list[InlineKeyboardButton]],
     prefixes: tuple[str, ...],
 ) -> None:
-    """Добить подписи кнопок с кастомной иконкой до равной ширины.
+    """Добить подписи кнопок с кастомной иконкой до равной длины.
 
-    Telegram центрирует содержимое инлайн-кнопки, поэтому при разной ширине
-    подписей кастомная иконка оказывается на разном расстоянии от края.
-    Считаем ширину в референсном шрифте, а не количество символов, и
-    добавляем ZWJ, чтобы Telegram не срезал хвостовой padding.
+    Telegram центрирует содержимое инлайн-кнопки; при разной длине подписей
+    иконка уезжает. Хвостовой ZWJ не даёт Telegram срезать padding, из-за
+    чего приём и работает на клиенте.
     """
     icon_buttons = [row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)]
     if not icon_buttons:
         return
 
-    target_width = max(_button_text_width(button.text) for button in icon_buttons)
-    pad_width = _button_text_width('\u2007') or 1.0
+    max_len = max(len(button.text) for button in icon_buttons)
     for button in icon_buttons:
-        missing = target_width - _button_text_width(button.text)
-        pad_count = max(0, round(missing / pad_width))
-        button.text += '\u2007' * pad_count
-        # Telegram срезает хвостовые пробелы, из-за чего иконка уезжает.
-        # ZWJ не даёт ему это сделать и сам по себе не рисуется.
+        button.text += '\u2007' * (max_len - len(button.text))
         if not button.text.endswith('\u200d'):
             button.text += '\u200d'
 
