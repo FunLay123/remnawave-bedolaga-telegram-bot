@@ -31,24 +31,50 @@ logger = structlog.get_logger(__name__)
 PERIOD_BUTTON_ICON_ID = '5334829606220354437'
 
 
+_BUTTON_MEASURE_FONT = None
+
+
+def _button_text_width(text: str) -> float:
+    """Ширина подписи в референсном шрифте.
+
+    Telegram рисует кнопки пропорциональным системным шрифтом, поэтому
+    равенство количества символов не гарантирует равенство ширины. Pillow
+    даёт достаточно близкую оценку; если его нет — откатываемся на длину.
+    """
+    global _BUTTON_MEASURE_FONT
+    if _BUTTON_MEASURE_FONT is None:
+        try:
+            from PIL import ImageFont
+
+            _BUTTON_MEASURE_FONT = ImageFont.load_default(size=16)
+        except Exception:
+            _BUTTON_MEASURE_FONT = False
+    if _BUTTON_MEASURE_FONT is False:
+        return float(len(text))
+    return float(_BUTTON_MEASURE_FONT.getlength(text))
+
+
 def pad_button_labels(
     buttons: list[list[InlineKeyboardButton]],
     prefixes: tuple[str, ...],
 ) -> None:
-    """Добить подписи кнопок с кастомной иконкой до равной длины.
+    """Добить подписи кнопок с кастомной иконкой до равной ширины.
 
-    Telegram центрирует содержимое инлайн-кнопки, поэтому при разной длине
-    подписей («14 дней — 70 ₽» и «180 дней — 699 ₽») кастомная иконка
-    оказывается на разном расстоянии от края. Равная длина ставит её в одну
-    колонку. Хвостовой ZWJ не даёт Telegram срезать padding.
+    Telegram центрирует содержимое инлайн-кнопки, поэтому при разной ширине
+    подписей кастомная иконка оказывается на разном расстоянии от края.
+    Считаем ширину в референсном шрифте, а не количество символов, и
+    добавляем ZWJ, чтобы Telegram не срезал хвостовой padding.
     """
     icon_buttons = [row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)]
     if not icon_buttons:
         return
 
-    max_len = max(len(button.text) for button in icon_buttons)
+    target_width = max(_button_text_width(button.text) for button in icon_buttons)
+    pad_width = _button_text_width('\u2007') or 1.0
     for button in icon_buttons:
-        button.text = button.text + '\u2007' * (max_len - len(button.text))
+        missing = target_width - _button_text_width(button.text)
+        pad_count = max(0, round(missing / pad_width))
+        button.text += '\u2007' * pad_count
         # Telegram срезает хвостовые пробелы, из-за чего иконка уезжает.
         # ZWJ не даёт ему это сделать и сам по себе не рисуется.
         if not button.text.endswith('\u200d'):
@@ -2993,14 +3019,11 @@ def get_change_devices_keyboard(
         max(current_devices + half + 1, min_devices + visible_options + 1),
     )
 
-    # Подписи собираем в два прохода: сначала считаем ширины полей, затем
-    # добиваем их типографскими пробелами. Telegram центрирует текст кнопки,
-    # поэтому колонки совпадают только у строк одинаковой длины. Ширина
-    # заполнителя должна совпадать с шириной недостающего символа:
-    # FIGURE SPACE — цифра, EN SPACE — буква, NBSP — обычный пробел.
+    # Номер добиваем figure space до ширины двух цифр; цену не сдвигаем
+    # отдельным полем — иначе между «3 ·» и «0₽» появляется огромный зазор.
+    # Хвостовой padding и ZWJ добавляет pad_button_labels.
     nbsp = '\u00a0'
     figure_space = '\u2007'
-    en_space = '\u2002'
     entries = []  # (devices_count, price_rub | None, is_free)
     for devices_count in range(start_range, end_range):
         # Кнопки текущего значения нет: она ведёт на тот же экран и ничего
@@ -3030,25 +3053,19 @@ def get_change_devices_keyboard(
             entries.append((devices_count, None, False))
 
     max_number_width = max(len(str(count)) for count, _, _ in entries)
-    max_price_width = max((len(f'+{price}₽') for _, price, _ in entries if price is not None), default=3)
 
     labels = []
     for devices_count, price_rub, _is_free in entries:
         number = str(devices_count).rjust(max_number_width, figure_space)
         price_text = f'+{price_rub}₽' if price_rub is not None else '0₽'
-        price = price_text.rjust(max_price_width, figure_space)
-        labels.append(f'{number} • {price}{period_text}'.replace(' ', nbsp))
+        labels.append(f'{number} • {price_text}{period_text}'.replace(' ', nbsp))
 
-    # Кнопки без цены короче — добиваем хвостом, чтобы и они стояли по центру
-    # тех же колонок.
-    max_label_width = max(len(label) for label in labels)
     for (devices_count, _, _), label in zip(entries, labels, strict=True):
         buttons.append(
             [
                 InlineKeyboardButton(
-                    text=label.ljust(max_label_width, en_space),
+                    text=label,
                     callback_data=f'change_devices_{devices_count}',
-                    icon_custom_emoji_id='5258466217273871977',
                 )
             ]
         )
