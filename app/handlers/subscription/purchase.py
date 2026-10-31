@@ -225,14 +225,31 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     subscription = db_user.subscription
 
     if not subscription:
+        trial_offered = is_trial_offered(db_user)
+        if trial_offered:
+            no_subscription_body = (
+                'Активной подписки пока нет. Можно активировать пробный период или сразу купить подписку.'
+            )
+        elif db_user.is_trial_already_used():
+            no_subscription_body = (
+                'Активной подписки пока нет. Пробный период уже использован — выберите период, чтобы оформить доступ.'
+            )
+        else:
+            no_subscription_body = 'Активной подписки пока нет. Выберите период — доступ откроется сразу после оплаты.'
+
         await callback.message.edit_text(
-            texts.SUBSCRIPTION_NONE,
+            (
+                '<tg-emoji emoji-id="5359415772844152891">📄</tg-emoji> '
+                '<b>Подписка</b>\n\n'
+                f'<blockquote>{no_subscription_body}</blockquote>'
+            ),
             reply_markup=get_subscription_keyboard(
                 db_user.language,
                 has_subscription=False,
                 gift_enabled=gift_enabled,
-                show_trial=is_trial_offered(db_user),
+                show_trial=trial_offered,
             ),
+            parse_mode='HTML',
         )
         await callback.answer()
         return
@@ -1415,6 +1432,11 @@ async def start_subscription_purchase(
     db: AsyncSession,
 ):
     texts = get_texts(db_user.language)
+    back_callback = (
+        'menu_subscription'
+        if getattr(callback, 'data', None) in {'subscription_buy', 'subscription_upgrade'}
+        else 'back_to_menu'
+    )
 
     # В режиме тарифов показываем тарифы, если они реально есть.
     # Если оператор включил tariffs, но активных тарифов не создал, не оставляем
@@ -1427,7 +1449,7 @@ async def start_subscription_purchase(
         if settings.is_multi_tariff_enabled() or has_tariff_bound_subscription:
             from .tariff_purchase import show_tariffs_list
 
-            await show_tariffs_list(callback, db_user, db, state)
+            await show_tariffs_list(callback, db_user, db, state, back_callback=back_callback)
             return
 
         from app.database.crud.tariff import get_all_active_tariffs
@@ -1445,7 +1467,7 @@ async def start_subscription_purchase(
         if active_tariffs:
             from .tariff_purchase import show_tariffs_list
 
-            await show_tariffs_list(callback, db_user, db, state)
+            await show_tariffs_list(callback, db_user, db, state, back_callback=back_callback)
             return
 
         logger.warning(
@@ -1453,7 +1475,7 @@ async def start_subscription_purchase(
             telegram_id=db_user.telegram_id,
         )
 
-    keyboard = get_subscription_period_keyboard(db_user.language, db_user)
+    keyboard = get_subscription_period_keyboard(db_user.language, db_user, back_callback=back_callback)
     prompt_text = await _build_subscription_period_prompt(db_user, texts, db)
 
     await _edit_message_text_or_caption(
@@ -4351,7 +4373,8 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(handle_trial_payment_method, F.data.startswith('trial_payment_'))
 
     dp.callback_query.register(
-        start_subscription_purchase, F.data.in_(['menu_buy', 'subscription_upgrade', 'subscription_purchase'])
+        start_subscription_purchase,
+        F.data.in_(['menu_buy', 'subscription_buy', 'subscription_upgrade', 'subscription_purchase']),
     )
 
     dp.callback_query.register(handle_add_countries, F.data == 'subscription_add_countries')

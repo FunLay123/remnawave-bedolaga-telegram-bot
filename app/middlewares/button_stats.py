@@ -57,6 +57,7 @@ BUILTIN_CALLBACKS: set[str] = {
     'subscription_change_devices',
     'subscription_manage_devices',
     'subscription_upgrade',
+    'subscription_buy',
     # Устройства
     'device_guide_ios',
     'device_guide_android',

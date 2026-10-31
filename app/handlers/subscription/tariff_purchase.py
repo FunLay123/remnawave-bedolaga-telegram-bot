@@ -239,6 +239,8 @@ def get_tariffs_keyboard(
     tariffs: list[Tariff],
     language: str,
     purchased_tariff_ids: set[int] | None = None,
+    *,
+    back_callback: str = 'back_to_menu',
 ) -> InlineKeyboardMarkup:
     """Создает компактную клавиатуру выбора тарифов (только названия)."""
     texts = get_texts(language)
@@ -258,7 +260,7 @@ def get_tariffs_keyboard(
             title = tariff.name
         buttons.append([InlineKeyboardButton(text=title, callback_data=f'tariff_select:{tariff.id}')])
 
-    buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
+    buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -854,10 +856,13 @@ async def show_tariffs_list(
     db_user: User,
     db: AsyncSession,
     state: FSMContext,
+    *,
+    back_callback: str = 'back_to_menu',
 ):
     """Показывает список тарифов для покупки."""
     texts = get_texts(db_user.language)
     await state.clear()
+    await state.update_data(tariff_back_callback=back_callback)
 
     # Получаем доступные тарифы
     promo_group_id = getattr(db_user, 'promo_group_id', None)
@@ -870,7 +875,7 @@ async def show_tariffs_list(
                 '😔 <b>Нет доступных тарифов</b>\n\nК сожалению, сейчас нет тарифов для покупки.',
             ),
             reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[[InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')]]
+                inline_keyboard=[[InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)]]
             ),
         )
         await callback.answer()
@@ -889,7 +894,15 @@ async def show_tariffs_list(
             _active = await get_active_subscriptions_by_user_id(db, db_user.id)
             _already_owned = any(s.tariff_id == tariffs[0].id and not s.is_trial for s in _active)
         if not _already_owned:
-            await _proceed_with_selected_tariff(callback, db_user, db, state, tariffs[0].id, skip_selection=True)
+            await _proceed_with_selected_tariff(
+                callback,
+                db_user,
+                db,
+                state,
+                tariffs[0].id,
+                skip_selection=True,
+                back_callback=back_callback,
+            )
             return
 
     # В мульти-тарифе определяем какие тарифы уже куплены
@@ -915,7 +928,12 @@ async def show_tariffs_list(
 
     await callback.message.edit_text(
         tariffs_text,
-        reply_markup=get_tariffs_keyboard(tariffs, db_user.language, purchased_tariff_ids),
+        reply_markup=get_tariffs_keyboard(
+            tariffs,
+            db_user.language,
+            purchased_tariff_ids,
+            back_callback=back_callback,
+        ),
     )
 
     await callback.answer()
@@ -932,7 +950,7 @@ async def _tariff_back_callback(state: FSMContext) -> str:
     тот же экран, попутно сбрасывая уже выбранные дни.
     """
     data = await state.get_data()
-    return 'back_to_menu' if data.get('tariff_selection_skipped') else 'menu_buy'
+    return data.get('tariff_back_callback') or ('back_to_menu' if data.get('tariff_selection_skipped') else 'menu_buy')
 
 
 async def _proceed_with_selected_tariff(
@@ -943,19 +961,28 @@ async def _proceed_with_selected_tariff(
     tariff_id: int,
     *,
     skip_selection: bool = False,
+    back_callback: str | None = None,
 ) -> None:
     """Переход к периоду/подтверждению выбранного тарифа (первая покупка).
 
     Вызывается и из ``select_tariff`` (кнопка в списке), и из ``show_tariffs_list``
     при единственном доступном тарифе — без дублирования логики.
 
-    ``skip_selection=True``: экран списка тарифов был пропущен, поэтому «Назад»
-    ведёт в главное меню (``back_to_menu``), а не в ``menu_buy`` / список.
+    ``back_callback`` передаётся вызывающим экраном: из карточки подписки это
+    ``menu_subscription``, из главного меню — ``back_to_menu``. Если не передан,
+    используется прежнее правило по ``skip_selection``.
     """
     texts = get_texts(db_user.language)
-    back_callback = 'back_to_menu' if skip_selection else 'menu_buy'
-    # Признак нужен последующим перерисовкам в других хендлерах.
-    await state.update_data(tariff_selection_skipped=skip_selection)
+    if back_callback is None:
+        state_data = await state.get_data()
+        back_callback = state_data.get('tariff_back_callback')
+    if back_callback is None:
+        back_callback = 'back_to_menu' if skip_selection else 'menu_buy'
+    # Признаки нужны последующим перерисовкам в других хендлерах.
+    await state.update_data(
+        tariff_selection_skipped=skip_selection,
+        tariff_back_callback=back_callback,
+    )
     tariff = await get_tariff_by_id(db, tariff_id)
 
     if not tariff or not tariff.is_active:

@@ -75,16 +75,16 @@ def test_subscription_screen_without_subscription_offers_trial_and_purchase():
     keyboard = get_subscription_keyboard('ru', has_subscription=False, show_trial=True)
 
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
-    assert 'menu_trial' in callbacks
-    assert 'menu_buy' in callbacks
+    assert 'trial_activate_menu' in callbacks
+    assert 'subscription_buy' in callbacks
 
 
 def test_subscription_screen_hides_trial_when_not_eligible():
     keyboard = get_subscription_keyboard('ru', has_subscription=False, show_trial=False)
 
     callbacks = [button.callback_data for row in keyboard.inline_keyboard for button in row]
-    assert 'menu_trial' not in callbacks
-    assert 'menu_buy' in callbacks
+    assert 'trial_activate_menu' not in callbacks
+    assert 'subscription_buy' in callbacks
 
 
 def test_topup_entry_is_a_callback_not_a_balance_screen(monkeypatch):

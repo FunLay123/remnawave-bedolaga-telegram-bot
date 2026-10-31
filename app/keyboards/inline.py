@@ -1038,8 +1038,25 @@ def get_subscription_keyboard(
     # без подписки больше некуда нажать, кроме как «Подключиться» → «Подписка».
     if not has_subscription:
         if show_trial:
-            keyboard.append([InlineKeyboardButton(text=texts.MENU_TRIAL, callback_data='menu_trial')])
-        keyboard.append([InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='menu_buy')])
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        text='Активировать триал',
+                        callback_data='trial_activate_menu',
+                        icon_custom_emoji_id='5084923566848213749',
+                        style='primary',
+                    )
+                ]
+            )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.MENU_BUY_SUBSCRIPTION,
+                    callback_data='subscription_buy',
+                    style=None if show_trial else 'primary',
+                )
+            ]
+        )
 
     # Sub ID suffix for multi-tariff callback routing
     _sub_suffix = (
@@ -1312,7 +1329,10 @@ def get_trial_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
 
 
 def get_subscription_period_keyboard(
-    language: str = DEFAULT_LANGUAGE, user: User | None = None
+    language: str = DEFAULT_LANGUAGE,
+    user: User | None = None,
+    *,
+    back_callback: str = 'back_to_menu',
 ) -> InlineKeyboardMarkup:
     """
     Generate subscription period selection keyboard with personalized pricing.
@@ -1363,7 +1383,7 @@ def get_subscription_period_keyboard(
     # Кнопка "Простая покупка" была убрана из выбора периода подписки
 
     pad_button_labels(keyboard, ('period_',))
-    keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
+    keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
