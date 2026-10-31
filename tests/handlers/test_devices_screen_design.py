@@ -96,7 +96,7 @@ def _plain(text: str) -> str:
 
 
 def test_increase_price_uses_dot_separator_without_discount():
-    """«5 устройств • +36₽ за 11 дн.» — без вложенных скобок и без скидки."""
+    """«5 • +36₽» — без срока, вложенных скобок и скидки в подписи кнопки."""
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
     end_date = datetime.now(UTC) + timedelta(days=11)
     keyboard = get_change_devices_keyboard(3, 'ru', subscription_end_date=end_date, tariff=tariff)
@@ -106,7 +106,7 @@ def test_increase_price_uses_dot_separator_without_discount():
     for button in increase:
         text = _plain(button.text)
         assert ' • ' in text, text
-        assert 'за 11 дн.' in text, text
+        assert 'дн.' not in text, text
         assert '(' not in text and ')' not in text, text
         assert 'скидка' not in text, text
 

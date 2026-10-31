@@ -1,9 +1,11 @@
 import math
 from datetime import UTC, datetime
+from pathlib import Path
 
 import structlog
 from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from PIL import ImageFont
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import PERIOD_PRICES, settings
@@ -48,6 +50,98 @@ def pad_button_labels(
     max_len = max(len(button.text) for button in icon_buttons)
     for button in icon_buttons:
         button.text += '\u2007' * (max_len - len(button.text))
+        if not button.text.endswith('\u200d'):
+            button.text += '\u200d'
+
+
+# Manrope близок по метрикам к системным шрифтам Telegram (SF Pro / Roboto),
+# поэтому по нему можно оценить ширину подписи в em. Размер 100 удобен:
+# getlength() сразу даёт em-ширину.
+_BUTTON_WIDTH_FONT: ImageFont.FreeTypeFont | None = None
+_BUTTON_WIDTH_FONT_UNAVAILABLE = False
+
+# Ширины стандартных Unicode-пробелов в em. Клиент рисует их относительно
+# кегля, поэтому суммарная ширина не зависит от конкретного шрифта.
+_PAD_SPACES = (
+    ('\u2003', 1.0),  # em space
+    ('\u2002', 0.5),  # en space
+    ('\u2005', 0.25),  # four-per-em space
+    ('\u2009', 0.2),  # thin space
+    ('\u200a', 0.1),  # hair space
+)
+
+
+def _button_label_em_width(text: str) -> float | None:
+    """Ширина подписи в em; None — шрифт недоступен."""
+    global _BUTTON_WIDTH_FONT, _BUTTON_WIDTH_FONT_UNAVAILABLE
+
+    if _BUTTON_WIDTH_FONT_UNAVAILABLE:
+        return None
+
+    if _BUTTON_WIDTH_FONT is None:
+        try:
+            font_path = Path(__file__).resolve().parents[1] / 'cabinet' / 'utils' / 'fonts' / 'manrope-variable.ttf'
+            # Вариацию не переключаем: дефолтная (ExtraLight) по относительным
+            # ширинам ближе всего к SF Pro из скриншотов Telegram на iOS.
+            _BUTTON_WIDTH_FONT = ImageFont.truetype(str(font_path), 100)
+        except Exception as error:
+            _BUTTON_WIDTH_FONT_UNAVAILABLE = True
+            logger.warning('Не удалось загрузить шрифт для выравнивания кнопок', error=str(error)[:200])
+            return None
+
+    try:
+        return _BUTTON_WIDTH_FONT.getlength(text) / 100
+    except Exception:
+        return None
+
+
+def _space_padding(width_em: float) -> str:
+    """Собрать padding из Unicode-пробелов заданной ширины."""
+    if width_em <= 0.05:
+        return ''
+
+    parts: list[str] = []
+    remaining = width_em
+    for char, unit in _PAD_SPACES:
+        count = int(remaining / unit + 1e-9)
+        if count:
+            parts.append(char * count)
+            remaining -= count * unit
+
+    # Остаток меньше hair space; добавляем его, только если так точнее.
+    if remaining >= 0.05:
+        parts.append('\u200a')
+
+    return ''.join(parts)
+
+
+def pad_button_labels_by_width(
+    buttons: list[list[InlineKeyboardButton]],
+    prefixes: tuple[str, ...],
+) -> None:
+    """Выровнять подписи по ширине, а не по количеству символов.
+
+    В пропорциональном шрифте «xiaomi» и семь figure space имеют разную
+    ширину, поэтому padding по len() даёт сдвиг. Считаем ширину в em по
+    метрикам Manrope и добиваем стандартными Unicode-пробелами, ширина
+    которых задана в em и не зависит от клиентского шрифта.
+    """
+    icon_buttons = [row[0] for row in buttons if row and (row[0].callback_data or '').startswith(prefixes)]
+    if not icon_buttons:
+        return
+
+    widths: list[float] = []
+    for button in icon_buttons:
+        width = _button_label_em_width(button.text)
+        if width is None:
+            # Нет шрифта — не оставляем кнопки без выравнивания вовсе.
+            pad_button_labels(buttons, prefixes)
+            return
+        widths.append(width)
+
+    target = max(widths)
+    for button, width in zip(icon_buttons, widths, strict=True):
+        button.text += _space_padding(target - width)
         if not button.text.endswith('\u200d'):
             button.text += '\u200d'
 
@@ -2948,10 +3042,8 @@ def get_change_devices_keyboard(
         now = datetime.now(UTC)
         days_left = max(1, math.ceil((subscription_end_date - now).total_seconds() / 86400))
         price_multiplier = days_left / 30
-        period_text = f' за {days_left} дн.' if days_left > 1 else ' за 1 день'
     else:
         price_multiplier = 1
-        period_text = ''
 
     # Используем цену из тарифа если есть, иначе глобальную настройку
     tariff_device_price = getattr(tariff, 'device_price_kopeks', None) if tariff else None
@@ -3029,7 +3121,9 @@ def get_change_devices_keyboard(
     for devices_count, price_rub, _is_free in entries:
         number = str(devices_count).rjust(max_number_width, figure_space)
         price_text = f'+{price_rub}₽' if price_rub is not None else '0₽'
-        labels.append(f'{number} • {price_text}{period_text}'.replace(' ', nbsp))
+        # Срок одинаков для всех вариантов — не дублируем его в каждой кнопке.
+        # Иначе «за N дн.» уезжает вслед за длиной цены.
+        labels.append(f'{number} • {price_text}'.replace(' ', nbsp))
 
     for (devices_count, _, _), label in zip(entries, labels, strict=True):
         buttons.append(
@@ -3583,9 +3677,10 @@ def get_devices_management_keyboard(
             ]
         )
 
-    # Выравниваем иконки: Telegram центрирует подпись, а ZWJ внутри
-    # pad_button_labels не даёт срезать хвостовой padding.
-    pad_button_labels(keyboard, ('reset_device_',))
+    # Выравниваем иконки по реальной ширине подписи, а не по числу символов:
+    # «xiaomi» и семь figure space имеют разную ширину. ZWJ внутри helper'а
+    # не даёт Telegram срезать хвостовой padding.
+    pad_button_labels_by_width(keyboard, ('reset_device_',))
 
     if pagination.total_pages > 1:
         nav_row = []
