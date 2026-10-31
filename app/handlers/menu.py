@@ -199,6 +199,11 @@ async def build_main_menu_keyboard(db_user: User, db: AsyncSession):
     # Проверяем наличие сохраненной корзины в Redis
     try:
         has_saved_cart = await user_cart_service.has_user_cart(db_user.id)
+        # Сохранённая корзина — это тот же resume-checkout: показывать её
+        # пользователю с активной платной подпиской нельзя, иначе в главном
+        # меню появляется «вернуться к оформлению» без смысла.
+        if has_saved_cart:
+            has_saved_cart = should_offer_checkout_resume(db_user, True)
     except Exception as e:
         logger.error('Ошибка проверки сохраненной корзины для пользователя', db_user_id=db_user.id, error=e)
         has_saved_cart = False
