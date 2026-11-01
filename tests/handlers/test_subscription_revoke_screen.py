@@ -65,7 +65,7 @@ def test_success_keyboard_uses_connect_and_main_menu_icons():
     assert home.text == 'Главное меню'
     assert home.callback_data == 'back_to_menu'
     assert home.icon_custom_emoji_id == '5314310000531766389'
-    assert home.style == 'primary'
+    assert home.style is None
 
 
 def test_success_text_is_compact():
@@ -75,5 +75,5 @@ def test_success_text_is_compact():
 
     assert '5359415772844152891' in text
     assert '<b>Готово</b>' in text
-    assert 'Подключитесь заново: старая ссылка и устройства отключены.' in text
+    assert '<blockquote>Подключитесь заново: старая ссылка и устройства отключены.</blockquote>' in text
     assert 'Новая ссылка подключения готова' not in text

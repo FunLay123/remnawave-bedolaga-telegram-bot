@@ -80,7 +80,7 @@ def _build_revoke_success_keyboard(language: str) -> InlineKeyboardMarkup:
                         text=texts.t('MAIN_MENU_BUTTON', 'Главное меню'),
                         callback_data='back_to_menu',
                     ),
-                    'success:main_menu',
+                    'nav:main_menu',
                 ),
             ],
         ]
@@ -252,7 +252,7 @@ async def confirm_subscription_revoke(
             'SUBSCRIPTION_REVOKE_SUCCESS',
             (
                 '<tg-emoji emoji-id="5359415772844152891">✅</tg-emoji> <b>Готово</b>\n\n'
-                'Подключитесь заново: старая ссылка и устройства отключены.'
+                '<blockquote>Подключитесь заново: старая ссылка и устройства отключены.</blockquote>'
             ),
         ),
         reply_markup=_build_revoke_success_keyboard(db_user.language),

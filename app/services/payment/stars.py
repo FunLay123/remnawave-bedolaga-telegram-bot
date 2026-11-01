@@ -519,14 +519,16 @@ class TelegramStarsMixin:
                     inline_keyboard=[
                         [
                             types.InlineKeyboardButton(
-                                text='📱 Моя подписка',
+                                text='Моя подписка',
                                 callback_data='menu_subscription',
+                                icon_custom_emoji_id='5431374840332302296',
                             )
                         ],
                         [
                             types.InlineKeyboardButton(
-                                text='🏠 Главное меню',
+                                text='Главное меню',
                                 callback_data='back_to_menu',
+                                icon_custom_emoji_id='5314310000531766389',
                             )
                         ],
                     ]

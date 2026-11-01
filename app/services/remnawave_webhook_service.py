@@ -986,7 +986,14 @@ class RemnaWaveWebhookService:
         button_text = texts.get('WEBHOOK_RENEW_BUTTON', 'Renew subscription')
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [build_subscription_extend_button(button_text, subscription_id)],
+                [
+                    build_subscription_extend_button(
+                        button_text,
+                        subscription_id,
+                        style='primary',
+                        icon_custom_emoji_id='5334552404736104314',
+                    )
+                ],
             ]
         )
 
@@ -995,7 +1002,13 @@ class RemnaWaveWebhookService:
         button_text = texts.get('MY_SUBSCRIPTION_BUTTON', 'My subscription')
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [build_miniapp_or_callback_button(text=button_text, callback_data='menu_subscription')],
+                [
+                    build_miniapp_or_callback_button(
+                        text=button_text,
+                        callback_data='menu_subscription',
+                        icon_custom_emoji_id='5431374840332302296',
+                    )
+                ],
             ]
         )
 
@@ -1004,7 +1017,14 @@ class RemnaWaveWebhookService:
         button_text = texts.get('CONNECT_BUTTON', 'Connect')
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [build_miniapp_or_callback_button(text=button_text, callback_data='subscription_connect')],
+                [
+                    build_miniapp_or_callback_button(
+                        text=button_text,
+                        callback_data='subscription_connect',
+                        style='primary',
+                        icon_custom_emoji_id='5084923566848213749',
+                    )
+                ],
             ]
         )
 
@@ -1014,8 +1034,20 @@ class RemnaWaveWebhookService:
         sub_text = texts.get('MY_SUBSCRIPTION_BUTTON', 'My subscription')
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [build_miniapp_or_callback_button(text=buy_text, callback_data='buy_traffic')],
-                [build_miniapp_or_callback_button(text=sub_text, callback_data='menu_subscription')],
+                [
+                    build_miniapp_or_callback_button(
+                        text=buy_text,
+                        callback_data='buy_traffic',
+                        icon_custom_emoji_id='5303396278179210513',
+                    )
+                ],
+                [
+                    build_miniapp_or_callback_button(
+                        text=sub_text,
+                        callback_data='menu_subscription',
+                        icon_custom_emoji_id='5431374840332302296',
+                    )
+                ],
             ]
         )
 

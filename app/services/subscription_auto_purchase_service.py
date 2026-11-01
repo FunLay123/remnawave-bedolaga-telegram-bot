@@ -58,11 +58,38 @@ from app.services.traffic_reset_policy import lift_panel_traffic_limit, should_r
 from app.services.user_cart_service import user_cart_service
 from app.utils.formatters import format_days_declension
 from app.utils.notification_emoji import style_notification_text
+from app.utils.payment_button_styles import apply_button_style
 from app.utils.pricing_utils import format_period_description
 from app.utils.timezone import format_local_datetime
 
 
 logger = structlog.get_logger(__name__)
+
+
+def _notification_nav_keyboard(texts) -> InlineKeyboardMarkup:
+    """Навигационные кнопки уведомлений автопокупки — с иконками меню."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                apply_button_style(
+                    InlineKeyboardButton(
+                        text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
+                        callback_data='menu_subscription',
+                    ),
+                    'nav:my_subscription',
+                )
+            ],
+            [
+                apply_button_style(
+                    InlineKeyboardButton(
+                        text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Главное меню'),
+                        callback_data='back_to_menu',
+                    ),
+                    'nav:main_menu',
+                )
+            ],
+        ]
+    )
 
 
 def _format_user_id(user: User) -> str:
@@ -770,22 +797,7 @@ async def _auto_extend_subscription(
                 part.strip() for part in [auto_message, details_message, hint_message] if part and part.strip()
             )
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 My subscription'),
-                            callback_data='menu_subscription',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Main menu'),
-                            callback_data='back_to_menu',
-                        )
-                    ],
-                ]
-            )
+            keyboard = _notification_nav_keyboard(texts)
 
             await bot.send_message(
                 chat_id=user.telegram_id,
@@ -1140,22 +1152,7 @@ async def _auto_purchase_tariff(
                 'Перейдите в раздел «Моя подписка», чтобы получить ссылку.',
             )
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                            callback_data='menu_subscription',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Главное меню'),
-                            callback_data='back_to_menu',
-                        )
-                    ],
-                ]
-            )
+            keyboard = _notification_nav_keyboard(texts)
 
             await bot.send_message(
                 chat_id=user.telegram_id,
@@ -1497,22 +1494,7 @@ async def _auto_purchase_daily_tariff(
                 f'ℹ️ Вы можете приостановить подписку в любой момент.'
             )
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                            callback_data='menu_subscription',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Главное меню'),
-                            callback_data='back_to_menu',
-                        )
-                    ],
-                ]
-            )
+            keyboard = _notification_nav_keyboard(texts)
 
             await bot.send_message(
                 chat_id=user.telegram_id,
@@ -1575,8 +1557,6 @@ async def _auto_add_devices(
     manual: bool = False,
 ) -> bool:
     """Auto-purchase devices from saved cart after balance topup."""
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
     from app.database.crud.user import lock_user_for_pricing, subtract_user_balance
     from app.database.models import PaymentMethod
     from app.utils.pricing_utils import apply_percentage_discount
@@ -1851,22 +1831,7 @@ async def _auto_add_devices(
                 price=texts.format_price(price_kopeks),
             )
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                            callback_data='menu_subscription',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Главное меню'),
-                            callback_data='back_to_menu',
-                        )
-                    ],
-                ]
-            )
+            keyboard = _notification_nav_keyboard(texts)
 
             await bot.send_message(
                 chat_id=user.telegram_id,
@@ -1907,8 +1872,6 @@ async def _auto_add_traffic(
     manual: bool = False,
 ) -> bool:
     """Auto-purchase traffic from saved cart after balance topup."""
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
     from app.database.crud.subscription import add_subscription_traffic, get_subscription_by_user_id
     from app.database.crud.user import lock_user_for_pricing, subtract_user_balance
     from app.database.models import PaymentMethod
@@ -2208,22 +2171,7 @@ async def _auto_add_traffic(
                 price=texts.format_price(price_kopeks),
             )
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                            callback_data='menu_subscription',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Главное меню'),
-                            callback_data='back_to_menu',
-                        )
-                    ],
-                ]
-            )
+            keyboard = _notification_nav_keyboard(texts)
 
             await bot.send_message(
                 chat_id=user.telegram_id,
@@ -2598,22 +2546,7 @@ async def try_auto_extend_expired_after_topup(
                 part.strip() for part in [auto_message, details_message, hint_message] if part and part.strip()
             )
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 My subscription'),
-                            callback_data='menu_subscription',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Main menu'),
-                            callback_data='back_to_menu',
-                        )
-                    ],
-                ]
-            )
+            keyboard = _notification_nav_keyboard(texts)
 
             await bot.send_message(
                 chat_id=user.telegram_id,
@@ -3018,22 +2951,7 @@ async def try_resume_disabled_daily_after_topup(
                 balance=settings.format_price(user.balance_kopeks),
             )
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 My subscription'),
-                            callback_data='menu_subscription',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Main menu'),
-                            callback_data='back_to_menu',
-                        )
-                    ],
-                ]
-            )
+            keyboard = _notification_nav_keyboard(texts)
 
             await bot.send_message(
                 chat_id=user.telegram_id,
@@ -3733,22 +3651,7 @@ async def _process_legacy_generic_cart(
                     part.strip() for part in [auto_message, purchase_message, hint_message] if part and part.strip()
                 )
 
-                keyboard = InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            InlineKeyboardButton(
-                                text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 My subscription'),
-                                callback_data='menu_subscription',
-                            )
-                        ],
-                        [
-                            InlineKeyboardButton(
-                                text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '🏠 Main menu'),
-                                callback_data='back_to_menu',
-                            )
-                        ],
-                    ]
-                )
+                keyboard = _notification_nav_keyboard(texts)
 
                 await bot.send_message(
                     chat_id=user.telegram_id,

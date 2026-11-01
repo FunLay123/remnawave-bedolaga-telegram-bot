@@ -29,6 +29,7 @@ from app.utils.gift_links import (
     build_telegram_gift_share_url,
 )
 from app.utils.notification_emoji import style_notification_text
+from app.utils.payment_button_styles import apply_button_style
 from app.utils.timezone import format_local_datetime
 
 
@@ -243,13 +244,19 @@ def build_gift_result_presentation(
     buttons = [
         *action_buttons,
         [
-            InlineKeyboardButton(
-                text=texts.t('GIFT_BACK_TO_SUBSCRIPTION_BUTTON', '◀️ К подписке'),
-                callback_data='menu_subscription',
+            apply_button_style(
+                InlineKeyboardButton(
+                    text=texts.t('GIFT_BACK_TO_SUBSCRIPTION_BUTTON', '◀️ К подписке'),
+                    callback_data='menu_subscription',
+                ),
+                'nav:my_subscription',
             ),
-            InlineKeyboardButton(
-                text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '⬅️ В главное меню'),
-                callback_data='back_to_menu',
+            apply_button_style(
+                InlineKeyboardButton(
+                    text=texts.t('BACK_TO_MAIN_MENU_BUTTON', '⬅️ В главное меню'),
+                    callback_data='back_to_menu',
+                ),
+                'nav:main_menu',
             ),
         ],
     ]

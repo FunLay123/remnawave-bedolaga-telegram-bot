@@ -58,7 +58,14 @@ def _build_extend_keyboard(texts, subscription_id: int | None = None) -> InlineK
     """Клавиатура с кнопкой продления подписки для уведомлений."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [build_subscription_extend_button(texts.t('SUBSCRIPTION_EXTEND', '💎 Продлить подписку'), subscription_id)],
+            [
+                build_subscription_extend_button(
+                    texts.t('SUBSCRIPTION_EXTEND', '💎 Продлить подписку'),
+                    subscription_id,
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
+                )
+            ],
         ]
     )
 

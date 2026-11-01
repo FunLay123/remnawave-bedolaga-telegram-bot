@@ -2026,8 +2026,21 @@ class MonitoringService:
 
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [build_subscription_extend_button('💎 Продлить подписку', subscription.id)],
-                    [build_miniapp_or_callback_button(text='💳 Пополнить баланс', callback_data='balance_topup')],
+                    [
+                        build_subscription_extend_button(
+                            '💎 Продлить подписку',
+                            subscription.id,
+                            style='primary',
+                            icon_custom_emoji_id='5334552404736104314',
+                        )
+                    ],
+                    [
+                        build_miniapp_or_callback_button(
+                            text='💳 Пополнить баланс',
+                            callback_data='balance_topup',
+                            icon_custom_emoji_id='5258500422393415126',
+                        )
+                    ],
                 ]
             )
 
@@ -2131,15 +2144,24 @@ class MonitoringService:
                         build_subscription_extend_button(
                             texts.t('BTN_RENEW_SUBSCRIPTION', '⏰ Продлить подписку'),
                             subscription.id,
+                            style='primary',
+                            icon_custom_emoji_id='5334552404736104314',
                         )
                     ],
                     [
                         build_miniapp_or_callback_button(
                             text=texts.t('BTN_TOPUP_BALANCE', '💳 Пополнить баланс'),
                             callback_data='balance_topup',
+                            icon_custom_emoji_id='5258500422393415126',
                         )
                     ],
-                    [build_miniapp_or_callback_button(text=sub_btn_text, callback_data='menu_subscription')],
+                    [
+                        build_miniapp_or_callback_button(
+                            text=sub_btn_text,
+                            callback_data='menu_subscription',
+                            icon_custom_emoji_id='5431374840332302296',
+                        )
+                    ],
                 ]
             )
 
@@ -2199,8 +2221,21 @@ class MonitoringService:
 
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [build_miniapp_or_callback_button(text='💎 Купить подписку', callback_data='menu_buy')],
-                    [build_miniapp_or_callback_button(text='💰 Пополнить баланс', callback_data='balance_topup')],
+                    [
+                        build_miniapp_or_callback_button(
+                            text='💎 Купить подписку',
+                            callback_data='menu_buy',
+                            style='primary',
+                            icon_custom_emoji_id='5334552404736104314',
+                        )
+                    ],
+                    [
+                        build_miniapp_or_callback_button(
+                            text='💰 Пополнить баланс',
+                            callback_data='balance_topup',
+                            icon_custom_emoji_id='5258500422393415126',
+                        )
+                    ],
                 ]
             )
 
@@ -2577,8 +2612,20 @@ class MonitoringService:
 
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
-                    [build_miniapp_or_callback_button(text='💳 Пополнить баланс', callback_data='balance_topup')],
-                    [build_miniapp_or_callback_button(text='📱 Моя подписка', callback_data='menu_subscription')],
+                    [
+                        build_miniapp_or_callback_button(
+                            text='💳 Пополнить баланс',
+                            callback_data='balance_topup',
+                            icon_custom_emoji_id='5258500422393415126',
+                        )
+                    ],
+                    [
+                        build_miniapp_or_callback_button(
+                            text='📱 Моя подписка',
+                            callback_data='menu_subscription',
+                            icon_custom_emoji_id='5431374840332302296',
+                        )
+                    ],
                 ]
             )
 

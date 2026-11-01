@@ -20,7 +20,7 @@ MILL_EMOJI_ID = '5359415772844152891'
 MILL_EMOJI_FALLBACK = '📋'
 # Для предупреждений и блокировок — отдельная иконка, а не мельница.
 WARNING_EMOJI_ID = '5258382581375723416'
-_WARNING_GLYPHS = frozenset({'⚠️', '⚠', '🚫'})
+_WARNING_GLYPHS = frozenset({'⚠️', '⚠', '🚫', '❌', '❌️', '⏰', '⏰️'})
 
 # Эти уведомления уже оформлены вручную и не должны перекрашиваться.
 EXCLUDED_NOTIFICATION_TYPES = frozenset(

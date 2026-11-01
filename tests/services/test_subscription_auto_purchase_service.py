@@ -1210,3 +1210,19 @@ async def test_auto_purchase_skipped_without_topup_intent(monkeypatch):
     result = await auto_purchase_saved_cart_after_topup(db_session, user, bot=AsyncMock())
 
     assert result is False
+
+
+def test_notification_nav_keyboard_uses_main_menu_icons():
+    from app.localization.texts import get_texts
+    from app.services.subscription_auto_purchase_service import _notification_nav_keyboard
+
+    keyboard = _notification_nav_keyboard(get_texts('ru'))
+    subscription, home = keyboard.inline_keyboard[0][0], keyboard.inline_keyboard[1][0]
+
+    assert subscription.text == 'Моя подписка'
+    assert subscription.callback_data == 'menu_subscription'
+    assert subscription.icon_custom_emoji_id == '5431374840332302296'
+
+    assert home.text == 'В главное меню'
+    assert home.callback_data == 'back_to_menu'
+    assert home.icon_custom_emoji_id == '5314310000531766389'

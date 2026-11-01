@@ -243,7 +243,12 @@ def build_miniapp_or_callback_button(
                     icon_custom_emoji_id=resolved_emoji or None,
                 )
 
-    return InlineKeyboardButton(text=text, callback_data=callback_data)
+    return InlineKeyboardButton(
+        text=strip_leading_emoji(text) if icon_custom_emoji_id else text,
+        callback_data=callback_data,
+        icon_custom_emoji_id=icon_custom_emoji_id or None,
+        style=_resolve_style(style),
+    )
 
 
 SUBSCRIPTION_EXTEND_CALLBACK = 'subscription_extend'

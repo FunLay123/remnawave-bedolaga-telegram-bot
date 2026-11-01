@@ -348,3 +348,21 @@ async def test_topup_success_keyboard_without_cart_points_to_main_menu() -> None
     assert button.style == 'primary'
     assert button.icon_custom_emoji_id == '5314310000531766389'
     assert button.web_app is None
+
+
+def test_callback_fallback_keeps_explicit_icon_and_style(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Вне cabinet-режима явные иконка и стиль не должны теряться."""
+    monkeypatch.setattr(settings, 'MAIN_MENU_MODE', 'default', raising=False)
+
+    button = build_miniapp_or_callback_button(
+        text='💳 Пополнить баланс',
+        callback_data='balance_topup',
+        icon_custom_emoji_id='5258500422393415126',
+        style='primary',
+    )
+
+    assert button.text == 'Пополнить баланс'
+    assert button.callback_data == 'balance_topup'
+    assert button.web_app is None
+    assert button.icon_custom_emoji_id == '5258500422393415126'
+    assert button.style == 'primary'
