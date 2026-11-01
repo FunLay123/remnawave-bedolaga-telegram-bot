@@ -35,13 +35,12 @@ def test_message_is_compact_and_uses_mill_emoji():
     assert 'Выберите способ пополнения' not in text
 
 
-def test_home_button_uses_mill_icon_and_no_legacy_emoji():
+def test_home_button_keeps_legacy_icon():
     keyboard = get_insufficient_balance_keyboard('ru', amount_kopeks=12300)
     home = next(button for button in _buttons(keyboard) if button.callback_data == 'back_to_menu')
 
     assert home.text == 'На главную'
-    assert home.icon_custom_emoji_id == MILL_EMOJI_ID
-    assert '5314310000531766389' not in (home.icon_custom_emoji_id or '')
+    assert home.icon_custom_emoji_id == '5314310000531766389'
 
 
 def test_resume_button_is_hidden_when_cart_resume_is_disabled(monkeypatch):
