@@ -1256,13 +1256,13 @@ def register_handlers(dp: Dispatcher):
         try:
             msg_id = int(callback.data.replace('admin_delete_message_', ''))
         except ValueError:
-            await callback.answer('❌')
+            await callback.answer('Не удалось удалить')
             return
         try:
             await callback.message.bot.delete_message(chat_id=callback.from_user.id, message_id=msg_id)
             await callback.message.delete()
         except Exception:
             pass
-        await callback.answer('✅')
+        await callback.answer('Сообщение удалено')
 
     dp.callback_query.register(admin_delete_message, F.data.startswith('admin_delete_message_'))

@@ -1974,6 +1974,14 @@ async def _show_privacy_policy_after_rules(
             return False
 
 
+async def _delete_registration_message(callback: types.CallbackQuery) -> None:
+    """Убрать экран гейта из чата: меню придёт новым сообщением."""
+    try:
+        await callback.message.delete()
+    except Exception as error:
+        logger.debug('Не удалось удалить сообщение регистрации', error=error)
+
+
 async def _continue_registration_after_rules(
     callback: types.CallbackQuery,
     state: FSMContext,
@@ -1995,9 +2003,11 @@ async def _continue_registration_after_rules(
             await state.set_data(data)
             logger.info('✅ Реферер найден', referrer_id=referrer.id)
 
+        await _delete_registration_message(callback)
         await complete_registration_from_callback(callback, state, db)
     elif settings.SKIP_REFERRAL_CODE or data.get('referrer_id'):
         logger.info('⚙️ Пропускаем запрос реферального кода')
+        await _delete_registration_message(callback)
         await complete_registration_from_callback(callback, state, db)
     else:
         try:
@@ -2043,24 +2053,22 @@ async def process_legal_accept(
             logger.warning('Не удалось показать главное меню после принятия условий', error=error)
             try:
                 await callback.message.edit_text(
-                    '✅ Условия приняты',
+                    'Условия приняты',
                     reply_markup=types.InlineKeyboardMarkup(
                         inline_keyboard=[[types.InlineKeyboardButton(text='В меню', callback_data='back_to_menu')]]
                     ),
                 )
             except Exception:
                 pass
-        await callback.answer()
+        await callback.answer('Условия приняты')
         return
 
     data['legal_accepted'] = True
     await state.set_data(data)
     language = data.get('language', DEFAULT_LANGUAGE)
-    try:
-        await callback.message.edit_text('✅ Условия приняты', reply_markup=None)
-    except Exception as error:
-        logger.warning('Не удалось обновить экран принятия условий', error=error)
-    await callback.answer()
+    # Экран «Условия приняты» не показываем: следующий шаг всё равно заменит
+    # сообщение, а факт принятия достаточно подтвердить тостом.
+    await callback.answer('Условия приняты')
     await _continue_registration_after_rules(callback, state, db, language)
 
 

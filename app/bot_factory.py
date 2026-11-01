@@ -7,6 +7,7 @@ from aiogram.enums import ParseMode
 from app.config import settings
 from app.middlewares.back_button_icon import ButtonIconMiddleware
 from app.middlewares.stale_callback_answer import StaleCallbackAnswerMiddleware
+from app.middlewares.toast_emoji import ToastEmojiFilterMiddleware
 
 
 def create_bot(token: str | None = None, **kwargs) -> Bot:
@@ -30,6 +31,8 @@ def create_bot(token: str | None = None, **kwargs) -> Bot:
     bot = Bot(token=token or settings.BOT_TOKEN, session=session, **kwargs)
     # Поздний ответ на нажатие кнопки — предупреждение, а не исключение (см. middleware).
     bot.session.middleware(StaleCallbackAnswerMiddleware())
+    # Тосты без эмодзи — на выходе, чтобы не править сотни callback.answer вручную.
+    bot.session.middleware(ToastEmojiFilterMiddleware())
     # Кастомные иконки на всех кнопках «Назад» и «Отмена» — общего источника у них нет.
     bot.session.middleware(ButtonIconMiddleware())
     return bot
