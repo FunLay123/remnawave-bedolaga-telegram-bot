@@ -1152,10 +1152,13 @@ def get_subscription_keyboard(
             )
         keyboard.append(
             [
-                InlineKeyboardButton(
-                    text=texts.MENU_BUY_SUBSCRIPTION,
-                    callback_data='subscription_buy',
-                    style=None if show_trial else 'primary',
+                apply_button_style(
+                    InlineKeyboardButton(
+                        text=texts.MENU_BUY_SUBSCRIPTION,
+                        callback_data='subscription_buy',
+                        style=None if show_trial else 'primary',
+                    ),
+                    'subscription:buy',
                 )
             ]
         )
@@ -1174,7 +1177,15 @@ def get_subscription_keyboard(
 
         if is_trial:
             keyboard.append(
-                [InlineKeyboardButton(text=texts.MENU_BUY_SUBSCRIPTION, callback_data='subscription_upgrade')]
+                [
+                    apply_button_style(
+                        InlineKeyboardButton(
+                            text=texts.MENU_BUY_SUBSCRIPTION,
+                            callback_data='subscription_upgrade',
+                        ),
+                        'subscription:buy',
+                    )
+                ]
             )
         else:
             # Проверяем, является ли тариф суточным

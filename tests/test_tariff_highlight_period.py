@@ -33,6 +33,7 @@ def _tariff(highlight: int | None = None, **extra) -> SimpleNamespace:
         period_prices={'30': 60000, '90': 150000, '180': 270000},
         highlight_period_days=highlight,
         device_limit=1,
+        traffic_limit_gb=100,
         device_price_kopeks=None,
         **extra,
     )
@@ -86,6 +87,39 @@ def test_prices_stay_visible_next_to_the_badge():
     marked = next(label for label in labels if BADGE in label)
 
     assert '1500' in marked.replace(' ', '').replace(' ', '')
+
+
+def test_purchase_header_is_compact_and_shows_premium_traffic():
+    """Имя единственного тарифа не дублируем; объём белых списков показываем."""
+    from app.handlers.subscription.tariff_purchase import format_tariff_info_for_user
+
+    tariff = _tariff(server_traffic_limits={'squad-1': {'traffic_limit_gb': 10}})
+
+    text = format_tariff_info_for_user(tariff, 'ru')
+
+    assert 'Покупка подписки' in text
+    assert 'Базовый' not in text
+    assert '100 ГБ · 1 устр.' in text
+    assert '10 ГБ белые списки' in text
+
+
+def test_purchase_period_keyboard_highlights_only_primary_period():
+    """Как на экране продления: primary и иконка только у 30-дневного периода."""
+    keyboard = get_tariff_periods_keyboard(_tariff(), 'ru')
+
+    period_buttons = [
+        button
+        for row in keyboard.inline_keyboard
+        for button in row
+        if (button.callback_data or '').startswith('tariff_period:')
+    ]
+    primary = next(button for button in period_buttons if button.callback_data.endswith(':30'))
+    others = [button for button in period_buttons if not button.callback_data.endswith(':30')]
+
+    assert primary.style == 'primary'
+    assert primary.icon_custom_emoji_id == '5334829606220354437'
+    assert all(button.style is None for button in others)
+    assert all(button.icon_custom_emoji_id is None for button in others)
 
 
 # ==================== нормализация в CRUD ====================

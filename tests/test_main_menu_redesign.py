@@ -87,6 +87,17 @@ def test_subscription_screen_hides_trial_when_not_eligible():
     assert 'subscription_buy' in callbacks
 
 
+def test_subscription_buy_button_uses_same_icon_as_extend():
+    keyboard = get_subscription_keyboard('ru', has_subscription=False, show_trial=False)
+
+    buy = next(
+        button for row in keyboard.inline_keyboard for button in row if button.callback_data == 'subscription_buy'
+    )
+
+    assert buy.text == 'Купить подписку'
+    assert buy.icon_custom_emoji_id == '5334552404736104314'
+
+
 def test_topup_entry_is_a_callback_not_a_balance_screen(monkeypatch):
     """The main-menu top-up action opens payment methods directly, not balance/history."""
     _prepare_menu(monkeypatch)

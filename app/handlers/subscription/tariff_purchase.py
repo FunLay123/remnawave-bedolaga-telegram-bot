@@ -307,17 +307,18 @@ def get_tariff_periods_keyboard(
             price_text = format_price_kopeks(price)
 
         button_text = _period_button_text(tariff, period, price_text, texts)
+        is_primary_period = period == PRIMARY_PERIOD_DAYS
         buttons.append(
             [
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'tariff_period:{tariff.id}:{period}',
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                    style='primary' if is_primary_period else None,
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID if is_primary_period else None,
                 )
             ]
         )
 
-    pad_button_labels(buttons, ('tariff_period:',))
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -350,18 +351,19 @@ def get_tariff_periods_keyboard_with_traffic(
             price_text = format_price_kopeks(price)
 
         button_text = _period_button_text(tariff, period, price_text, texts)
+        is_primary_period = period == PRIMARY_PERIOD_DAYS
         # Используем другой callback для перехода к настройке трафика
         buttons.append(
             [
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'tariff_period_traffic:{tariff.id}:{period}',
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                    style='primary' if is_primary_period else None,
+                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID if is_primary_period else None,
                 )
             ]
         )
 
-    pad_button_labels(buttons, ('tariff_period_traffic:',))
     buttons.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -533,35 +535,36 @@ def _sbp_purchase_rows(tariff_id: int, texts) -> list[list[InlineKeyboardButton]
     return rows
 
 
-def format_tariff_info_for_user(
-    tariff: Tariff,
-    language: str,
-    discount_percent: int = 0,
-) -> str:
-    """Форматирует информацию о тарифе для пользователя."""
+def _premium_gb_for_tariff(tariff: Tariff) -> int | None:
+    """Суммарный объём белых списков тарифа; None — премиум-сквадов нет."""
+    from app.utils.premium_traffic import get_premium_squads_for_tariff
+
+    configs = get_premium_squads_for_tariff(tariff)
+    if not configs:
+        return None
+    allowed = {str(squad_uuid) for squad_uuid in (getattr(tariff, 'allowed_squads', None) or [])}
+    selected = [config for squad_uuid, config in configs.items() if not allowed or squad_uuid in allowed]
+    if not selected:
+        return None
+    return sum(int(getattr(config, 'limit_gb', 0) or 0) for config in selected)
+
+
+def format_tariff_info_for_user(tariff: Tariff, language: str) -> str:
+    """Компактная шапка покупки: без имени тарифа, но с трафиком,
+    устройствами и объёмом белых списков."""
     texts = get_texts(language)
 
-    traffic = format_traffic(tariff.traffic_limit_gb)
+    params = f'{format_traffic(tariff.traffic_limit_gb or 0)} · {tariff.device_limit or 0} устр.'
+    premium_gb = _premium_gb_for_tariff(tariff)
+    if premium_gb is not None:
+        premium_text = '∞' if premium_gb == 0 else f'{premium_gb} ГБ'
+        params += f' · {premium_text} белые списки'
 
-    text = texts.t(
-        'TARIFF_PURCHASE_INFO',
-        '📦 <b>{name}</b>\n\n<b>Параметры:</b>\n• Трафик: {traffic}\n• Устройств: {devices}\n',
-    ).format(name=html.escape(tariff.name), traffic=traffic, devices=tariff.device_limit)
-
-    if tariff.description:
-        text += f'\n📝 {html.escape(tariff.description)}\n'
-
-    if discount_percent > 0:
-        text += texts.t('TARIFF_PURCHASE_YOUR_DISCOUNT', '\n🎁 <b>Ваша скидка: {percent}%</b>\n').format(
-            percent=discount_percent
-        )
-
-    # Для суточных тарифов не показываем выбор периода
-    is_daily = getattr(tariff, 'is_daily', False)
-    if not is_daily:
-        text += texts.t('TARIFF_PURCHASE_CHOOSE_PERIOD', '\nВыберите период подписки:')
-
-    return text
+    return texts.t(
+        'TARIFF_PURCHASE_COMPACT',
+        '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Покупка подписки</b>\n\n'
+        '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {params}',
+    ).format(params=params)
 
 
 def get_daily_tariff_confirm_keyboard(
