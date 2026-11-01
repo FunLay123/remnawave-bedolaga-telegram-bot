@@ -257,7 +257,14 @@ async def handle_connect_subscription(
                 return None
             if redirect_template:
                 # https://switzerlandcorn.website/redirect-page/?redirect_to=happ%3A%2F%2F...
-                return f'{redirect_template}{quote(deep_link, safe="")}'
+                wrapped = f'{redirect_template}{quote(deep_link, safe="")}'
+                if subscription_url:
+                    # Якорь не уходит на сервер: ссылка подписки не попадает в
+                    # access-логи и Referer. Страница читает #sub и сразу вычищает
+                    # его из адресной строки через history.replaceState.
+                    separator = '&sub=' if '#' in redirect_template else '#sub='
+                    wrapped += f'{separator}{quote(subscription_url, safe="")}'
+                return wrapped
             # Если редирект не настроен, отдаем только если это валидный https
             return deep_link if deep_link.startswith(('http://', 'https://')) else None
 
