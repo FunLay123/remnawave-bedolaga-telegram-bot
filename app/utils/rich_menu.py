@@ -344,7 +344,7 @@ def general_traffic_exhausted_line(texts) -> str:
     return _rich_text(
         texts.t(
             'PREMIUM_TRAFFIC_GENERAL_EXHAUSTED',
-            '<tg-emoji emoji-id="5361907081509098425">⚠️</tg-emoji> '
+            '<tg-emoji emoji-id="5258382581375723416">⚠️</tg-emoji> '
             'Лимит трафика исчерпан — белые списки тоже недоступны',
         )
     )

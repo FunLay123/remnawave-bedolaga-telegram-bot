@@ -23,7 +23,7 @@ def test_general_limit_is_exhausted_by_numbers():
 def test_exhausted_line_uses_custom_emoji():
     line = general_traffic_exhausted_line(get_texts('ru'))
 
-    assert '5361907081509098425' in line
+    assert '5258382581375723416' in line
     assert 'Лимит трафика исчерпан — белые списки тоже недоступны' in line
 
 
