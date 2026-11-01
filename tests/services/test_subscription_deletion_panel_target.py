@@ -166,6 +166,45 @@ async def test_single_tariff_uses_subscription_id_when_user_has_none(monkeypatch
         assert await deletion._resolve_panel_target(db, target) == (PANEL_ID, True)
 
 
+@pytest.mark.asyncio
+async def test_deleting_paid_subscription_marks_user_as_paid(monkeypatch):
+    """Удаление платной строки не должно снова открывать триал."""
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
+    spy = _PanelSpy()
+    spy.install(monkeypatch)
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add(_user(remnawave_id=None))
+        target = _sub(1, status=SubscriptionStatus.EXPIRED.value, remnawave_id=None)
+        db.add(target)
+        await db.commit()
+
+        await deletion.delete_subscription_record(db, target, deleted_by='user:10')
+
+        user = await db.get(User, 10)
+        assert user.has_had_paid_subscription is True
+
+
+@pytest.mark.asyncio
+async def test_deleting_trial_subscription_does_not_mark_user_as_paid(monkeypatch):
+    """Триал не считается оплатой: снос строки не должен ставить флаг."""
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
+    spy = _PanelSpy()
+    spy.install(monkeypatch)
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add(_user(remnawave_id=None))
+        target = _sub(1, status=SubscriptionStatus.EXPIRED.value, remnawave_id=None)
+        target.is_trial = True
+        db.add(target)
+        await db.commit()
+
+        await deletion.delete_subscription_record(db, target, deleted_by='user:10')
+
+        user = await db.get(User, 10)
+        assert user.has_had_paid_subscription is False
+
+
 class _PanelSpy:
     """Счётчик того, что реально ушло в панель."""
 

@@ -22,6 +22,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import structlog
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,6 +141,16 @@ async def delete_subscription_record(
         # строке, и каждый запрос в панель по ней ответит «User not found».
         await db.execute(
             update(User).where(User.id == user_id, User.remnawave_id == panel_user_id).values(remnawave_id=None)
+        )
+
+    if not subscription.is_trial:
+        # Удаление платной подписки не должно снова открывать триал. У покупок
+        # через внешние платёжные провайдеры флаг has_had_paid_subscription не
+        # всегда проставлен (в отличие от списаний с баланса), а строка подписки —
+        # единственное, что блокирует повторный триал. Фиксируем факт оплаты,
+        # пока строка ещё есть.
+        await db.execute(
+            update(User).where(User.id == user_id).values(has_had_paid_subscription=True, updated_at=datetime.now(UTC))
         )
 
     await db.delete(subscription)

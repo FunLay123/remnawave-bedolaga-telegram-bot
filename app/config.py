@@ -325,6 +325,9 @@ class Settings(BaseSettings):
     TRIAL_DEVICE_LIMIT: int = 2
     TRIAL_ADD_REMAINING_DAYS_TO_PAID: bool = False
     TRIAL_PAYMENT_ENABLED: bool = False
+    # В этом инстансе триал бесплатный: 0 = платная активация выключена.
+    # Ветки trial_payment_* / charge_trial_activation_if_required остаются
+    # спящими, их крайние случаи — не живые требования.
     TRIAL_ACTIVATION_PRICE: int = 0
     TRIAL_USER_TAG: str | None = None
     TRIAL_DISABLED_FOR: str = 'none'  # none, email, telegram, all
