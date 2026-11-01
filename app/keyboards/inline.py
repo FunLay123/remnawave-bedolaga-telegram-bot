@@ -1183,7 +1183,7 @@ def get_subscription_keyboard(
                             text=texts.MENU_BUY_SUBSCRIPTION,
                             callback_data='subscription_upgrade',
                         ),
-                        'subscription:buy',
+                        'subscription:upgrade',
                     )
                 ]
             )

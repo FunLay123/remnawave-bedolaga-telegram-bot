@@ -87,7 +87,7 @@ def test_subscription_screen_hides_trial_when_not_eligible():
     assert 'subscription_buy' in callbacks
 
 
-def test_subscription_buy_button_uses_same_icon_as_extend():
+def test_subscription_buy_button_uses_its_own_icon():
     keyboard = get_subscription_keyboard('ru', has_subscription=False, show_trial=False)
 
     buy = next(
@@ -96,6 +96,34 @@ def test_subscription_buy_button_uses_same_icon_as_extend():
 
     assert buy.text == 'Купить подписку'
     assert buy.icon_custom_emoji_id == '5123359615727174427'
+
+
+def test_trial_subscription_buy_button_is_primary_with_renew_icon(monkeypatch):
+    """На триале «Купить подписку» — главное действие, как «Продлить» у платного."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(type(settings), 'is_subscription_revoke_enabled', lambda self: True)
+    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: False)
+    sub = SimpleNamespace(
+        id=1,
+        tariff=None,
+        tariff_id=None,
+        status='trial',
+        actual_status='trial',
+        traffic_limit_gb=0,
+        end_date=None,
+        is_daily_paused=False,
+        is_trial=True,
+    )
+
+    keyboard = get_subscription_keyboard('ru', has_subscription=True, is_trial=True, subscription=sub)
+    buy = next(
+        button for row in keyboard.inline_keyboard for button in row if button.callback_data == 'subscription_upgrade'
+    )
+
+    assert buy.text == 'Купить подписку'
+    assert buy.style == 'primary'
+    assert buy.icon_custom_emoji_id == '5334552404736104314'
 
 
 def test_topup_entry_is_a_callback_not_a_balance_screen(monkeypatch):
