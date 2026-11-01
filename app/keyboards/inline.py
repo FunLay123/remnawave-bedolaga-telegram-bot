@@ -3123,7 +3123,7 @@ def get_change_devices_keyboard(
         price_text = f'+{price_rub}₽' if price_rub is not None else '0₽'
         # Срок одинаков для всех вариантов — не дублируем его в каждой кнопке.
         # Иначе «за N дн.» уезжает вслед за длиной цены.
-        labels.append(f'{number} • {price_text}'.replace(' ', nbsp))
+        labels.append(f'{number} > {price_text}'.replace(' ', nbsp))
 
     for (devices_count, _, _), label in zip(entries, labels, strict=True):
         buttons.append(
