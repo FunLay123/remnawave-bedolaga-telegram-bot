@@ -334,6 +334,10 @@ class Settings(BaseSettings):
     DEFAULT_TRAFFIC_LIMIT_GB: int = 100
     DEFAULT_DEVICE_LIMIT: int = 1
     DEFAULT_TRAFFIC_RESET_STRATEGY: str = 'MONTH'
+    # Единый порог предупреждения об обычном трафике, %. Пользователь его не
+    # настраивает: раньше значение лежало в notification_settings и могло
+    # расходиться у разных людей.
+    TRAFFIC_WARNING_PERCENT: int = 90
     RESET_TRAFFIC_ON_PAYMENT: bool = False
     RESET_TRAFFIC_ON_TARIFF_SWITCH: bool = True
 

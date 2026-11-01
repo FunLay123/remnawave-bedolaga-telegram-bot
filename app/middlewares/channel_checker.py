@@ -23,6 +23,7 @@ from app.services.channel_subscription_service import channel_subscription_servi
 from app.services.subscription_service import SubscriptionService
 from app.utils.cache import cache
 from app.utils.check_reg_process import is_registration_process
+from app.utils.notification_emoji import style_notification_text
 from app.utils.telegram_delivery import is_user_unreachable
 
 
@@ -533,19 +534,25 @@ class ChannelCheckerMiddleware(BaseMiddleware):
                         normalized = _normalize_channels(channels)
                         texts = get_texts(user.language or DEFAULT_LANGUAGE)
                         if settings.is_multi_tariff_enabled() and len(deactivated_subs) > 1:
-                            notification_text = texts.t(
-                                'SUBSCRIPTION_DEACTIVATED_CHANNEL_UNSUBSCRIBE_MULTI',
-                                '🚫 Ваши подписки приостановлены, так как вы отписались от обязательного канала.\n\n'
-                                'Подпишитесь на все каналы для восстановления доступа к VPN.',
+                            notification_text = style_notification_text(
+                                texts.t(
+                                    'SUBSCRIPTION_DEACTIVATED_CHANNEL_UNSUBSCRIBE_MULTI',
+                                    '🚫 Ваши подписки приостановлены, так как вы отписались от обязательного канала.\n\n'
+                                    'Подпишитесь на все каналы для восстановления доступа к VPN.',
+                                )
                             )
                         else:
-                            notification_text = texts.t(
-                                'SUBSCRIPTION_DEACTIVATED_CHANNEL_UNSUBSCRIBE',
-                                '🚫 Ваша подписка приостановлена, так как вы отписались от канала.\n\n'
-                                'Подпишитесь на канал снова, чтобы восстановить доступ к VPN.',
+                            notification_text = style_notification_text(
+                                texts.t(
+                                    'SUBSCRIPTION_DEACTIVATED_CHANNEL_UNSUBSCRIBE',
+                                    '🚫 Ваша подписка приостановлена, так как вы отписались от канала.\n\n'
+                                    'Подпишитесь на канал снова, чтобы восстановить доступ к VPN.',
+                                )
                             )
                         channel_kb = get_channel_sub_keyboard(normalized, language=user.language)
-                        await bot.send_message(telegram_id, notification_text, reply_markup=channel_kb)
+                        await bot.send_message(
+                            telegram_id, notification_text, reply_markup=channel_kb, parse_mode='HTML'
+                        )
                     except Exception as notify_error:
                         if _is_user_unreachable(notify_error):
                             logger.debug(

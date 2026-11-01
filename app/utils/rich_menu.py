@@ -373,6 +373,23 @@ async def premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> 
         )
         name = config.name or names.get(squad_uuid) or squad_uuid
         lines.append(_rich_text(template).replace('{name}', html.escape(name)).replace('{traffic}', html.escape(usage)))
+
+    # Общий лимит и белые списки — один счётчик панели. Если общий лимит
+    # исчерпан, панель блокирует весь аккаунт, даже если premium-сквад свой
+    # лимит не выбрал. Пишем это рядом с premium-строками, чтобы не казалось,
+    # что белые списки должны продолжать работать.
+    general_limit_gb = float(getattr(subscription, 'traffic_limit_gb', 0) or 0)
+    general_used_gb = float(getattr(subscription, 'traffic_used_gb', 0) or 0)
+    if general_limit_gb > 0 and general_used_gb >= general_limit_gb:
+        lines.append(
+            _rich_text(
+                texts.t(
+                    'PREMIUM_TRAFFIC_GENERAL_EXHAUSTED',
+                    '<tg-emoji emoji-id="5361907081509098425">⚠️</tg-emoji> '
+                    'Общий лимит трафика исчерпан — белые списки тоже недоступны',
+                )
+            )
+        )
     return lines
 
 
@@ -589,7 +606,7 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
 
     if actual_status == 'limited':
         label = texts.t(
-            'MAIN_MENU_MIN_LIMITED', '<tg-emoji emoji-id="5210854838350403906">⚠️</tg-emoji> Трафик исчерпан'
+            'MAIN_MENU_MIN_LIMITED', '<tg-emoji emoji-id="5361907081509098425">⚠️</tg-emoji> Трафик исчерпан'
         )
     elif getattr(subscription, 'is_trial', False) or actual_status == 'trial':
         label = texts.t('MAIN_MENU_MIN_TRIAL', '<tg-emoji emoji-id="5359415772844152891">🎁</tg-emoji> Тестовая')

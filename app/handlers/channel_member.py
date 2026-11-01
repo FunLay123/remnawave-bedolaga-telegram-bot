@@ -25,6 +25,7 @@ from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts
 from app.services.channel_subscription_service import channel_subscription_service
 from app.services.subscription_service import SubscriptionService
+from app.utils.notification_emoji import style_notification_text
 
 
 logger = structlog.get_logger(__name__)
@@ -220,12 +221,14 @@ async def on_user_left_channel(event: ChatMemberUpdated, bot: Bot) -> None:
                     return
                 texts = get_texts(db_user.language or DEFAULT_LANGUAGE)
                 unsub_channels = await channel_subscription_service.get_channels_with_status(user.id)
-                notification_text = texts.t(
-                    'SUBSCRIPTION_DEACTIVATED_CHANNEL_UNSUBSCRIBE',
-                    'Your subscription has been paused because you left a required channel.',
+                notification_text = style_notification_text(
+                    texts.t(
+                        'SUBSCRIPTION_DEACTIVATED_CHANNEL_UNSUBSCRIBE',
+                        'Your subscription has been paused because you left a required channel.',
+                    )
                 )
                 channel_kb = get_channel_sub_keyboard(unsub_channels, language=db_user.language or DEFAULT_LANGUAGE)
-                await bot.send_message(user.id, notification_text, reply_markup=channel_kb)
+                await bot.send_message(user.id, notification_text, reply_markup=channel_kb, parse_mode='HTML')
             except Exception as notify_error:
                 logger.warning('Failed to send notification', telegram_id=user.id, error=notify_error)
 

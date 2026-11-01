@@ -53,12 +53,18 @@ def is_traffic_warning_enabled(user: User) -> bool:
 
 
 def get_traffic_warning_percent(user: User) -> int:
-    """Get the traffic usage percentage threshold for warning."""
-    value = get_user_notification_pref(user, 'traffic_warning_percent')
+    """Get the traffic usage percentage threshold for warning.
+
+    Порог глобальный: пользователь его не настраивает. ``user`` оставлен в
+    подписи, чтобы не менять вызовы; значение из notification_settings больше
+    не читается.
+    """
+    from app.config import settings
+
     try:
-        return max(50, min(99, int(value)))
+        return max(50, min(99, int(settings.TRAFFIC_WARNING_PERCENT)))
     except (TypeError, ValueError):
-        return 80
+        return 90
 
 
 def is_balance_low_enabled(user: User) -> bool:

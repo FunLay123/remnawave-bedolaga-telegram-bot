@@ -15,6 +15,7 @@ from aiogram.types import (
 
 from app.config import settings
 from app.localization.texts import get_texts
+from app.utils.notification_emoji import style_notification_text
 
 
 logger = structlog.get_logger(__name__)
@@ -112,8 +113,10 @@ class DisplayNameRestrictionMiddleware(BaseMiddleware):
 
             try:
                 if isinstance(event, Message):
-                    await event.answer(warning)
+                    await event.answer(style_notification_text(warning))
                 elif isinstance(event, CallbackQuery):
+                    # answerCallbackQuery не поддерживает HTML/custom emoji —
+                    # оставляем обычный 🚫, иначе клиент увидит сырой тег.
                     await event.answer(warning, show_alert=True)
                 elif isinstance(event, PreCheckoutQuery):
                     await event.answer(ok=False, error_message=warning)

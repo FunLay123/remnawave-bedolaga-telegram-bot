@@ -809,18 +809,24 @@ class PremiumTrafficService:
             return 'restored' if await self._restore_squad(db, api, target, state) else None
 
         if not state.is_limited:
-            # 90 % проверяем раньше 80 %: если расход за один проход перескочил
-            # сразу за 90 %, клиент получит одно сообщение, а не два подряд, —
-            # поэтому здесь поднимаются оба флага.
-            if not state.notified_90 and self._crossed_warning(state, SECOND_WARNING_THRESHOLD):
-                state.notified_80 = True
-                state.notified_90 = True
-                await self._notify_warning(target, state)
-                return 'warned'
-            if not state.notified_80 and self._crossed_warning(state, WARNING_THRESHOLD):
-                state.notified_80 = True
-                await self._notify_warning(target, state)
-                return 'warned'
+            # Триалу не шлём предупреждения 80/90: это «мягкие» уведомления,
+            # а не факт отключения. Исчерпание ниже шлётся всем — человек должен
+            # узнать, что белые списки перестали работать. Флаги для триала не
+            # поднимаем: после покупки платной подписки предупреждение должно
+            # прийти по текущему расходу, а не потеряться в уже отмеченном периоде.
+            if not getattr(target.subscription, 'is_trial', False):
+                # 90 % проверяем раньше 80 %: если расход за один проход перескочил
+                # сразу за 90 %, клиент получит одно сообщение, а не два подряд, —
+                # поэтому здесь поднимаются оба флага.
+                if not state.notified_90 and self._crossed_warning(state, SECOND_WARNING_THRESHOLD):
+                    state.notified_80 = True
+                    state.notified_90 = True
+                    await self._notify_warning(target, state)
+                    return 'warned'
+                if not state.notified_80 and self._crossed_warning(state, WARNING_THRESHOLD):
+                    state.notified_80 = True
+                    await self._notify_warning(target, state)
+                    return 'warned'
 
         # Сверка с панелью. Флаг `is_limited` могли снять не мы: докупка через
         # кабинет обнуляет его сама и сама же возвращает сквад. Если та отправка

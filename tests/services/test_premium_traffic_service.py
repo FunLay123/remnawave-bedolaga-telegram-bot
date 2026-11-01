@@ -296,6 +296,35 @@ class TestDecisions:
         assert again is None
         warnings.assert_awaited_once()
 
+    async def test_trial_gets_no_premium_warning(self, monkeypatch):
+        """Триалу не шлём 80/90 %: мягкие предупреждения только для платных."""
+        service = PremiumTrafficService()
+        warnings = AsyncMock()
+        monkeypatch.setattr(service, '_notify_warning', warnings)
+        target = _target()
+        target.subscription.is_trial = True
+        state = _state(limit_gb=5)
+
+        outcome, _ = await self._apply(service, target, state, 4 * BYTES_IN_GB, monkeypatch)
+
+        assert outcome is None
+        assert (state.notified_80, state.notified_90) == (False, False)
+        warnings.assert_not_awaited()
+
+    async def test_trial_still_gets_exhausted_notification(self, monkeypatch):
+        """Исчерпание — факт отключения белых списков, его триал тоже должен видеть."""
+        service = PremiumTrafficService()
+        exhausted = AsyncMock()
+        monkeypatch.setattr(service, '_notify_exhausted', exhausted)
+        target = _target()
+        target.subscription.is_trial = True
+        state = _state(limit_gb=5)
+
+        outcome, _ = await self._apply(service, target, state, 5 * BYTES_IN_GB, monkeypatch)
+
+        assert outcome == 'limited'
+        exhausted.assert_awaited_once()
+
     async def test_topup_restores_a_limited_squad(self, monkeypatch):
         service = PremiumTrafficService()
         state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True)

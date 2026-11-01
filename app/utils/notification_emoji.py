@@ -18,6 +18,9 @@ import unicodedata
 STYLE_ENABLED = True
 MILL_EMOJI_ID = '5359415772844152891'
 MILL_EMOJI_FALLBACK = '📋'
+# Для предупреждений и блокировок — отдельная иконка, а не мельница.
+WARNING_EMOJI_ID = '5361907081509098425'
+_WARNING_GLYPHS = frozenset({'⚠️', '⚠', '🚫'})
 
 # Эти уведомления уже оформлены вручную и не должны перекрашиваться.
 EXCLUDED_NOTIFICATION_TYPES = frozenset(
@@ -81,5 +84,6 @@ def style_notification_text(text: str, *, notification_type: object | None = Non
     if not glyph:
         return text
 
-    replacement = f'<tg-emoji emoji-id="{MILL_EMOJI_ID}">{glyph}</tg-emoji>'
+    emoji_id = WARNING_EMOJI_ID if glyph in _WARNING_GLYPHS else MILL_EMOJI_ID
+    replacement = f'<tg-emoji emoji-id="{emoji_id}">{glyph}</tg-emoji>'
     return text[:start] + replacement + text[end:]

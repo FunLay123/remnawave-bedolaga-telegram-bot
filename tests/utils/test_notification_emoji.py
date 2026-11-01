@@ -1,0 +1,54 @@
+"""Единый стиль уведомлений: ⚠️/🚫 — своя иконка, остальные — мельница."""
+
+from app.utils.notification_emoji import MILL_EMOJI_ID, WARNING_EMOJI_ID, style_notification_text
+
+
+def test_warning_emoji_uses_warning_icon():
+    styled = style_notification_text('⚠️ <b>Предупреждение</b>')
+
+    assert f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">⚠️</tg-emoji>' in styled
+
+
+def test_no_entry_emoji_uses_warning_icon():
+    styled = style_notification_text('🚫 Доступ закрыт')
+
+    assert f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">🚫</tg-emoji>' in styled
+
+
+def test_other_leading_emoji_keeps_mill():
+    styled = style_notification_text('✅ Готово')
+
+    assert f'<tg-emoji emoji-id="{MILL_EMOJI_ID}">✅</tg-emoji>' in styled
+
+
+def test_existing_warning_custom_emoji_is_rewritten():
+    styled = style_notification_text('<tg-emoji emoji-id="5210854838350403906">⚠️</tg-emoji> Трафик исчерпан')
+
+    assert f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">⚠️</tg-emoji>' in styled
+    assert '5210854838350403906' not in styled
+
+
+def test_plain_text_is_unchanged():
+    assert style_notification_text('Просто текст') == 'Просто текст'
+
+
+def test_client_screen_warnings_use_custom_emoji():
+    """Экраны, которые не проходят через стилизатор, уже содержат нужный ID."""
+    from app.localization.texts import get_texts
+
+    texts = get_texts('ru')
+    for key in (
+        'SAVED_CARDS_LAST_CARD_WARNING',
+        'DAILY_SWITCH_WARNING',
+        'TARIFF_PURCHASE_MISSING_LINE',
+        'TARIFF_SWITCH_FULL_PRICE_NOTE',
+        'TARIFF_SWITCH_FULL_PRICE_CHOOSE_PERIOD',
+        'TARIFF_SWITCH_DISABLED',
+        'REFERRAL_WITHDRAWAL_CONFIRM_WARNING',
+        'TRIAL_PAYMENT_INSUFFICIENT_FUNDS',
+        'TARIFF_PURCHASE_DAILY_INSUFFICIENT',
+        'TARIFF_PURCHASE_STILL_INSUFFICIENT',
+        'TARIFF_PURCHASE_STILL_INSUFFICIENT_DAILY',
+        'TARIFF_SWITCH_UPGRADE_INSUFFICIENT',
+    ):
+        assert '5361907081509098425' in texts.t(key, ''), key
