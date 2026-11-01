@@ -555,16 +555,17 @@ def format_tariff_info_for_user(tariff: Tariff, language: str) -> str:
     texts = get_texts(language)
 
     params = f'{format_traffic(tariff.traffic_limit_gb or 0)} · {tariff.device_limit or 0} устр.'
+    premium_line = ''
     premium_gb = _premium_gb_for_tariff(tariff)
     if premium_gb is not None:
         premium_text = '∞' if premium_gb == 0 else f'{premium_gb} ГБ'
-        params += f' · {premium_text} белые списки'
+        premium_line = f'<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> Белые списки: {premium_text}\n'
 
     return texts.t(
         'TARIFF_PURCHASE_COMPACT',
         '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Покупка подписки</b>\n\n'
-        '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {params}',
-    ).format(params=params)
+        '{premium_line}<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {params}',
+    ).format(premium_line=premium_line, params=params)
 
 
 def get_daily_tariff_confirm_keyboard(

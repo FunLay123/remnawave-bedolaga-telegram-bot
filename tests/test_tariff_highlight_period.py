@@ -26,14 +26,14 @@ from app.handlers.subscription.tariff_purchase import (
 BADGE = '⭐ выгодно'
 
 
-def _tariff(highlight: int | None = None, **extra) -> SimpleNamespace:
+def _tariff(highlight: int | None = None, *, traffic_limit_gb: int = 100, **extra) -> SimpleNamespace:
     return SimpleNamespace(
         id=7,
         name='Базовый',
         period_prices={'30': 60000, '90': 150000, '180': 270000},
         highlight_period_days=highlight,
         device_limit=1,
-        traffic_limit_gb=100,
+        traffic_limit_gb=traffic_limit_gb,
         device_price_kopeks=None,
         **extra,
     )
@@ -100,7 +100,20 @@ def test_purchase_header_is_compact_and_shows_premium_traffic():
     assert 'Покупка подписки' in text
     assert 'Базовый' not in text
     assert '100 ГБ · 1 устр.' in text
-    assert '10 ГБ белые списки' in text
+    assert 'Белые списки: 10 ГБ' in text
+    # Белые списки идут первыми, трафик и устройства — ниже.
+    assert text.index('Белые списки: 10 ГБ') < text.index('100 ГБ · 1 устр.')
+
+
+def test_purchase_header_shows_unlimited_traffic():
+    from app.handlers.subscription.tariff_purchase import format_tariff_info_for_user
+
+    tariff = _tariff(traffic_limit_gb=0, server_traffic_limits={'squad-1': {'traffic_limit_gb': 10}})
+
+    text = format_tariff_info_for_user(tariff, 'ru')
+
+    assert 'Белые списки: 10 ГБ' in text
+    assert 'Безлимит · 1 устр.' in text
 
 
 def test_purchase_period_keyboard_highlights_only_primary_period():

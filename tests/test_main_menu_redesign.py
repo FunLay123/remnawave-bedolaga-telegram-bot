@@ -95,7 +95,7 @@ def test_subscription_buy_button_uses_same_icon_as_extend():
     )
 
     assert buy.text == 'Купить подписку'
-    assert buy.icon_custom_emoji_id == '5334552404736104314'
+    assert buy.icon_custom_emoji_id == '5123359615727174427'
 
 
 def test_topup_entry_is_a_callback_not_a_balance_screen(monkeypatch):
