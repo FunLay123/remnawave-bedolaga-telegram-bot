@@ -9,58 +9,69 @@ def _callbacks(keyboard):
     return [button.callback_data for row in keyboard.inline_keyboard for button in row]
 
 
-def test_classic_topup_when_autopurchase_disabled(monkeypatch):
+def _buttons(keyboard):
+    return [button for row in keyboard.inline_keyboard for button in row]
+
+
+def test_purchase_offers_single_topup_button(monkeypatch):
     monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', False)
+
+    keyboard = get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000)
+    callbacks = _callbacks(keyboard)
+    topup = next(button for button in _buttons(keyboard) if button.callback_data == 'balance_topup')
+
+    assert topup.text == f'Пополнить на {settings.format_price(50000)}'
+    assert topup.icon_custom_emoji_id == '5332588449335628124'
+    assert topup.style == 'primary'
+    assert not any((c or '').startswith('topup_amount|') for c in callbacks)
+    assert 'tariff_select:7' in callbacks
+
+
+def test_purchase_topup_does_not_depend_on_autopurchase_flag(monkeypatch):
+    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
+    monkeypatch.setattr(settings, 'TELEGRAM_STARS_ENABLED', True)
 
     keyboard = get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000)
     callbacks = _callbacks(keyboard)
 
     assert 'balance_topup' in callbacks
     assert not any((c or '').startswith('topup_amount|') for c in callbacks)
-    assert 'tariff_select:7' in callbacks
 
 
-def test_inlines_prefilled_payment_when_autopurchase_enabled(monkeypatch):
-    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
-    monkeypatch.setattr(settings, 'TELEGRAM_STARS_ENABLED', True)
+def test_purchase_message_is_compact_and_has_no_cart_hint():
+    from app.localization.texts import get_texts
 
-    keyboard = get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000)
-    callbacks = _callbacks(keyboard)
+    text = (
+        get_texts('ru')
+        .t('TARIFF_PURCHASE_INSUFFICIENT', '')
+        .format(
+            price='150 ₽',
+            period='30 дней',
+            missing='150 ₽',
+            balance='0 ₽',
+        )
+    )
 
-    # прямая оплата ровно недостающей суммой, без промежуточного «Пополнить баланс»
-    assert 'topup_amount|stars|50000' in callbacks
-    assert 'balance_topup' not in callbacks
-    # возврат ведёт к выбору тарифа
-    assert 'tariff_select:7' in callbacks
-
-
-def test_classic_topup_when_missing_zero(monkeypatch):
-    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
-    monkeypatch.setattr(settings, 'TELEGRAM_STARS_ENABLED', True)
-
-    keyboard = get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=0)
-
-    assert 'balance_topup' in _callbacks(keyboard)
+    assert '5269616102698163129' in text
+    assert '5116444615301399317' in text
+    assert '5449444442056441600' in text
+    assert 'К оплате: 150 ₽ (30 дней)' in text
+    assert 'Не хватает: 150 ₽ (баланс: 0 ₽)' in text
+    assert 'Тариф' not in text
+    assert 'Корзина' not in text
+    assert 'автоматически' not in text
 
 
 def test_sbp_purchase_offered_on_insufficient_balance(monkeypatch):
-    """СБП-оформлению баланс не нужен — кнопка обязана быть и на экране нехватки средств.
-
-    Регрессия: кнопка «Оформить с автооплатой СБП» жила только на confirm-экранах,
-    до которых без денег не дойти, — вход в фичу перекрывала проверка баланса.
-    """
+    """СБП-оформлению баланс не нужен — кнопка обязана быть на экране нехватки."""
     monkeypatch.setattr(type(settings), 'is_platega_recurrent_enabled', lambda self: True)
 
-    # Классическая ветка (автопокупка выключена)
-    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', False)
-    assert 'tariff_sbp:7' in _callbacks(get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000))
+    for autopurchase in (False, True):
+        monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', autopurchase)
+        callbacks = _callbacks(get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000))
 
-    # Ветка с предзаполненными кнопками прямой оплаты
-    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
-    monkeypatch.setattr(settings, 'TELEGRAM_STARS_ENABLED', True)
-    callbacks = _callbacks(get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000))
-    assert 'tariff_sbp:7' in callbacks
-    assert 'topup_amount|stars|50000' in callbacks
+        assert 'tariff_sbp:7' in callbacks
+        assert 'balance_topup' in callbacks
 
 
 def test_no_sbp_purchase_when_recurrent_disabled(monkeypatch):
@@ -68,6 +79,7 @@ def test_no_sbp_purchase_when_recurrent_disabled(monkeypatch):
     monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', False)
 
     callbacks = _callbacks(get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000))
+
     assert not any((c or '').startswith('tariff_sbp:') for c in callbacks)
 
 
@@ -79,23 +91,6 @@ def test_daily_insufficient_balance_offers_sbp_purchase(monkeypatch):
 
     monkeypatch.setattr(type(settings), 'is_platega_recurrent_enabled', lambda self: False)
     assert 'tariff_sbp:7' not in _callbacks(get_daily_tariff_insufficient_balance_keyboard(7, 'ru'))
-
-
-def test_falls_back_to_topup_without_direct_payment_methods(monkeypatch):
-    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-
-    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', True)
-    # Клавиатура пополнения без кнопок прямой оплаты (только навигация) → классический фолбэк
-    monkeypatch.setattr(
-        'app.keyboards.inline.get_payment_methods_keyboard',
-        lambda amount, language=None: InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text='x', callback_data='menu_balance')]]
-        ),
-    )
-
-    keyboard = get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000)
-
-    assert 'balance_topup' in _callbacks(keyboard)
 
 
 def test_extend_offers_single_topup_button_when_autopurchase_enabled(monkeypatch):

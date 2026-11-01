@@ -424,38 +424,34 @@ def get_tariff_insufficient_balance_keyboard(
     language: str,
     missing_kopeks: int = 0,
 ) -> InlineKeyboardMarkup:
-    """Создает клавиатуру при недостаточном балансе.
+    """Клавиатура «Недостаточно средств» при покупке тарифа.
 
-    Если включена автопокупка после пополнения (AUTO_PURCHASE_AFTER_TOPUP_ENABLED),
-    показываем способы оплаты сразу, предзаполненные ровно недостающей суммой: после
-    оплаты подписка оформится автоматически, без отдельного шага «Пополнить баланс».
-    Иначе оставляем классический переход в пополнение баланса.
+    Как на экране продления: одна primary-кнопка «Пополнить на N ₽» ведёт на
+    ``balance_topup``, сумма подставляется из сохранённой корзины
+    (``missing_amount``). Автопокупка после пополнения здесь не используется —
+    пользователь возвращается в выбор периода сам.
 
-    СБП-оформление показываем и здесь: привязке баланс не нужен (первое списание
-    Platega = подтверждение в банке), а без кнопки на этом экране фича была
-    недостижима для пользователей без денег на балансе.
+    СБП-оформление оставляем: привязке баланс не нужен (первое списание
+    Platega = подтверждение в банке). Если оно выключено, клавиатура выглядит
+    ровно как на продлении: «Пополнить на N ₽» и «Назад».
     """
     texts = get_texts(language)
+    topup_text = texts.t('TARIFF_PURCHASE_TOPUP_BUTTON', 'Пополнить на {amount}').format(
+        amount=format_price_kopeks(missing_kopeks),
+    )
     back_button = InlineKeyboardButton(text=texts.BACK, callback_data=f'tariff_select:{tariff_id}')
-    sbp_rows = _sbp_purchase_rows(tariff_id, texts)
-
-    if settings.is_auto_purchase_after_topup_enabled() and missing_kopeks > 0:
-        from app.keyboards.inline import get_payment_methods_keyboard
-
-        # Оставляем только кнопки прямой оплаты (topup_amount|метод|сумма), отбрасывая
-        # навигацию клавиатуры пополнения — возврат ведём к выбору тарифа.
-        payment_rows = [
-            row
-            for row in get_payment_methods_keyboard(missing_kopeks, language).inline_keyboard
-            if row and all((button.callback_data or '').startswith('topup_amount|') for button in row)
-        ]
-        if payment_rows:
-            return InlineKeyboardMarkup(inline_keyboard=[*payment_rows, *sbp_rows, [back_button]])
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=texts.t('BALANCE_TOPUP', '💳 Пополнить баланс'), callback_data='balance_topup')],
-            *sbp_rows,
+            [
+                InlineKeyboardButton(
+                    text=topup_text,
+                    callback_data='balance_topup',
+                    style='primary',
+                    icon_custom_emoji_id='5332588449335628124',
+                )
+            ],
+            *_sbp_purchase_rows(tariff_id, texts),
             [back_button],
         ]
     )
@@ -1075,7 +1071,7 @@ async def _proceed_with_selected_tariff(
                 'user_id': db_user.id,
                 'saved_cart': True,
                 'missing_amount': missing,
-                'return_to_cart': True,
+                'return_to_cart': False,
                 'description': f'Покупка суточного тарифа {tariff.name}',
                 'traffic_limit_gb': tariff.traffic_limit_gb,
                 'device_limit': tariff.device_limit,
@@ -1099,10 +1095,6 @@ async def _proceed_with_selected_tariff(
                     discount=discount_text,
                     balance=format_price_kopeks(user_balance),
                     missing=format_price_kopeks(missing),
-                )
-                + texts.t(
-                    'TARIFF_PURCHASE_CART_SAVED_HINT',
-                    '\n\n🛒 <i>Корзина сохранена! После пополнения баланса подписка будет оформлена автоматически.</i>',
                 ),
                 reply_markup=get_daily_tariff_insufficient_balance_keyboard(
                     tariff_id, db_user.language, back_callback=back_callback
@@ -1814,7 +1806,7 @@ async def select_tariff_period(
             'user_id': db_user.id,
             'saved_cart': True,
             'missing_amount': missing,
-            'return_to_cart': True,
+            'return_to_cart': False,
             'description': f'Покупка тарифа {tariff.name} на {period} дней',
             'traffic_limit_gb': tariff.traffic_limit_gb,
             'device_limit': shown_device_limit,
@@ -1827,22 +1819,14 @@ async def select_tariff_period(
         await callback.message.edit_text(
             texts.t(
                 'TARIFF_PURCHASE_INSUFFICIENT',
-                '❌ <b>Недостаточно средств</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📅 Период: {period}\n'
-                '💰 Стоимость: {price}\n\n'
-                '💳 Ваш баланс: {balance}\n'
-                '⚠️ Не хватает: <b>{missing}</b>',
+                '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Недостаточно средств</b>\n\n'
+                '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> К оплате: {price} ({period})\n'
+                '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Не хватает: {missing} (баланс: {balance})',
             ).format(
-                name=html.escape(tariff.name),
                 period=format_period(period),
                 price=format_price_kopeks(final_price),
                 balance=format_price_kopeks(user_balance),
                 missing=format_price_kopeks(missing),
-            )
-            + texts.t(
-                'TARIFF_PURCHASE_CART_SAVED_HINT',
-                '\n\n🛒 <i>Корзина сохранена! После пополнения баланса подписка будет оформлена автоматически.</i>',
             ),
             reply_markup=get_tariff_insufficient_balance_keyboard(
                 tariff_id, period, db_user.language, missing_kopeks=missing
@@ -3846,14 +3830,10 @@ async def select_tariff_switch_period(
         await callback.message.edit_text(
             texts.t(
                 'TARIFF_PURCHASE_INSUFFICIENT',
-                '❌ <b>Недостаточно средств</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📅 Период: {period}\n'
-                '💰 Стоимость: {price}\n\n'
-                '💳 Ваш баланс: {balance}\n'
-                '⚠️ Не хватает: <b>{missing}</b>',
+                '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Недостаточно средств</b>\n\n'
+                '<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> К оплате: {price} ({period})\n'
+                '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> Не хватает: {missing} (баланс: {balance})',
             ).format(
-                name=html.escape(tariff.name),
                 period=format_period(period),
                 price=format_price_kopeks(final_price),
                 balance=format_price_kopeks(user_balance),
