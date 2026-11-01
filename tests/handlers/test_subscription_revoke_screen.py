@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import app.handlers.subscription.revoke as revoke_mod
-from app.handlers.subscription.revoke import _build_revoke_confirm_keyboard
+from app.handlers.subscription.revoke import _build_revoke_confirm_keyboard, _build_revoke_success_keyboard
 
 
 REVOKE_ICON = '4911241630633165627'  # та же иконка, что у пункта «Перевыпустить»
@@ -51,3 +51,29 @@ async def test_confirmation_screen_is_compact():
     assert '⚠️' not in text
     assert 'Сгенерирует' not in text
     assert 'Продолжить?' not in text
+
+
+def test_success_keyboard_uses_connect_and_main_menu_icons():
+    keyboard = _build_revoke_success_keyboard('ru')
+    connect, home = keyboard.inline_keyboard[0][0], keyboard.inline_keyboard[1][0]
+
+    assert connect.text == 'Подключиться'
+    assert connect.callback_data == 'subscription_connect'
+    assert connect.style == 'primary'
+    assert connect.icon_custom_emoji_id == '5084923566848213749'
+
+    assert home.text == 'Главное меню'
+    assert home.callback_data == 'back_to_menu'
+    assert home.icon_custom_emoji_id == '5314310000531766389'
+    assert home.style == 'primary'
+
+
+def test_success_text_is_compact():
+    from app.localization.texts import get_texts
+
+    text = get_texts('ru').t('SUBSCRIPTION_REVOKE_SUCCESS', '')
+
+    assert '5359415772844152891' in text
+    assert '<b>Готово</b>' in text
+    assert 'Подключитесь заново: старая ссылка и устройства отключены.' in text
+    assert 'Новая ссылка подключения готова' not in text

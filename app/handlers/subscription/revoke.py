@@ -16,6 +16,7 @@ from app.database.models import Subscription, User
 from app.localization.texts import get_texts
 from app.services.subscription_service import SubscriptionService
 from app.utils.decorators import error_handler
+from app.utils.payment_button_styles import apply_button_style
 
 
 logger = structlog.get_logger(__name__)
@@ -59,25 +60,27 @@ def _build_revoke_confirm_keyboard(
     )
 
 
-def _build_revoke_success_keyboard(
-    language: str,
-    multi_tariff: bool = False,
-) -> InlineKeyboardMarkup:
-    """Build success keyboard with connect and back buttons."""
+def _build_revoke_success_keyboard(language: str) -> InlineKeyboardMarkup:
+    """Build success keyboard: reconnect first, then back to the main menu."""
     texts = get_texts(language)
-    back_callback = 'my_subscriptions' if multi_tariff else 'menu_subscription'
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text=texts.t('SUBSCRIPTION_REVOKE_CONNECT_BTN', '🔗 Подключиться'),
-                    callback_data='subscription_connect',
+                apply_button_style(
+                    InlineKeyboardButton(
+                        text=texts.t('SUBSCRIPTION_REVOKE_CONNECT_BTN', '🔗 Подключиться'),
+                        callback_data='subscription_connect',
+                    ),
+                    'subscription:connect',
                 ),
             ],
             [
-                InlineKeyboardButton(
-                    text=texts.BACK,
-                    callback_data=back_callback,
+                apply_button_style(
+                    InlineKeyboardButton(
+                        text=texts.t('MAIN_MENU_BUTTON', 'Главное меню'),
+                        callback_data='back_to_menu',
+                    ),
+                    'success:main_menu',
                 ),
             ],
         ]
@@ -248,13 +251,11 @@ async def confirm_subscription_revoke(
         texts.t(
             'SUBSCRIPTION_REVOKE_SUCCESS',
             (
-                '✅ <b>Подписка перевыпущена!</b>\n\n'
-                'Новая ссылка подключения готова. '
-                'Старая ссылка больше не действительна.\n\n'
-                'Все устройства были отключены.'
+                '<tg-emoji emoji-id="5359415772844152891">✅</tg-emoji> <b>Готово</b>\n\n'
+                'Подключитесь заново: старая ссылка и устройства отключены.'
             ),
         ),
-        reply_markup=_build_revoke_success_keyboard(db_user.language, multi_tariff=is_multi),
+        reply_markup=_build_revoke_success_keyboard(db_user.language),
         parse_mode='HTML',
     )
 

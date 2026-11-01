@@ -65,6 +65,10 @@ BUTTON_STYLES: dict[str, ButtonStyle] = {
         icon_custom_emoji_id='5334552404736104314',
         style='primary',
     ),
+    'subscription:connect': ButtonStyle(
+        icon_custom_emoji_id='5084923566848213749',
+        style='primary',
+    ),
     'method:heleket': ButtonStyle(icon_custom_emoji_id='5318972874726339331'),
     # Примеры:
     # 'method:stars': ButtonStyle(icon_custom_emoji_id='1234567890', style='primary'),
