@@ -482,7 +482,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     # ключи SUBSCRIPTION_*_OVERVIEW_TEMPLATE из локалей его больше не перекрывают.
     # Юникод-эмодзи внутри <tg-emoji> — фолбэк для клиентов без премиума.
     heading = '<tg-emoji emoji-id="5359415772844152891">📋</tg-emoji> <b>Информация о подписке</b>'
-    total_line = '         Трафик: {traffic}'
+    total_line = '        Трафик: {traffic}'
     devices_line = '<tg-emoji emoji-id="5237868881267153432">📱</tg-emoji> Устройства: {devices_used} / {device_limit}'
     # Белые списки идут в одной группе со строкой трафика — они её и объясняют, —
     # а от устройств отбиваются пустой строкой: иначе строки сквадов липнут к
