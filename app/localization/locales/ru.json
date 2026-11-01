@@ -10,7 +10,7 @@
   "MAIN_MENU_MIN_DAYS_LEFT": "{days} дн.",
   "MAIN_MENU_MIN_DISABLED": "<tg-emoji emoji-id=\"5359689181872282374\">⚫</tg-emoji> Отключена",
   "MAIN_MENU_MIN_EXPIRED": "<tg-emoji emoji-id=\"5269735794846769214\">⛔</tg-emoji> Закончилась",
-  "MAIN_MENU_MIN_LIMITED": "<tg-emoji emoji-id=\"5361907081509098425\">⚠️</tg-emoji> Трафик исчерпан",
+  "MAIN_MENU_MIN_LIMITED": "<tg-emoji emoji-id=\"5359415772844152891\">⚠️</tg-emoji> Трафик исчерпан",
   "MAIN_MENU_MIN_NONE": "<tg-emoji emoji-id=\"5359415772844152891\">🏠</tg-emoji> Нет активной подписки",
   "MAIN_MENU_MIN_TODAY": "<tg-emoji emoji-id=\"5359415772844152891\">🏠</tg-emoji>истекает сегодня",
   "MAIN_MENU_MIN_TOMORROW": "<tg-emoji emoji-id=\"5359415772844152891\">🏠</tg-emoji>истекает завтра",

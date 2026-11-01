@@ -606,7 +606,7 @@ def _minimal_status_line(subscription, texts, is_daily_tariff: bool) -> str:
 
     if actual_status == 'limited':
         label = texts.t(
-            'MAIN_MENU_MIN_LIMITED', '<tg-emoji emoji-id="5361907081509098425">⚠️</tg-emoji> Трафик исчерпан'
+            'MAIN_MENU_MIN_LIMITED', '<tg-emoji emoji-id="5359415772844152891">⚠️</tg-emoji> Трафик исчерпан'
         )
     elif getattr(subscription, 'is_trial', False) or actual_status == 'trial':
         label = texts.t('MAIN_MENU_MIN_TRIAL', '<tg-emoji emoji-id="5359415772844152891">🎁</tg-emoji> Тестовая')
