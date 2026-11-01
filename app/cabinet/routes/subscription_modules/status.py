@@ -165,7 +165,7 @@ async def get_connection_link(
     )
 
     # 2. Генерируем INCY crypt-ссылку
-    provider_name = getattr(settings, 'INCY_PROVIDER_NAME', 'VPN')
+    provider_name = settings.get_incy_provider_name()
     incy_crypto_link = (
         encrypt_incy_link(subscription_url, provider_name)
         if getattr(settings, 'INCY_CRYPTOLINK_ENABLED', False)

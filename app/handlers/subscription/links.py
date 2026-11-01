@@ -28,6 +28,46 @@ async def _resolve_subscription(callback: types.CallbackQuery, db_user: User, db
     return await resolve_subscription_from_context(callback, db_user, db, state)
 
 
+async def _ensure_happ_crypto_link(subscription, db: AsyncSession) -> str | None:
+    """Happ crypt-ссылка подписки; при отсутствии в БД — сгенерировать и сохранить.
+
+    Remnawave 2.8.0+ перестала отдавать готовый ``cryptoLink``, а массовая
+    синхронизация пользователей намеренно не тратит время на шифрование
+    (``enrich_happ_links=False``). Поэтому у перенесённых/синхронизированных
+    подписок поле долго остаётся пустым, и меню выбора приложения показывало
+    только INCY — тот генерируется на лету. Кабинет уже достраивает ссылку
+    лениво (``subscription_modules/status.py``); здесь тот же путь для бота.
+    """
+    stored = getattr(subscription, 'subscription_crypto_link', None)
+    if stored:
+        return stored
+
+    subscription_url = getattr(subscription, 'subscription_url', None)
+    if not subscription_url:
+        return None
+
+    try:
+        from app.services.remnawave_service import RemnaWaveService
+
+        service = RemnaWaveService()
+        async with service.get_api_client() as api:
+            encrypted = await api.encrypt_happ_crypto_link(str(subscription_url))
+    except Exception as e:
+        logger.debug('Не удалось получить happ crypt-ссылку для меню подключения', error=e)
+        return None
+
+    if not encrypted:
+        return None
+
+    subscription.subscription_crypto_link = encrypted
+    try:
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.warning('Не удалось сохранить happ crypt-ссылку', error=e)
+    return encrypted
+
+
 async def handle_connect_subscription(
     callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None
 ):
@@ -201,9 +241,9 @@ async def handle_connect_subscription(
         from app.utils.incy_crypt1 import encrypt_incy_link
 
         subscription_url = str(subscription.subscription_url) if subscription.subscription_url else ''
-        provider_name = getattr(settings, 'INCY_PROVIDER_NAME', 'VPN')
+        provider_name = settings.get_incy_provider_name()
 
-        raw_happ_link = subscription.subscription_crypto_link
+        raw_happ_link = await _ensure_happ_crypto_link(subscription, db)
         raw_incy_link = (
             encrypt_incy_link(subscription_url, provider_name)
             if getattr(settings, 'INCY_CRYPTOLINK_ENABLED', False) and subscription_url
