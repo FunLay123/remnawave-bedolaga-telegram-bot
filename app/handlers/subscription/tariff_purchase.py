@@ -379,8 +379,10 @@ def get_tariff_confirm_keyboard(
     buttons = [
         [
             InlineKeyboardButton(
-                text=texts.t('TARIFF_PURCHASE_CONFIRM_BUTTON', '✅ Подтвердить покупку'),
+                text=texts.t('CONFIRM_PURCHASE_BUTTON', 'Подтвердить'),
                 callback_data=f'tariff_confirm:{tariff_id}:{period}',
+                style='primary',
+                icon_custom_emoji_id='5334552404736104314',
             )
         ],
     ]
@@ -1761,7 +1763,12 @@ async def select_tariff_period(
     traffic = format_traffic(tariff.traffic_limit_gb)
 
     if user_balance >= final_price:
-        # Показываем подтверждение
+        # Подтверждение в том же компактном виде, что и продление: период,
+        # итоговая цена и переход баланса. Тариф уже выбран на прошлом экране.
+        new_end_date = datetime.now(UTC) + timedelta(days=period)
+        new_end_text = format_local_datetime(new_end_date, '%d.%m.%Y', na_placeholder='—')
+        # Старые локали (en/fa/ua/zh) ещё используют расширенный шаблон;
+        # передаём все его плейсхолдеры, чтобы не падать на KeyError.
         discount_text = ''
         if discount_percent > 0:
             discount_text = texts.t(
@@ -1771,24 +1778,20 @@ async def select_tariff_period(
         await callback.message.edit_text(
             texts.t(
                 'TARIFF_PURCHASE_CONFIRM',
-                '✅ <b>Подтверждение покупки</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📊 Трафик: {traffic}\n'
-                '📱 Устройств: {devices}\n'
-                '📅 Период: {period}\n'
-                '{discount}\n'
-                '💰 <b>Итого: {total}</b>\n\n'
-                '💳 Ваш баланс: {balance}\n'
-                'После оплаты: {after}',
+                '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Подтверждение</b>\n\n'
+                '<tg-emoji emoji-id="5335020345717973061">💠</tg-emoji> +{period} (До {new_date})\n'
+                '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {total}\n'
+                '        Баланс {balance} → {after}',
             ).format(
                 name=html.escape(tariff.name),
                 traffic=traffic,
                 devices=shown_device_limit,
-                period=format_period(period),
                 discount=discount_text,
-                total=format_price_kopeks(final_price),
-                balance=format_price_kopeks(user_balance),
-                after=format_price_kopeks(user_balance - final_price),
+                period=format_period(period),
+                new_date=new_end_text,
+                total=texts.format_price(final_price),
+                balance=texts.format_price(user_balance),
+                after=texts.format_price(user_balance - final_price),
             ),
             reply_markup=get_tariff_confirm_keyboard(tariff_id, period, db_user.language),
             parse_mode='HTML',
@@ -5696,7 +5699,10 @@ async def return_to_saved_tariff_cart(
         )
     else:  # tariff_purchase
         period = cart_data.get('period_days', 30)
-
+        new_end_date = datetime.now(UTC) + timedelta(days=period)
+        new_end_text = format_local_datetime(new_end_date, '%d.%m.%Y', na_placeholder='—')
+        # Старые локали (en/fa/ua/zh) ещё используют расширенный шаблон;
+        # передаём все его плейсхолдеры, чтобы не падать на KeyError.
         discount_text = ''
         if discount_percent > 0:
             original_price = int(total_price / (1 - discount_percent / 100))
@@ -5707,24 +5713,20 @@ async def return_to_saved_tariff_cart(
         await callback.message.edit_text(
             texts.t(
                 'TARIFF_PURCHASE_CONFIRM',
-                '✅ <b>Подтверждение покупки</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📊 Трафик: {traffic}\n'
-                '📱 Устройств: {devices}\n'
-                '📅 Период: {period}\n'
-                '{discount}\n'
-                '💰 <b>Итого: {total}</b>\n\n'
-                '💳 Ваш баланс: {balance}\n'
-                'После оплаты: {after}',
+                '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Подтверждение</b>\n\n'
+                '<tg-emoji emoji-id="5335020345717973061">💠</tg-emoji> +{period} (До {new_date})\n'
+                '<tg-emoji emoji-id="5449444442056441600">📊</tg-emoji> {total}\n'
+                '        Баланс {balance} → {after}',
             ).format(
                 name=html.escape(tariff.name),
                 traffic=traffic,
                 devices=tariff.device_limit,
-                period=format_period(period),
                 discount=discount_text,
-                total=format_price_kopeks(total_price),
-                balance=format_price_kopeks(user_balance),
-                after=format_price_kopeks(user_balance - total_price),
+                period=format_period(period),
+                new_date=new_end_text,
+                total=texts.format_price(total_price),
+                balance=texts.format_price(user_balance),
+                after=texts.format_price(user_balance - total_price),
             ),
             reply_markup=get_tariff_confirm_keyboard(tariff_id, period, db_user.language),
             parse_mode='HTML',

@@ -10,6 +10,7 @@ confirm_tariff_purchase — полный движок с доплатой за �
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -110,3 +111,44 @@ async def test_preview_uses_engine_price_with_extra_devices(monkeypatch):
         # а не показать «Подтверждение покупки» со 100 ₽ и «После оплаты: 0».
         assert 'Недостаточно средств' in rendered
         assert '150' in rendered
+
+
+async def test_purchase_confirmation_matches_compact_renewal_layout(monkeypatch):
+    """Покупка без подписки показывает то же компактное подтверждение, что продление."""
+    from app.handlers.subscription import tariff_purchase as m
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        user = User(
+            telegram_id=112,
+            username='user112',
+            first_name='User',
+            status=UserStatus.ACTIVE.value,
+            language='ru',
+            balance_kopeks=BASE_PRICE_KOPEKS,
+        )
+        db.add(user)
+        await db.commit()
+
+        tariff = Tariff(
+            name='Базовый',
+            is_active=True,
+            device_limit=1,
+            traffic_limit_gb=0,
+            period_prices={'30': BASE_PRICE_KOPEKS},
+        )
+        db.add(tariff)
+        await db.commit()
+
+        monkeypatch.setattr(m.user_cart_service, 'save_user_cart', AsyncMock())
+
+        callback = _callback(f'tariff_period:{tariff.id}:30')
+        await m.select_tariff_period.__wrapped__(callback, user, db, _state())
+
+        rendered = callback.message.edit_text.await_args.args[0]
+        plain = re.sub(r'</?tg-emoji[^>]*>', '', rendered)
+
+        assert '<b>Подтверждение</b>' in plain
+        assert '+30 дней' in plain
+        assert 'Баланс 100 ₽ → 0 ₽' in plain
+        for legacy in ('Тариф:', 'Трафик:', 'Устройств:', 'После оплаты:'):
+            assert legacy not in plain, plain
