@@ -1,6 +1,6 @@
 {
   "ACCESS_DENIED": "❌ Доступ запрещен",
-  "ADDON_INSUFFICIENT_FUNDS_MESSAGE": "⚠️ <b>Недостаточно средств</b>\n\nСтоимость услуги: {required}\nНа балансе: {balance}\nНе хватает: {missing}\n\nВыберите способ пополнения. Сумма подставится автоматически.",
+  "ADDON_INSUFFICIENT_FUNDS_MESSAGE": "<tg-emoji emoji-id=\"5361907081509098425\">⚠️</tg-emoji> <b>Не хватает {missing}</b>\n\nК оплате {required} · баланс {balance}",
   "ADD_COUNTRIES_BUTTON": "🌐 Добавить страны",
   "ADD_TRAFFIC_PROMPT": "📈 <b>Обычный трафик</b>\n\n📊 Текущий лимит: {current_traffic}\n<blockquote>Пакет действует 30 дней с момента покупки</blockquote>",
   "AUTOPAY_DISABLE_TOGGLE": "Выключить автоплатеж",

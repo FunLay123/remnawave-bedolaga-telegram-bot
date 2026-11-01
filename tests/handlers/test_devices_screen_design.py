@@ -95,8 +95,8 @@ def _plain(text: str) -> str:
     return text.strip()
 
 
-def test_increase_price_uses_arrow_separator_without_discount():
-    """«5 > +36₽» — без срока, вложенных скобок и скидки в подписи кнопки."""
+def test_increase_price_uses_dot_separator_without_discount():
+    """«5 · +36 ₽» — без срока, вложенных скобок и скидки в подписи кнопки."""
     tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
     end_date = datetime.now(UTC) + timedelta(days=11)
     keyboard = get_change_devices_keyboard(3, 'ru', subscription_end_date=end_date, tariff=tariff)
@@ -105,7 +105,7 @@ def test_increase_price_uses_arrow_separator_without_discount():
     assert increase
     for button in increase:
         text = _plain(button.text)
-        assert ' > ' in text, text
+        assert ' · ' in text, text
         assert 'дн.' not in text, text
         assert '(' not in text and ')' not in text, text
         assert 'скидка' not in text, text
@@ -116,7 +116,16 @@ def test_decrease_button_shows_zero_price():
     keyboard = get_change_devices_keyboard(6, 'ru', tariff=tariff)
 
     decrease = next(b for b in _buttons(keyboard) if b.callback_data == 'change_devices_3')
-    assert ' '.join(_plain(decrease.text).split()) == '3 > 0₽'
+    assert ' '.join(_plain(decrease.text).split()) == '3 · 0 ₽'
+
+
+def test_large_price_gets_thousand_separators():
+    tariff = SimpleNamespace(device_price_kopeks=5000, device_limit=3, max_device_limit=20)
+    end_date = datetime.now(UTC) + timedelta(days=3650, hours=12)
+    keyboard = get_change_devices_keyboard(3, 'ru', subscription_end_date=end_date, tariff=tariff)
+
+    increase = next(b for b in _buttons(keyboard) if b.callback_data == 'change_devices_4')
+    assert '+6 085 ₽' in _plain(increase.text)
 
 
 @pytest.mark.parametrize(
@@ -145,10 +154,10 @@ def test_labels_start_with_the_device_number():
         for b in _buttons(keyboard)
         if b.callback_data.startswith('change_devices_')
     }
-    assert labels[3].startswith('3 > ')
-    assert labels[4].startswith('4 > ')
-    assert labels[5].startswith('5 > ')
-    assert labels[10].startswith('10 > ')
+    assert labels[3].startswith('3 · ')
+    assert labels[4].startswith('4 · ')
+    assert labels[5].startswith('5 · ')
+    assert labels[10].startswith('10 · ')
 
 
 def test_labels_are_padded_to_equal_length():

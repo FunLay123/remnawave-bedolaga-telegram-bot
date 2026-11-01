@@ -1006,6 +1006,8 @@ class MenuLayoutService:
         button_type = button_config.get('type', 'builtin')
         # Используем переданный button_id или fallback на builtin_id
         effective_button_id = button_id or button_config.get('builtin_id', '')
+        if effective_button_id == 'resume_checkout' and not settings.CART_RESUME_ENABLED:
+            return None
         text_config = button_config.get('text', {})
         action = button_config.get('action', '')
         open_mode = button_config.get('open_mode', 'callback')

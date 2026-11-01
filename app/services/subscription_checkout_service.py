@@ -1,6 +1,7 @@
 import structlog
 from sqlalchemy.exc import MissingGreenlet
 
+from app.config import settings
 from app.database.models import Subscription, User
 from app.utils.cache import UserCache
 
@@ -47,6 +48,9 @@ def should_offer_checkout_resume(
     Only users without an active paid subscription or users currently on trial
     are eligible to continue assembling the subscription from the saved draft.
     """
+
+    if not settings.CART_RESUME_ENABLED:
+        return False
 
     if not has_draft:
         return False

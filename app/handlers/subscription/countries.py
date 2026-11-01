@@ -333,7 +333,7 @@ async def apply_countries_changes(callback: types.CallbackQuery, db_user: User, 
 
     if total_cost > 0 and db_user.balance_kopeks < total_cost:
         missing_kopeks = total_cost - db_user.balance_kopeks
-        required_text = f'{texts.format_price(total_cost)} (за {charged_days} дн.)'
+        required_text = texts.format_price(total_cost)
         message_text = texts.t(
             'ADDON_INSUFFICIENT_FUNDS_MESSAGE',
             (

@@ -1582,8 +1582,7 @@ async def save_cart_and_redirect_to_topup(
         f'💰 Недостаточно средств для оформления подписки\n\n'
         f'Требуется: {texts.format_price(missing_amount, round_kopeks=False)}\n'
         f'У вас: {texts.format_price(db_user.balance_kopeks, round_kopeks=False)}\n\n'
-        f'🛒 Ваша корзина сохранена!\n'
-        f'После пополнения баланса вы сможете вернуться к оформлению подписки.\n\n'
+        f'После пополнения оформление продолжится автоматически.\n\n'
         f'Выберите способ пополнения:',
         reply_markup=get_payment_methods_keyboard_with_cart(
             db_user.language,

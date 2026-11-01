@@ -450,6 +450,9 @@ async def handle_payment_methods_unavailable(callback: types.CallbackQuery, db_u
 
 @error_handler
 async def handle_successful_topup_with_cart(user_id: int, amount_kopeks: int, bot, db: AsyncSession):
+    if not settings.CART_RESUME_ENABLED:
+        return
+
     from aiogram.fsm.storage.base import StorageKey
 
     from app.bot import dp

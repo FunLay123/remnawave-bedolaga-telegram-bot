@@ -14,8 +14,14 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+from app.config import settings
 from app.services.payment import common as common_module
 from app.services.payment.common import PaymentCommonMixin
+
+
+@pytest.fixture(autouse=True)
+def _enable_cart_resume(monkeypatch):
+    monkeypatch.setattr(settings, 'CART_RESUME_ENABLED', True)
 
 
 @pytest.fixture

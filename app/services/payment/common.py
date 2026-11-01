@@ -107,6 +107,8 @@ class PaymentCommonMixin:
                         ]
                     ]
                 )
+            if not settings.CART_RESUME_ENABLED:
+                return main_menu_button
             return InlineKeyboardMarkup(
                 inline_keyboard=[
                     [

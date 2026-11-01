@@ -14,6 +14,7 @@ from app.legal_documents import LEGAL_EMOJI_ID
 from app.localization.loader import DEFAULT_LANGUAGE
 from app.localization.texts import get_texts
 from app.utils.device_display import device_display_name
+from app.utils.formatters import format_number
 from app.utils.legacy_subscription import is_legacy_subscription as _legacy_subscription
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button
 from app.utils.payment_button_styles import apply_button_style
@@ -796,7 +797,7 @@ def get_main_menu_keyboard(
         )
 
     # Не удаляем черновик checkout: оставляем условный пункт восстановления вне основной навигации.
-    if show_resume_checkout or has_saved_cart:
+    if settings.CART_RESUME_ENABLED and (show_resume_checkout or has_saved_cart):
         resume_callback = 'return_to_saved_cart' if has_saved_cart else 'subscription_resume_checkout'
         keyboard.append(
             [
@@ -1080,15 +1081,20 @@ def get_insufficient_balance_keyboard(
             and isinstance(last_row[0], InlineKeyboardButton)
             and last_row[0].callback_data in {'menu_balance', 'back_to_menu'}
         ):
-            keyboard.inline_keyboard[-1][0] = InlineKeyboardButton(
-                text=texts.t('PAYMENT_RETURN_HOME_BUTTON', '🏠 На главную'),
-                callback_data='back_to_menu',
+            keyboard.inline_keyboard[-1][0] = apply_button_style(
+                InlineKeyboardButton(
+                    text=texts.t('PAYMENT_RETURN_HOME_BUTTON', '🏠 На главную'),
+                    callback_data='back_to_menu',
+                ),
+                'success:main_menu',
             )
             back_row_index = len(keyboard.inline_keyboard) - 1
 
-    # Если есть сохраненная корзина или передан resume_callback, добавляем кнопку возврата
+    # Если есть сохраненная корзина или передан resume_callback, добавляем кнопку возврата.
+    # Возврат к подарку — отдельный сценарий, его флаг подписки не выключает.
     button_label = resume_text or texts.RETURN_TO_SUBSCRIPTION_CHECKOUT
-    if has_saved_cart:
+    allow_resume = settings.CART_RESUME_ENABLED or resume_callback == 'return_to_gift_cart'
+    if allow_resume and has_saved_cart:
         return_row = [
             InlineKeyboardButton(
                 text=button_label,
@@ -1097,7 +1103,7 @@ def get_insufficient_balance_keyboard(
         ]
         insert_index = back_row_index if back_row_index is not None else len(keyboard.inline_keyboard)
         keyboard.inline_keyboard.insert(insert_index, return_row)
-    elif resume_callback:
+    elif allow_resume and resume_callback:
         return_row = [
             InlineKeyboardButton(
                 text=button_label,
@@ -1348,6 +1354,8 @@ def get_payment_methods_keyboard_with_cart(
 ) -> InlineKeyboardMarkup:
     texts = get_texts(language)
     keyboard = get_payment_methods_keyboard(amount_kopeks, language)
+    if not settings.CART_RESUME_ENABLED:
+        return keyboard
 
     # Добавляем кнопку "Очистить корзину"
     keyboard.inline_keyboard.append(
@@ -1367,18 +1375,18 @@ def get_payment_methods_keyboard_with_cart(
 
 def get_subscription_confirm_keyboard_with_cart(language: str = 'ru') -> InlineKeyboardMarkup:
     texts = get_texts(language)
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text='✅ Подтвердить покупку', callback_data='subscription_confirm')],
-            [InlineKeyboardButton(text='🗑️ Очистить корзину', callback_data='clear_saved_cart')],
-            [
-                InlineKeyboardButton(
-                    text=texts.BACK,
-                    callback_data='subscription_config_back',  # Изменили на возврат к настройке
-                )
-            ],
+    rows = [[InlineKeyboardButton(text='✅ Подтвердить покупку', callback_data='subscription_confirm')]]
+    if settings.CART_RESUME_ENABLED:
+        rows.append([InlineKeyboardButton(text='🗑️ Очистить корзину', callback_data='clear_saved_cart')])
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text=texts.BACK,
+                callback_data='subscription_config_back',  # Изменили на возврат к настройке
+            )
         ]
     )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def get_insufficient_balance_keyboard_with_cart(
@@ -1391,10 +1399,12 @@ def get_insufficient_balance_keyboard_with_cart(
     keyboard = get_insufficient_balance_keyboard(
         language,
         amount_kopeks=amount_kopeks,
-        has_saved_cart=True,
+        has_saved_cart=settings.CART_RESUME_ENABLED,
         resume_callback=resume_callback,
         resume_text=resume_text,
     )
+    if not settings.CART_RESUME_ENABLED:
+        return keyboard
 
     # Добавляем кнопку очистки корзины в начало
     keyboard.inline_keyboard.insert(
@@ -3025,6 +3035,13 @@ def get_premium_traffic_packages_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def _format_device_price(price_rub: int | None) -> str:
+    """Цена доплаты для подписи кнопки: «+44 433 ₽», бесплатно — «0 ₽»."""
+    if price_rub is None:
+        return '0\u00a0₽'
+    return f'+{format_number(price_rub)}\u00a0₽'
+
+
 def get_change_devices_keyboard(
     current_devices: int,
     language: str = DEFAULT_LANGUAGE,
@@ -3116,14 +3133,18 @@ def get_change_devices_keyboard(
             entries.append((devices_count, None, False))
 
     max_number_width = max(len(str(count)) for count, _, _ in entries)
+    price_texts = [_format_device_price(price_rub) for _, price_rub, _ in entries]
+    max_price_width = max(len(text) for text in price_texts)
 
     labels = []
-    for devices_count, price_rub, _is_free in entries:
+    for (devices_count, _, _), price_text in zip(entries, price_texts, strict=True):
         number = str(devices_count).rjust(max_number_width, figure_space)
-        price_text = f'+{price_rub}₽' if price_rub is not None else '0₽'
+        # Цену прижимаем к правому краю: столбец сумм читается ровно даже
+        # при разной длине чисел.
+        price = price_text.rjust(max_price_width, figure_space)
         # Срок одинаков для всех вариантов — не дублируем его в каждой кнопке.
         # Иначе «за N дн.» уезжает вслед за длиной цены.
-        labels.append(f'{number} > {price_text}'.replace(' ', nbsp))
+        labels.append(f'{number}{nbsp}·{nbsp}{price}')
 
     for (devices_count, _, _), label in zip(entries, labels, strict=True):
         buttons.append(

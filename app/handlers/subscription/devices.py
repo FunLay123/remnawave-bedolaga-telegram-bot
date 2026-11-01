@@ -424,7 +424,7 @@ async def confirm_change_devices(
 
         if price > 0 and db_user.balance_kopeks < price:
             missing_kopeks = price - db_user.balance_kopeks
-            required_text = f'{texts.format_price(price)} (за {period_label})'
+            required_text = texts.format_price(price)
             message_text = texts.t(
                 'ADDON_INSUFFICIENT_FUNDS_MESSAGE',
                 (
@@ -1519,7 +1519,7 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
 
     if price > 0 and db_user.balance_kopeks < price:
         missing_kopeks = price - db_user.balance_kopeks
-        required_text = f'{texts.format_price(price)} (за {period_label})'
+        required_text = texts.format_price(price)
         message_text = texts.t(
             'ADDON_INSUFFICIENT_FUNDS_MESSAGE',
             (

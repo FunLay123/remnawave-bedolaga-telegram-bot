@@ -34,6 +34,11 @@ from app.services.user_cart_service import UserCartService
 from app.states import GiftPurchaseStates
 
 
+@pytest.fixture(autouse=True)
+def _enable_cart_resume(monkeypatch):
+    monkeypatch.setattr(settings, 'CART_RESUME_ENABLED', True)
+
+
 # ── Mock Redis ──────────────────────────────────────────────────────────────
 
 

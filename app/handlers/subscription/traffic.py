@@ -1740,7 +1740,7 @@ async def confirm_switch_traffic(
                     'Выберите способ пополнения. Сумма подставится автоматически.'
                 ),
             ).format(
-                required=f'{texts.format_price(total_price_difference)} (за {days_remaining} дн.)',
+                required=texts.format_price(total_price_difference),
                 balance=texts.format_price(db_user.balance_kopeks, round_kopeks=False),
                 missing=texts.format_price(missing_kopeks, round_kopeks=False),
             )
