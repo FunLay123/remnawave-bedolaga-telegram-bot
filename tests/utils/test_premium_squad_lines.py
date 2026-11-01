@@ -1,4 +1,4 @@
-"""Строки белых списков: пометка, когда общий лимит уже исчерпан."""
+"""Общий лимит исчерпан: в меню остаётся одна причина, без цифр трафика."""
 
 from __future__ import annotations
 
@@ -7,82 +7,52 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.config import settings
 from app.localization.texts import get_texts
-from app.utils.premium_traffic import BYTES_IN_GB
-from app.utils.rich_menu import premium_squad_lines
+from app.utils import rich_menu
+from app.utils.rich_menu import general_traffic_exhausted_line, is_general_traffic_exhausted
 
 
-SQUAD = '11111111-1111-4111-8111-111111111111'
+def test_general_limit_is_exhausted_by_numbers():
+    assert is_general_traffic_exhausted(SimpleNamespace(traffic_limit_gb=12, traffic_used_gb=12))
+    assert is_general_traffic_exhausted(SimpleNamespace(traffic_limit_gb=12, traffic_used_gb=32.7))
+    assert not is_general_traffic_exhausted(SimpleNamespace(traffic_limit_gb=12, traffic_used_gb=5))
+    assert not is_general_traffic_exhausted(SimpleNamespace(traffic_limit_gb=0, traffic_used_gb=100))
 
 
-def _tariff():
-    return SimpleNamespace(server_traffic_limits={SQUAD: {'traffic_limit_gb': 3}})
+def test_exhausted_line_uses_custom_emoji():
+    line = general_traffic_exhausted_line(get_texts('ru'))
 
-
-def _subscription(*, traffic_limit_gb: float, traffic_used_gb: float):
-    return SimpleNamespace(
-        id=1,
-        connected_squads=[SQUAD],
-        traffic_limit_gb=traffic_limit_gb,
-        traffic_used_gb=traffic_used_gb,
-    )
-
-
-def _patch_states(monkeypatch):
-    state = SimpleNamespace(
-        squad_uuid=SQUAD,
-        total_limit_bytes=3 * BYTES_IN_GB,
-        used_bytes=1 * BYTES_IN_GB,
-    )
-    monkeypatch.setattr(
-        'app.database.crud.premium_traffic.get_states_for_subscription',
-        AsyncMock(return_value=[state]),
-    )
-    monkeypatch.setattr(
-        'app.database.crud.server_squad.get_squad_display_names',
-        AsyncMock(return_value={SQUAD: 'EU'}),
-    )
+    assert '5361907081509098425' in line
+    assert 'Лимит трафика исчерпан — белые списки тоже недоступны' in line
 
 
 @pytest.mark.anyio('asyncio')
-async def test_general_limit_exhausted_note_is_added(monkeypatch):
-    _patch_states(monkeypatch)
+async def test_rich_block_shows_only_the_reason_when_general_limit_is_exhausted(monkeypatch):
+    subscription = SimpleNamespace(
+        id=1,
+        actual_status='limited',
+        status='limited',
+        is_trial=True,
+        tariff_id=5,
+        tariff=SimpleNamespace(is_daily=False),
+        traffic_limit_gb=12,
+        traffic_used_gb=32.7,
+        device_limit=3,
+        end_date=None,
+    )
+    user = SimpleNamespace(subscription=subscription, balance_kopeks=0, full_name='Test', language='ru')
 
-    lines = await premium_squad_lines(
-        _subscription(traffic_limit_gb=12, traffic_used_gb=12),
-        _tariff(),
-        get_texts('ru'),
-        None,
+    monkeypatch.setattr(type(settings), 'is_tariffs_mode', lambda self: True)
+    monkeypatch.setattr(rich_menu, 'get_tariff_by_id', AsyncMock(return_value=SimpleNamespace(is_daily=False)))
+    monkeypatch.setattr(
+        rich_menu,
+        'premium_squad_lines',
+        AsyncMock(return_value=['<tg-emoji emoji-id="5116444615301399317">💠</tg-emoji> Белые списки: 1 ГБ / 3 ГБ']),
     )
 
-    text = '\n'.join(lines)
-    assert 'Общий лимит трафика исчерпан — белые списки тоже недоступны' in text
-    assert '5361907081509098425' in text
+    html = await rich_menu._build_single_subscription_block(user, get_texts('ru'), AsyncMock())
 
-
-@pytest.mark.anyio
-async def test_no_note_when_general_traffic_is_still_available(monkeypatch):
-    _patch_states(monkeypatch)
-
-    lines = await premium_squad_lines(
-        _subscription(traffic_limit_gb=12, traffic_used_gb=5),
-        _tariff(),
-        get_texts('ru'),
-        None,
-    )
-
-    assert 'Общий лимит трафика исчерпан' not in '\n'.join(lines)
-
-
-@pytest.mark.anyio
-async def test_no_note_for_unlimited_general_traffic(monkeypatch):
-    _patch_states(monkeypatch)
-
-    lines = await premium_squad_lines(
-        _subscription(traffic_limit_gb=0, traffic_used_gb=100),
-        _tariff(),
-        get_texts('ru'),
-        None,
-    )
-
-    assert 'Общий лимит трафика исчерпан' not in '\n'.join(lines)
+    assert 'Лимит трафика исчерпан — белые списки тоже недоступны' in html
+    assert '32.7' not in html
+    assert 'Белые списки: 1 ГБ / 3 ГБ' not in html

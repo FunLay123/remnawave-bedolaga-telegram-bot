@@ -333,6 +333,23 @@ def _traffic_usage_text(subscription, texts) -> str:
     return f'{used} / {limit}'
 
 
+def is_general_traffic_exhausted(subscription) -> bool:
+    """Конечный общий лимит уже выбран."""
+    limit = float(getattr(subscription, 'traffic_limit_gb', 0) or 0)
+    used = float(getattr(subscription, 'traffic_used_gb', 0) or 0)
+    return limit > 0 and used >= limit
+
+
+def general_traffic_exhausted_line(texts) -> str:
+    return _rich_text(
+        texts.t(
+            'PREMIUM_TRAFFIC_GENERAL_EXHAUSTED',
+            '<tg-emoji emoji-id="5361907081509098425">⚠️</tg-emoji> '
+            'Лимит трафика исчерпан — белые списки тоже недоступны',
+        )
+    )
+
+
 async def premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> list[str]:
     """Строки посквадных премиум-лимитов — рядом с общей строкой трафика.
 
@@ -373,23 +390,6 @@ async def premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> 
         )
         name = config.name or names.get(squad_uuid) or squad_uuid
         lines.append(_rich_text(template).replace('{name}', html.escape(name)).replace('{traffic}', html.escape(usage)))
-
-    # Общий лимит и белые списки — один счётчик панели. Если общий лимит
-    # исчерпан, панель блокирует весь аккаунт, даже если premium-сквад свой
-    # лимит не выбрал. Пишем это рядом с premium-строками, чтобы не казалось,
-    # что белые списки должны продолжать работать.
-    general_limit_gb = float(getattr(subscription, 'traffic_limit_gb', 0) or 0)
-    general_used_gb = float(getattr(subscription, 'traffic_used_gb', 0) or 0)
-    if general_limit_gb > 0 and general_used_gb >= general_limit_gb:
-        lines.append(
-            _rich_text(
-                texts.t(
-                    'PREMIUM_TRAFFIC_GENERAL_EXHAUSTED',
-                    '<tg-emoji emoji-id="5361907081509098425">⚠️</tg-emoji> '
-                    'Общий лимит трафика исчерпан — белые списки тоже недоступны',
-                )
-            )
-        )
     return lines
 
 
@@ -653,19 +653,25 @@ async def _build_single_subscription_block(user: User, texts, db: AsyncSession) 
             except Exception as premium_error:
                 logger.debug('Не удалось собрать премиум-лимиты для rich-меню', error=str(premium_error))
 
-        is_unlimited = not float(getattr(subscription, 'traffic_limit_gb', 0) or 0)
         traffic_group: list[str] = []
-        # Безлимитный общий трафик при белых списках — строку общего трафика не показываем,
-        # остаются только строки сквадов.
-        if not (is_unlimited and premium_lines):
-            traffic_text = _traffic_usage_text(subscription, texts)
-            if premium_lines:
-                # Известное ограничение (docs/premium-traffic-limits.md): панель считает
-                # расход на весь аккаунт, и в общей строке сидит трафик премиум-сквадов.
-                traffic_text += ' — включая белые списки'
-            traffic_template = '<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Трафик: {traffic}'
-            traffic_group.append(_rich_text(traffic_template).replace('{traffic}', html.escape(traffic_text)))
-        traffic_group.extend(premium_lines)
+        if is_general_traffic_exhausted(subscription) and premium_lines:
+            # Общий лимит и белые списки — один счётчик панели. Когда общий
+            # лимит выбран, панель уже заблокировала весь аккаунт: отдельные
+            # цифры трафика и сквадов только путают, оставляем одну причину.
+            traffic_group.append(general_traffic_exhausted_line(texts))
+        else:
+            is_unlimited = not float(getattr(subscription, 'traffic_limit_gb', 0) or 0)
+            # Безлимитный общий трафик при белых списках — строку общего трафика не показываем,
+            # остаются только строки сквадов.
+            if not (is_unlimited and premium_lines):
+                traffic_text = _traffic_usage_text(subscription, texts)
+                if premium_lines:
+                    # Известное ограничение (docs/premium-traffic-limits.md): панель считает
+                    # расход на весь аккаунт, и в общей строке сидит трафик премиум-сквадов.
+                    traffic_text += ' — включая белые списки'
+                traffic_template = '<tg-emoji emoji-id="5116444615301399317">📊</tg-emoji> Трафик: {traffic}'
+                traffic_group.append(_rich_text(traffic_template).replace('{traffic}', html.escape(traffic_text)))
+            traffic_group.extend(premium_lines)
         if traffic_group:
             groups.append(traffic_group)
 

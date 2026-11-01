@@ -162,3 +162,13 @@ async def test_no_whitelists_leaves_the_total_line():
 
     assert not _squad_lines(text), text
     assert '12.3' in text and '100' in text, text
+
+
+@pytest.mark.anyio('asyncio')
+async def test_exhausted_general_limit_hides_numbers_and_whitelists():
+    """Общий лимит выбран: вместо цифр и сквадов — одна причина."""
+    text = await _render(_subscription(limit_gb=12, used_gb=32.7), tariff=_tariff())
+
+    assert 'Лимит трафика исчерпан — белые списки тоже недоступны' in text
+    assert '32.7' not in text
+    assert not _squad_lines(text), text
