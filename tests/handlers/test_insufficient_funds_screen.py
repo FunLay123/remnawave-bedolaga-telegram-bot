@@ -10,7 +10,7 @@ from app.localization.texts import get_texts
 from app.services.subscription_checkout_service import should_offer_checkout_resume
 
 
-MILL_EMOJI_ID = '5361907081509098425'
+MILL_EMOJI_ID = '5258382581375723416'
 
 
 def _buttons(keyboard):

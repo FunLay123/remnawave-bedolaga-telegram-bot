@@ -51,4 +51,4 @@ def test_client_screen_warnings_use_custom_emoji():
         'TARIFF_PURCHASE_STILL_INSUFFICIENT_DAILY',
         'TARIFF_SWITCH_UPGRADE_INSUFFICIENT',
     ):
-        assert '5361907081509098425' in texts.t(key, ''), key
+        assert '5258382581375723416' in texts.t(key, ''), key
