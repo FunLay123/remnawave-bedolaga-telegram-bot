@@ -1589,40 +1589,10 @@ async def handle_custom_confirm(
 
         await state.clear()
 
-        traffic_display = format_traffic(traffic_limit)
+        # Экрана успеха нет — как при продлении: показываем актуальный экран подписки.
+        from .purchase import show_subscription_info
 
-        await callback.message.edit_text(
-            texts.t(
-                'TARIFF_PURCHASE_SUCCESS',
-                '🎉 <b>Подписка успешно оформлена!</b>\n\n'
-                '📦 Тариф: <b>{name}</b>\n'
-                '📊 Трафик: {traffic}\n'
-                '📱 Устройств: {devices}\n'
-                '📅 Период: {period}\n'
-                '💰 Списано: {price}\n\n'
-                'Перейдите в раздел «Подписка» для подключения.',
-            ).format(
-                name=html.escape(tariff.name),
-                traffic=traffic_display,
-                devices=tariff.device_limit,
-                period=format_period(custom_days),
-                price=format_price_kopeks(total_price),
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                            callback_data=f'sm:{subscription.id}'
-                            if settings.is_multi_tariff_enabled() and subscription
-                            else 'menu_subscription',
-                        )
-                    ],
-                    [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
-                ]
-            ),
-            parse_mode='HTML',
-        )
+        await show_subscription_info(callback, db_user, db)
     except Exception as e:
         logger.error('Ошибка при покупке тарифа с кастомными параметрами', error=e, exc_info=True)
         try:
@@ -2277,40 +2247,10 @@ async def confirm_tariff_purchase(
 
     await state.clear()
 
-    traffic = format_traffic(tariff.traffic_limit_gb)
+    # Экрана успеха нет — как при продлении: показываем актуальный экран подписки.
+    from .purchase import show_subscription_info
 
-    await callback.message.edit_text(
-        texts.t(
-            'TARIFF_PURCHASE_SUCCESS',
-            '🎉 <b>Подписка успешно оформлена!</b>\n\n'
-            '📦 Тариф: <b>{name}</b>\n'
-            '📊 Трафик: {traffic}\n'
-            '📱 Устройств: {devices}\n'
-            '📅 Период: {period}\n'
-            '💰 Списано: {price}\n\n'
-            'Перейдите в раздел «Подписка» для подключения.',
-        ).format(
-            name=html.escape(tariff.name),
-            traffic=traffic,
-            devices=tariff.device_limit,
-            period=format_period(period),
-            price=format_price_kopeks(final_price),
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                        callback_data=f'sm:{subscription.id}'
-                        if settings.is_multi_tariff_enabled() and subscription
-                        else 'menu_subscription',
-                    )
-                ],
-                [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
-            ]
-        ),
-        parse_mode='HTML',
-    )
+    await show_subscription_info(callback, db_user, db)
 
 
 # ==================== Покупка суточного тарифа ====================
@@ -2589,40 +2529,10 @@ async def confirm_daily_tariff_purchase(
 
     await state.clear()
 
-    traffic = format_traffic(tariff.traffic_limit_gb)
+    # Экрана успеха нет — как при продлении: показываем актуальный экран подписки.
+    from .purchase import show_subscription_info
 
-    await callback.message.edit_text(
-        texts.t(
-            'TARIFF_PURCHASE_DAILY_SUCCESS',
-            '🎉 <b>Суточная подписка оформлена!</b>\n\n'
-            '📦 Тариф: <b>{name}</b>\n'
-            '📊 Трафик: {traffic}\n'
-            '📱 Устройств: {devices}\n'
-            '🔄 Тип: Суточный\n'
-            '💰 Списано: {price}\n\n'
-            'ℹ️ Следующее списание через 24 часа.\n'
-            'Перейдите в раздел «Подписка» для подключения.',
-        ).format(
-            name=html.escape(tariff.name),
-            traffic=traffic,
-            devices=tariff.device_limit,
-            price=format_price_kopeks(final_daily_price),
-        ),
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text=texts.t('MY_SUBSCRIPTION_BUTTON', '📱 Моя подписка'),
-                        callback_data=f'sm:{subscription.id}'
-                        if settings.is_multi_tariff_enabled() and subscription
-                        else 'menu_subscription',
-                    )
-                ],
-                [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
-            ]
-        ),
-        parse_mode='HTML',
-    )
+    await show_subscription_info(callback, db_user, db)
 
 
 # ==================== Продление по тарифу ====================

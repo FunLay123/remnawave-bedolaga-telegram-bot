@@ -216,6 +216,10 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         return
 
     await db.refresh(db_user)
+    # refresh() без имён атрибутов истекает и связи: после покупки коллекция
+    # subscriptions осталась бы пустой/старой, а ленивая подгрузка упала бы
+    # с MissingGreenlet. Перечитываем её явно.
+    await db.refresh(db_user, ['subscriptions'])
 
     texts = get_texts(db_user.language)
     gift_enabled = True
@@ -270,6 +274,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
 
     await db.refresh(subscription)
     await db.refresh(db_user)
+    await db.refresh(db_user, ['subscriptions'])
 
     current_time = datetime.now(UTC)
 
