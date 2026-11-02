@@ -1,5 +1,10 @@
 # Automatically generated module exports
 
+from .adblock import (
+    handle_adblock_disable,
+    handle_adblock_enable,
+    handle_adblock_menu,
+)
 from .autopay import (
     handle_autopay_menu,
     handle_cashera_recurring_cancel,
@@ -182,6 +187,9 @@ __all__ = [
     'get_subscription_info_text',
     'get_traffic_packages_info',
     'get_traffic_switch_keyboard',
+    'handle_adblock_disable',
+    'handle_adblock_enable',
+    'handle_adblock_menu',
     'handle_add_countries',
     'handle_add_country_to_subscription',
     'handle_add_traffic',

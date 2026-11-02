@@ -124,6 +124,7 @@ from app.utils.subscription_utils import (
 )
 from app.utils.timezone import format_local_datetime
 
+from .adblock import handle_adblock_disable, handle_adblock_enable, handle_adblock_menu
 from .autopay import (
     handle_autopay_menu,
     handle_cashera_recurring_cancel,
@@ -4512,6 +4513,10 @@ def register_handlers(dp: Dispatcher):
     dp.callback_query.register(handle_happ_download_back, F.data == 'happ_download_back')
 
     dp.callback_query.register(handle_connect_subscription, F.data.startswith('subscription_connect'))
+
+    dp.callback_query.register(handle_adblock_menu, F.data.regexp(r'^sub_adblock(?::\d+)?$'))
+    dp.callback_query.register(handle_adblock_enable, F.data.regexp(r'^sub_adblock:enable(?::\d+)?$'))
+    dp.callback_query.register(handle_adblock_disable, F.data.regexp(r'^sub_adblock:disable(?::\d+)?$'))
 
     dp.callback_query.register(handle_device_guide, F.data.startswith('device_guide_'))
 

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database.models import User
 from app.keyboards.inline import (
+    get_adblock_button,
     get_device_selection_keyboard,
     get_happ_cryptolink_keyboard,
     get_happ_download_button_row,
@@ -26,6 +27,21 @@ async def _resolve_subscription(callback: types.CallbackQuery, db_user: User, db
     from .common import resolve_subscription_from_context
 
     return await resolve_subscription_from_context(callback, db_user, db, state)
+
+
+def _adblock_row(
+    language: str,
+    sub_id: int | None,
+    enabled: bool,
+    visible: bool,
+) -> list[list[InlineKeyboardButton]]:
+    if not visible:
+        return []
+    return [[get_adblock_button(language, sub_id, enabled)]]
+
+
+def _adblock_visible() -> bool:
+    return settings.is_adblock_dns_enabled() and settings.is_subscription_proxy_enabled()
 
 
 async def _ensure_happ_crypto_link(subscription, db: AsyncSession) -> str | None:
@@ -117,6 +133,9 @@ async def handle_connect_subscription(
     subscription_link = get_display_subscription_link(subscription)
     hide_subscription_link = settings.should_hide_subscription_link()
     back_cb = f'sm:{sub_id}' if settings.is_multi_tariff_enabled() else 'back_to_menu'
+    adblock_visible = _adblock_visible()
+    adblock_enabled = bool(getattr(subscription, 'adblock_dns_enabled', False))
+    adblock_row = _adblock_row(db_user.language, sub_id, adblock_enabled, adblock_visible)
 
     if not subscription_link:
         await callback.answer(
@@ -139,6 +158,7 @@ async def handle_connect_subscription(
                         web_app=types.WebAppInfo(url=subscription_link),
                     )
                 ],
+                *adblock_row,
                 [InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)],
             ]
         )
@@ -173,6 +193,7 @@ async def handle_connect_subscription(
                         web_app=types.WebAppInfo(url=settings.MINIAPP_CUSTOM_URL),
                     )
                 ],
+                *adblock_row,
                 [InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)],
             ]
         )
@@ -193,6 +214,7 @@ async def handle_connect_subscription(
         happ_row = get_happ_download_button_row(texts)
         if happ_row:
             rows.append(happ_row)
+        rows.extend(adblock_row)
         rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -221,6 +243,7 @@ async def handle_connect_subscription(
         happ_row = get_happ_download_button_row(texts)
         if happ_row:
             rows.append(happ_row)
+        rows.extend(adblock_row)
         rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -311,6 +334,7 @@ async def handle_connect_subscription(
         if happ_row:
             rows.append(happ_row)
 
+        rows.extend(adblock_row)
         rows.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
 
         keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -374,7 +398,13 @@ async def handle_connect_subscription(
 
         await callback.message.edit_text(
             device_text,
-            reply_markup=get_device_selection_keyboard(db_user.language, platforms=platforms, sub_id=sub_id),
+            reply_markup=get_device_selection_keyboard(
+                db_user.language,
+                platforms=platforms,
+                sub_id=sub_id,
+                adblock_visible=adblock_visible,
+                adblock_enabled=adblock_enabled,
+            ),
             parse_mode='HTML',
         )
 

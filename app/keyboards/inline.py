@@ -3356,10 +3356,39 @@ def get_manage_countries_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+ADBLOCK_BUTTON_OFF_ICON = '5334829606220354437'
+ADBLOCK_BUTTON_ON_ICON = '5335020345717973061'
+ADBLOCK_ACTION_ICON = '5332588449335628124'
+
+
+def get_adblock_button(
+    language: str = DEFAULT_LANGUAGE,
+    sub_id: int | None = None,
+    enabled: bool = False,
+) -> InlineKeyboardButton:
+    texts = get_texts(language)
+    callback_data = f'sub_adblock:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'sub_adblock'
+    if enabled:
+        return InlineKeyboardButton(
+            text=texts.t('SUBSCRIPTION_ADBLOCK_BUTTON_ON', 'Реклама отключена'),
+            callback_data=callback_data,
+            style='success',
+            icon_custom_emoji_id=ADBLOCK_BUTTON_ON_ICON,
+        )
+    return InlineKeyboardButton(
+        text=texts.t('SUBSCRIPTION_ADBLOCK_BUTTON_OFF', 'Отключить рекламу'),
+        callback_data=callback_data,
+        style='primary',
+        icon_custom_emoji_id=ADBLOCK_BUTTON_OFF_ICON,
+    )
+
+
 def get_device_selection_keyboard(
     language: str = DEFAULT_LANGUAGE,
     platforms: list[dict] | None = None,
     sub_id: int | None = None,
+    adblock_visible: bool = False,
+    adblock_enabled: bool = False,
 ) -> InlineKeyboardMarkup:
     texts = get_texts(language)
     back_cb = f'sm:{sub_id}' if sub_id and settings.is_multi_tariff_enabled() else 'menu_subscription'
@@ -3399,6 +3428,9 @@ def get_device_selection_keyboard(
                 )
             ]
         )
+
+    if adblock_visible:
+        keyboard.append([get_adblock_button(language, sub_id, adblock_enabled)])
 
     keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_cb)])
 

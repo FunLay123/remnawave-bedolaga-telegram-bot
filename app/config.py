@@ -352,6 +352,16 @@ class Settings(BaseSettings):
     # поля. Домены — через запятую, адрес — страница подписок, как её видит бот.
     SUBSCRIPTION_PROXY_HOSTS: str = ''
     SUBSCRIPTION_PROXY_UPSTREAM: str = ''
+    # Adblock-DNS в клиентском Xray JSON подписки. Бот вставляет первым сервером
+    # dns_adblock с адресом/портом ниже и правилом inboundTag → proxy. Адрес —
+    # синтетический destination, который нода по своему routing отправляет в
+    # DNS-линк (VLESS/SS/WG), а резолвер редиректит в локальный knot. Флаг
+    # включает только глобальный рубильник; конкретная подписка — в БД.
+    ADBLOCK_DNS_ENABLED: bool = False
+    ADBLOCK_DNS_ADDRESS: str = ''
+    ADBLOCK_DNS_PORT: int = 1153
+    ADBLOCK_DNS_TIMEOUT_MS: int = 1000
+    ADBLOCK_DNS_TAG: str = 'dns_adblock'
     RESET_DEVICES_ON_RENEWAL: bool = False
     TARIFF_SWITCH_UPGRADE_ENABLED: bool = True
     TARIFF_SWITCH_DOWNGRADE_ENABLED: bool = True
@@ -2237,6 +2247,9 @@ class Settings(BaseSettings):
 
     def is_subscription_proxy_enabled(self) -> bool:
         return bool(self.get_subscription_proxy_hosts()) and bool(self.SUBSCRIPTION_PROXY_UPSTREAM.strip())
+
+    def is_adblock_dns_enabled(self) -> bool:
+        return bool(self.ADBLOCK_DNS_ENABLED) and bool((self.ADBLOCK_DNS_ADDRESS or '').strip())
 
     def is_remnawave_webhook_enabled(self) -> bool:
         return (

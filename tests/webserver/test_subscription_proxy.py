@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import gzip
+import json
 from types import SimpleNamespace
 
 import httpx
@@ -26,7 +27,7 @@ SUB_HOST = 'sub.example.com'
 PANEL_USERINFO = 'upload=100; download=200; total=0; expire=1790000000'
 
 
-def _client(upstream_handler, lookup, *, seen: list | None = None) -> TestClient:
+def _client(upstream_handler, lookup, *, seen: list | None = None, adblock_lookup=None) -> TestClient:
     def handler(request: httpx.Request) -> httpx.Response:
         if seen is not None:
             seen.append(request)
@@ -38,12 +39,17 @@ def _client(upstream_handler, lookup, *, seen: list | None = None) -> TestClient
     async def health():
         return {'status': 'ok'}
 
+    middleware_kwargs = {}
+    if adblock_lookup is not None:
+        middleware_kwargs['adblock_lookup'] = adblock_lookup
+
     app.add_middleware(
         SubscriptionProxyMiddleware,
         hosts={SUB_HOST},
         upstream='http://sub-page:3010/',
         client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         lookup=lookup,
+        **middleware_kwargs,
     )
     return TestClient(app)
 
@@ -163,6 +169,144 @@ def test_other_hosts_reach_bot_routes():
     assert seen == []
 
 
+# ---- adblock DNS body patch ----------------------------------------------------------------
+
+
+def _xray_config() -> dict:
+    return {
+        'dns': {'tag': 'dns_out', 'servers': [{'address': 'https://1.1.1.1/dns-query'}], 'enableParallelQuery': True},
+        'routing': {
+            'domainStrategy': 'AsIs',
+            'rules': [{'type': 'field', 'ip': ['geoip:private'], 'outboundTag': 'direct'}],
+        },
+        'outbounds': [
+            {'tag': 'proxy', 'protocol': 'vless'},
+            {'tag': 'direct', 'protocol': 'freedom'},
+            {'tag': 'block', 'protocol': 'blackhole'},
+        ],
+        'remarks': 'node1',
+    }
+
+
+def _xray_response(request: httpx.Request) -> httpx.Response:
+    body = json.dumps([_xray_config()], separators=(',', ':')).encode()
+    return _upstream(
+        {'subscription-userinfo': PANEL_USERINFO, 'content-type': 'application/json'},
+        body,
+    )
+
+
+def _adblock(result):
+    calls: list[list[str]] = []
+
+    async def lookup(short_uuids):
+        calls.append(short_uuids)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    return lookup, calls
+
+
+@pytest.fixture
+def adblock_env(monkeypatch):
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_ENABLED', True)
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_ADDRESS', '10.66.0.1')
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_PORT', 1153)
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_TIMEOUT_MS', 1000)
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_TAG', 'dns_adblock')
+
+
+def test_adblock_body_and_userinfo_are_rewritten_together(adblock_env):
+    usage, _ = _usage((3 * BYTES_IN_GB, 10 * BYTES_IN_GB))
+    adblock, adblock_calls = _adblock(True)
+
+    response = _client(_xray_response, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    config = json.loads(response.content)[0]
+    assert config['dns']['servers'][0]['tag'] == 'dns_adblock'
+    assert config['routing']['rules'][0] == {
+        'type': 'field',
+        'inboundTag': ['dns_adblock'],
+        'outboundTag': 'proxy',
+    }
+    assert response.headers['subscription-userinfo'].startswith(
+        f'upload=0; download={3 * BYTES_IN_GB}; total={10 * BYTES_IN_GB};'
+    )
+    assert response.headers['content-length'] == str(len(response.content))
+    assert adblock_calls == [['Ab3dEf9hJk']]
+
+
+def test_adblock_off_keeps_xray_body(adblock_env):
+    usage, _ = _usage(None)
+    adblock, adblock_calls = _adblock(False)
+    original = json.dumps([_xray_config()], separators=(',', ':')).encode()
+
+    response = _client(_xray_response, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    assert response.content == original
+    assert adblock_calls == [['Ab3dEf9hJk']]
+
+
+def test_adblock_lookup_error_keeps_body(adblock_env):
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(RuntimeError('db down'))
+    original = json.dumps([_xray_config()], separators=(',', ':')).encode()
+
+    response = _client(_xray_response, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    assert response.status_code == 200
+    assert response.content == original
+
+
+def test_adblock_on_non_json_body_passes_through(adblock_env):
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    response = _client(_subscription_response, usage, adblock_lookup=adblock).get(
+        '/Ab3dEf9hJk', headers={'Host': SUB_HOST}
+    )
+
+    assert response.content == b'vless://config'
+
+
+def test_adblock_on_requests_identity_encoding(adblock_env):
+    seen: list[httpx.Request] = []
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    _client(_xray_response, usage, seen=seen, adblock_lookup=adblock).get(
+        '/Ab3dEf9hJk', headers={'Host': SUB_HOST, 'Accept-Encoding': 'gzip, br'}
+    )
+
+    [request] = seen
+    assert request.headers['accept-encoding'] == 'identity'
+
+
+def test_adblock_on_gzip_body_is_patched_and_encoding_dropped(adblock_env):
+    compressed = gzip.compress(json.dumps([_xray_config()]).encode())
+
+    def gzipped(request):
+        return _upstream(
+            {
+                'subscription-userinfo': PANEL_USERINFO,
+                'content-type': 'application/json',
+                'content-encoding': 'gzip',
+            },
+            compressed,
+        )
+
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    response = _client(gzipped, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    assert 'content-encoding' not in response.headers
+    config = json.loads(response.content)[0]
+    assert config['dns']['servers'][0]['tag'] == 'dns_adblock'
+    assert response.headers['content-length'] == str(len(response.content))
+
+
 # ---- premium_usage -------------------------------------------------------------------------
 
 
@@ -234,3 +378,67 @@ async def test_premium_usage_none_when_path_is_ambiguous(premium_env):
 async def test_premium_usage_none_when_premium_disabled(premium_env, monkeypatch):
     monkeypatch.setattr(subscription_proxy.settings, 'PREMIUM_TRAFFIC_ENABLED', False)
     assert await premium_usage(_FakeDb([_subscription()]), ['Ab3dEf9hJk']) is None
+
+
+# ---- lookup_adblock_enabled ----------------------------------------------------------------
+
+
+class _FakeAsyncSession:
+    def __init__(self, rows):
+        self.rows = rows
+        self.executed = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
+
+    async def execute(self, _statement):
+        self.executed = True
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: self.rows))
+
+
+def _adblock_session(monkeypatch, rows):
+    session = _FakeAsyncSession(rows)
+    monkeypatch.setattr(subscription_proxy, 'AsyncSessionLocal', lambda: session)
+    monkeypatch.setattr(type(subscription_proxy.settings), 'is_adblock_dns_enabled', lambda self: True)
+    return session
+
+
+async def test_lookup_adblock_enabled_true_for_single_enabled_subscription(monkeypatch):
+    _adblock_session(monkeypatch, [True])
+
+    assert await subscription_proxy.lookup_adblock_enabled(['Ab3dEf9hJk']) is True
+
+
+async def test_lookup_adblock_enabled_false_for_disabled_subscription(monkeypatch):
+    _adblock_session(monkeypatch, [False])
+
+    assert await subscription_proxy.lookup_adblock_enabled(['Ab3dEf9hJk']) is False
+
+
+async def test_lookup_adblock_enabled_false_when_path_is_ambiguous(monkeypatch):
+    _adblock_session(monkeypatch, [True, True])
+
+    assert await subscription_proxy.lookup_adblock_enabled(['a1b2c3', 'd4e5f6']) is False
+
+
+async def test_lookup_adblock_enabled_false_without_short_uuid(monkeypatch):
+    def explode():
+        raise AssertionError('DB must not be touched without a short uuid')
+
+    monkeypatch.setattr(subscription_proxy, 'AsyncSessionLocal', explode)
+    monkeypatch.setattr(type(subscription_proxy.settings), 'is_adblock_dns_enabled', lambda self: True)
+
+    assert await subscription_proxy.lookup_adblock_enabled([]) is False
+
+
+async def test_lookup_adblock_enabled_false_when_globally_disabled(monkeypatch):
+    def explode():
+        raise AssertionError('DB must not be touched when the feature is off')
+
+    monkeypatch.setattr(subscription_proxy, 'AsyncSessionLocal', explode)
+    monkeypatch.setattr(type(subscription_proxy.settings), 'is_adblock_dns_enabled', lambda self: False)
+
+    assert await subscription_proxy.lookup_adblock_enabled(['Ab3dEf9hJk']) is False

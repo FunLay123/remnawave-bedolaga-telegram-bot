@@ -18,8 +18,11 @@ nginx отправляет домен подписок в бота (страни
 
 from __future__ import annotations
 
+import gzip
+import json
 import re
 from collections.abc import Awaitable, Callable, Iterable
+from typing import Any
 
 import httpx
 import structlog
@@ -62,6 +65,7 @@ HOP_BY_HOP_HEADERS = frozenset(
 _SHORT_UUID_RE = re.compile(r'^[A-Za-z0-9_-]{6,64}$')
 
 UsageLookup = Callable[[list[str]], Awaitable[tuple[int, int] | None]]
+AdblockLookup = Callable[[list[str]], Awaitable[bool]]
 
 
 def short_uuid_candidates(path: str) -> list[str]:
@@ -127,6 +131,232 @@ async def lookup_premium_usage(short_uuids: list[str]) -> tuple[int, int] | None
         return await premium_usage(db, short_uuids)
 
 
+async def lookup_adblock_enabled(short_uuids: list[str]) -> bool:
+    """Включён ли adblock-DNS у подписки, найденной по shortUuid."""
+    if not short_uuids or not settings.is_adblock_dns_enabled():
+        return False
+    async with AsyncSessionLocal() as db:
+        rows = (
+            (
+                await db.execute(
+                    select(Subscription.adblock_dns_enabled)
+                    .where(Subscription.remnawave_short_uuid.in_(short_uuids))
+                    .limit(2)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    # Два совпадения — путь неоднозначный, лучше не угадывать.
+    return len(rows) == 1 and bool(rows[0])
+
+
+ADBLOCK_BLOCK_CIDRS = ('0.0.0.0/8', '::/128')
+ADBLOCK_DNS_TAG = 'dns_adblock'
+PROXY_OUTBOUND_PROTOCOLS = frozenset(
+    {
+        'hysteria',
+        'shadowsocks',
+        'socks',
+        'trojan',
+        'vless',
+        'vmess',
+        'http',
+    }
+)
+
+
+def _is_xray_config(value: Any) -> bool:
+    return isinstance(value, dict) and any(key in value for key in ('dns', 'inbounds', 'outbounds', 'routing'))
+
+
+def _proxy_tag(outbounds: list[Any]) -> str | None:
+    tagged = [outbound for outbound in outbounds if isinstance(outbound, dict) and outbound.get('tag')]
+    for outbound in tagged:
+        if str(outbound.get('protocol', '')).lower() in PROXY_OUTBOUND_PROTOCOLS:
+            return str(outbound['tag'])
+    for outbound in tagged:
+        if str(outbound['tag']).lower() not in {'direct', 'block', 'dns_local', 'adblock_block'}:
+            return str(outbound['tag'])
+    return str(tagged[0]['tag']) if tagged else None
+
+
+def _block_tag(outbounds: list[Any]) -> str:
+    for outbound in outbounds:
+        if isinstance(outbound, dict) and str(outbound.get('protocol', '')).lower() == 'blackhole':
+            tag = outbound.get('tag')
+            if tag:
+                return str(tag)
+
+    used = {str(outbound.get('tag')) for outbound in outbounds if isinstance(outbound, dict) and outbound.get('tag')}
+    tag = 'block' if 'block' not in used else 'adblock_block'
+    outbounds.append({'tag': tag, 'protocol': 'blackhole'})
+    return tag
+
+
+def _rule_has_inbound_tag(rule: Any, tag: str) -> bool:
+    if not isinstance(rule, dict):
+        return False
+    inbound_tag = rule.get('inboundTag')
+    if isinstance(inbound_tag, str):
+        return inbound_tag == tag
+    return isinstance(inbound_tag, list) and tag in inbound_tag
+
+
+def _rule_is_our_block(rule: Any, block_cidrs: Iterable[str]) -> bool:
+    if not isinstance(rule, dict):
+        return False
+    ips = rule.get('ip')
+    return isinstance(ips, list) and set(ips) == set(block_cidrs)
+
+
+def _insert_block_rule(rules: list[Any], block_rule: dict[str, Any], block_cidrs: Iterable[str]) -> None:
+    block_cidrs = set(block_cidrs)
+    for index, rule in enumerate(rules):
+        if not isinstance(rule, dict):
+            continue
+        ips = rule.get('ip')
+        if isinstance(ips, list) and ('geoip:private' in ips or block_cidrs.intersection(ips)):
+            rules.insert(index, block_rule)
+            return
+
+    # Без catch-all правило просто не с чем столкнуть; ставим до него, если он есть.
+    for index in range(len(rules) - 1, -1, -1):
+        rule = rules[index]
+        if not isinstance(rule, dict):
+            continue
+        conditions = set(rule) - {'type', 'outboundTag', 'ruleTag'}
+        if not conditions and rule.get('outboundTag'):
+            rules.insert(index, block_rule)
+            return
+
+    rules.append(block_rule)
+
+
+def _patch_xray_config(
+    config: dict[str, Any],
+    *,
+    address: str,
+    port: int,
+    timeout_ms: int,
+    tag: str,
+    block_cidrs: Iterable[str],
+) -> bool:
+    outbounds = config.get('outbounds')
+    if not isinstance(outbounds, list) or not outbounds:
+        return False
+
+    dns = config.get('dns')
+    if dns is None:
+        dns = {}
+    if not isinstance(dns, dict):
+        return False
+    servers = dns.get('servers')
+    if servers is None:
+        servers = []
+    if not isinstance(servers, list):
+        return False
+
+    routing = config.get('routing')
+    if routing is None:
+        routing = {}
+    if not isinstance(routing, dict):
+        return False
+    rules = routing.get('rules')
+    if rules is None:
+        rules = []
+    if not isinstance(rules, list):
+        return False
+
+    proxy_tag = _proxy_tag(outbounds)
+    if proxy_tag is None:
+        return False
+
+    config['dns'] = dns
+    dns['servers'] = servers
+    dns['enableParallelQuery'] = True
+    servers[:] = [server for server in servers if not (isinstance(server, dict) and server.get('tag') == tag)]
+    servers.insert(
+        0,
+        {
+            'tag': tag,
+            'address': address,
+            'port': port,
+            'timeoutMs': timeout_ms,
+        },
+    )
+
+    config['routing'] = routing
+    routing['rules'] = rules
+    rules[:] = [rule for rule in rules if not _rule_has_inbound_tag(rule, tag)]
+    rules.insert(0, {'type': 'field', 'inboundTag': [tag], 'outboundTag': proxy_tag})
+
+    block_cidrs = tuple(block_cidrs)
+    rules[:] = [rule for rule in rules if not _rule_is_our_block(rule, block_cidrs)]
+    block_tag = _block_tag(outbounds)
+    _insert_block_rule(
+        rules,
+        {'type': 'field', 'ip': list(block_cidrs), 'outboundTag': block_tag},
+        block_cidrs,
+    )
+    return True
+
+
+def patch_adblock_dns(
+    body: bytes,
+    *,
+    address: str,
+    port: int,
+    timeout_ms: int = 1000,
+    tag: str = ADBLOCK_DNS_TAG,
+    block_cidrs: Iterable[str] = ADBLOCK_BLOCK_CIDRS,
+) -> bytes | None:
+    """Добавить adblock-DNS и правила в Xray JSON, не трогая остальное.
+
+    Возвращает None, если тело не похоже на Xray-конфиг: base64, HTML, обычный
+    список ссылок или JSON без конфигов. Вызывающий код в этом случае отдаёт
+    тело клиенту без изменений.
+    """
+    if not address:
+        return None
+
+    try:
+        parsed = json.loads(body)
+    except (TypeError, ValueError):
+        return None
+
+    if isinstance(parsed, dict):
+        configs: list[Any] = [parsed]
+        return_single = True
+    elif isinstance(parsed, list):
+        configs = parsed
+        return_single = False
+    else:
+        return None
+
+    patched_any = False
+    for item in configs:
+        if not _is_xray_config(item):
+            continue
+        patched_any = (
+            _patch_xray_config(
+                item,
+                address=address,
+                port=port,
+                timeout_ms=timeout_ms,
+                tag=tag,
+                block_cidrs=block_cidrs,
+            )
+            or patched_any
+        )
+
+    if not patched_any:
+        return None
+
+    patched = configs[0] if return_single else configs
+    return json.dumps(patched, ensure_ascii=False, separators=(',', ':')).encode()
+
+
 def create_proxy_client() -> httpx.AsyncClient:
     # Редиректы страницы подписок отдаются клиенту, а не проходятся здесь.
     return httpx.AsyncClient(timeout=TIMEOUT_SECONDS, follow_redirects=False)
@@ -143,12 +373,14 @@ class SubscriptionProxyMiddleware:
         upstream: str,
         client: httpx.AsyncClient,
         lookup: UsageLookup = lookup_premium_usage,
+        adblock_lookup: AdblockLookup = lookup_adblock_enabled,
     ) -> None:
         self.app = app
         self.hosts = {host.lower() for host in hosts}
         self.upstream = upstream.rstrip('/')
         self.client = client
         self.lookup = lookup
+        self.adblock_lookup = adblock_lookup
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope['type'] != 'http' or not self._is_subscription_host(scope):
@@ -171,11 +403,16 @@ class SubscriptionProxyMiddleware:
         if query := request.scope.get('query_string'):
             url += '?' + query.decode('latin-1')
 
+        adblock = await self._adblock_enabled(request)
         headers = [
             (name, value)
             for name, value in request.headers.raw
             if name.decode('latin-1').lower() not in HOP_BY_HOP_HEADERS and name.lower() != b'content-length'
         ]
+        if adblock:
+            # Без распаковки нельзя разобрать JSON; upstream обычно уважает identity.
+            headers = [(name, value) for name, value in headers if name.decode('latin-1').lower() != 'accept-encoding']
+            headers.append((b'accept-encoding', b'identity'))
         upstream_request = self.client.build_request(request.method, url, headers=headers, content=await request.body())
         try:
             upstream_response = await self.client.send(upstream_request, stream=True)
@@ -190,11 +427,17 @@ class SubscriptionProxyMiddleware:
             logger.warning('Страница подписок не ответила', url=url, error=str(error))
             return Response(status_code=502)
 
+        drop_content_encoding = False
+        if adblock:
+            content_encoding = upstream_response.headers.get('content-encoding', '').lower()
+            body, drop_content_encoding = self._with_adblock_dns(body, content_encoding)
+
         response_headers = [
             (name, value)
             for name, value in upstream_response.headers.raw
             if name.decode('latin-1').lower() not in HOP_BY_HOP_HEADERS
             and (request.method == 'HEAD' or name.lower() != b'content-length')
+            and not (drop_content_encoding and name.lower() == b'content-encoding')
         ]
         if request.method != 'HEAD':
             response_headers.append((b'content-length', str(len(body)).encode()))
@@ -207,6 +450,52 @@ class SubscriptionProxyMiddleware:
         response = Response(content=body, status_code=upstream_response.status_code)
         response.raw_headers = response_headers
         return response
+
+    async def _adblock_enabled(self, request: Request) -> bool:
+        if not settings.is_adblock_dns_enabled():
+            return False
+        try:
+            return await self.adblock_lookup(short_uuid_candidates(request.url.path))
+        except Exception as error:
+            logger.warning('Не удалось проверить adblock-DNS для подписки', error=str(error))
+            return False
+
+    def _with_adblock_dns(self, body: bytes, content_encoding: str) -> tuple[bytes, bool]:
+        """Пропатчить Xray JSON и сказать, надо ли снять Content-Encoding.
+
+        При любой ошибке или не-Xray теле возвращается исходное тело: сломанная
+        подписка хуже, чем подписка без adblock. Если тело было gzip, но патч не
+        применился, возвращаем исходный сжатый байт-в-байт.
+        """
+        drop_content_encoding = False
+        decoded = body
+        if content_encoding in ('', 'identity'):
+            pass
+        elif content_encoding == 'gzip':
+            try:
+                decoded = gzip.decompress(body)
+            except OSError as error:
+                logger.warning('Не удалось распаковать подписку для adblock-DNS', error=str(error))
+                return body, False
+            drop_content_encoding = True
+        else:
+            return body, False
+
+        try:
+            patched = patch_adblock_dns(
+                decoded,
+                address=settings.ADBLOCK_DNS_ADDRESS.strip(),
+                port=settings.ADBLOCK_DNS_PORT,
+                timeout_ms=settings.ADBLOCK_DNS_TIMEOUT_MS,
+                tag=settings.ADBLOCK_DNS_TAG,
+            )
+        except Exception as error:
+            logger.warning('Не удалось применить adblock-DNS к подписке', error=str(error))
+            return body, False
+
+        if patched is None:
+            return body, False
+        return patched, drop_content_encoding
 
     async def _with_premium_userinfo(
         self, request: Request, headers: list[tuple[bytes, bytes]], userinfo: str

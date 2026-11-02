@@ -2656,6 +2656,9 @@ class Subscription(Base):
 
     subscription_url = Column(String, nullable=True)
     subscription_crypto_link = Column(String, nullable=True)
+    # Включать ли в клиентский Xray JSON adblock-DNS. Панель об этом поле не
+    # знает; флаг переживает синхронизации и меняется только ботом.
+    adblock_dns_enabled = Column(Boolean, nullable=False, default=False, server_default=text('false'))
 
     device_limit = Column(Integer, default=1)
     modem_enabled = Column(Boolean, default=False)
