@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     # До этого хендлер читал SUPPORT_EMAIL и WEBSITE_URL через getattr, но таких
     # полей в Settings никогда не было — эндпоинт всегда возвращал None.
     SUPPORT_EMAIL: str | None = None
+    SUPPORT_PHONE: str = ''
+    # Реквизиты оператора для оферты и экрана «Контакты». В публичном
+    # репозитории остаются пустыми, реальные значения задаются в .env
+    # конкретной инсталляции — ФИО, адрес и телефон не должны попадать в git.
+    LEGAL_OPERATOR_NAME: str = ''
+    LEGAL_OPERATOR_INN: str = ''
+    LEGAL_OPERATOR_ADDRESS: str = ''
     SERVICE_WEBSITE_URL: str | None = None
     SUPPORT_MENU_ENABLED: bool = True
     SUPPORT_SYSTEM_MODE: str = 'both'  # one of: tickets, contact, both

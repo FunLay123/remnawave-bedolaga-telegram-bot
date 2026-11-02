@@ -2509,6 +2509,7 @@ def get_legal_gate_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text='Политика возвратов', callback_data='legal_doc:refund:1:gate'),
                 InlineKeyboardButton(text='Политика конфиденциальности', callback_data='legal_doc:privacy:1:gate'),
             ],
+            [InlineKeyboardButton(text='Контакты', callback_data='legal_contacts:gate')],
             [
                 InlineKeyboardButton(
                     text='Принимаю',
@@ -2529,9 +2530,16 @@ def get_legal_documents_keyboard(language: str = DEFAULT_LANGUAGE) -> InlineKeyb
             [InlineKeyboardButton(text='Политика возвратов', callback_data='legal_doc:refund:1:hub')],
             [InlineKeyboardButton(text='Политика конфиденциальности', callback_data='legal_doc:privacy:1:hub')],
             [InlineKeyboardButton(text='Правила сервиса', callback_data='legal_doc:rules:1:hub')],
+            [InlineKeyboardButton(text='Контакты', callback_data='legal_contacts:hub')],
             [InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')],
         ]
     )
+
+
+def get_contacts_keyboard(origin: str = 'hub', language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+    texts = get_texts(language)
+    back = 'legal_gate' if origin == 'gate' else 'legal_docs'
+    return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=texts.BACK, callback_data=back)]])
 
 
 def get_legal_document_keyboard(

@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 
 from app.database.models import User
 from app.keyboards.inline import (
+    get_contacts_keyboard,
     get_legal_document_keyboard,
     get_legal_documents_keyboard,
     get_legal_gate_keyboard,
@@ -14,6 +15,7 @@ from app.legal_documents import (
     DOCUMENTS_BY_KEY,
     EDITION,
     LEGAL_EMOJI_ID,
+    contacts_text,
     document_pages,
     entry_gate_text,
 )
@@ -45,6 +47,19 @@ async def show_legal_gate(callback: types.CallbackQuery, state: FSMContext):
         callback=callback,
         caption=entry_gate_text(),
         keyboard=get_legal_gate_keyboard(),
+        parse_mode='HTML',
+        force_text=True,
+    )
+    await callback.answer()
+
+
+async def show_contacts(callback: types.CallbackQuery):
+    parts = (callback.data or '').split(':')
+    origin = parts[1] if len(parts) > 1 and parts[1] in {'gate', 'hub'} else 'hub'
+    await edit_or_answer_photo(
+        callback=callback,
+        caption=contacts_text(),
+        keyboard=get_contacts_keyboard(origin),
         parse_mode='HTML',
         force_text=True,
     )
@@ -88,4 +103,5 @@ async def show_document(callback: types.CallbackQuery):
 def register_handlers(dp: Dispatcher):
     dp.callback_query.register(show_documents, F.data == 'legal_docs')
     dp.callback_query.register(show_legal_gate, F.data == 'legal_gate')
+    dp.callback_query.register(show_contacts, F.data.startswith('legal_contacts'))
     dp.callback_query.register(show_document, F.data.startswith('legal_doc:'))
