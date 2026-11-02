@@ -49,10 +49,10 @@ def _config(**overrides):
     return config
 
 
-def _patched(configs, *, exclude_remarks=None):
+def _patched(configs, *, exclude_remarks=None, address=ADDRESS):
     body = json.dumps(configs, separators=(',', ':')).encode()
     kwargs = {} if exclude_remarks is None else {'exclude_remarks': exclude_remarks}
-    result = patch_adblock_dns(body, address=ADDRESS, port=PORT, timeout_ms=1000, tag=TAG, **kwargs)
+    result = patch_adblock_dns(body, address=address, port=PORT, timeout_ms=1000, tag=TAG, **kwargs)
     assert result is not None
     return json.loads(result)
 
@@ -316,3 +316,43 @@ def test_cyrillic_o_homoglyph_is_normalized():
 
     assert 'dns_adblock' not in json.dumps(result[0])
     assert result[1]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_tcp_address_moves_port_into_url():
+    result = _patched([_config()], address='tcp://10.66.0.1')[0]
+
+    server = result['dns']['servers'][0]
+    assert server['address'] == 'tcp://10.66.0.1:1153'
+    assert 'port' not in server
+
+
+def test_tcp_address_replaces_existing_port():
+    result = _patched([_config()], address='tcp://10.66.0.1:5353')[0]
+
+    server = result['dns']['servers'][0]
+    assert server['address'] == 'tcp://10.66.0.1:1153'
+    assert 'port' not in server
+
+
+def test_tcp_local_address_moves_port_into_url():
+    result = _patched([_config()], address='tcp+local://10.66.0.1')[0]
+
+    server = result['dns']['servers'][0]
+    assert server['address'] == 'tcp+local://10.66.0.1:1153'
+    assert 'port' not in server
+
+
+def test_tcp_ipv6_address_moves_port_into_url():
+    result = _patched([_config()], address='tcp://[2001:db8::1]')[0]
+
+    server = result['dns']['servers'][0]
+    assert server['address'] == 'tcp://[2001:db8::1]:1153'
+    assert 'port' not in server
+
+
+def test_udp_address_keeps_port_field():
+    result = _patched([_config()], address='10.66.0.1')[0]
+
+    server = result['dns']['servers'][0]
+    assert server['address'] == '10.66.0.1'
+    assert server['port'] == 1153

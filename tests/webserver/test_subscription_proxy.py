@@ -307,6 +307,18 @@ def test_adblock_excludes_profiles_with_youtube_remarks(adblock_env, monkeypatch
     assert configs[1]['dns']['servers'][0]['tag'] == 'dns_adblock'
 
 
+def test_adblock_on_tcp_address_moves_port_into_url(adblock_env, monkeypatch):
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_ADDRESS', 'tcp://10.66.0.1')
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    response = _client(_xray_response, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    server = json.loads(response.content)[0]['dns']['servers'][0]
+    assert server['address'] == 'tcp://10.66.0.1:1153'
+    assert 'port' not in server
+
+
 def test_adblock_on_gzip_body_is_patched_and_encoding_dropped(adblock_env):
     compressed = gzip.compress(json.dumps([_xray_config()]).encode())
 

@@ -23,6 +23,7 @@ import json
 import re
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -195,6 +196,17 @@ def _is_xray_config(value: Any) -> bool:
     return isinstance(value, dict) and any(key in value for key in ('dns', 'inbounds', 'outbounds', 'routing'))
 
 
+def _tcp_address_with_port(address: str, port: int) -> str:
+    """Для tcp:// порт живёт только в URL; отдельное поле port не работает."""
+    parsed = urlsplit(address)
+    if not parsed.hostname:
+        return address
+    host = parsed.hostname
+    if ':' in host:
+        host = f'[{host}]'
+    return urlunsplit((parsed.scheme, f'{host}:{port}', parsed.path, parsed.query, parsed.fragment))
+
+
 def _proxy_tag(outbounds: list[Any]) -> str | None:
     tagged = [outbound for outbound in outbounds if isinstance(outbound, dict) and outbound.get('tag')]
     for outbound in tagged:
@@ -301,15 +313,12 @@ def _patch_xray_config(
     dns['servers'] = servers
     dns['enableParallelQuery'] = True
     servers[:] = [server for server in servers if not (isinstance(server, dict) and server.get('tag') == tag)]
-    servers.insert(
-        0,
-        {
-            'tag': tag,
-            'address': address,
-            'port': port,
-            'timeoutMs': timeout_ms,
-        },
-    )
+    server: dict[str, Any] = {'tag': tag, 'address': address, 'timeoutMs': timeout_ms}
+    if urlsplit(address).scheme.lower() in {'tcp', 'tcp+local'}:
+        server['address'] = _tcp_address_with_port(address, port)
+    else:
+        server['port'] = port
+    servers.insert(0, server)
 
     config['routing'] = routing
     routing['rules'] = rules
