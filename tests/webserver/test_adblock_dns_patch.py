@@ -49,9 +49,10 @@ def _config(**overrides):
     return config
 
 
-def _patched(configs):
+def _patched(configs, *, exclude_remarks=None):
     body = json.dumps(configs, separators=(',', ':')).encode()
-    result = patch_adblock_dns(body, address=ADDRESS, port=PORT, timeout_ms=1000, tag=TAG)
+    kwargs = {} if exclude_remarks is None else {'exclude_remarks': exclude_remarks}
+    result = patch_adblock_dns(body, address=ADDRESS, port=PORT, timeout_ms=1000, tag=TAG, **kwargs)
     assert result is not None
     return json.loads(result)
 
@@ -214,3 +215,69 @@ def test_malformed_config_is_not_partially_patched():
 
     assert result[0] == original
     assert result[1]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_excluded_remarks_are_skipped_case_insensitively():
+    youtube = _config(remarks='YouTube-1080')
+    youtube_alt = _config(remarks='youtube mobile')
+    youtube_upper = _config(remarks='MY-YOUTUBE-PROFILE')
+    netflix = _config(remarks='Netflix')
+
+    result = _patched(
+        [youtube, youtube_alt, youtube_upper, netflix],
+        exclude_remarks=['youtube'],
+    )
+
+    for index in (0, 1, 2):
+        assert 'dns_adblock' not in json.dumps(result[index])
+    assert result[3]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_excluded_profile_stays_byte_identical():
+    youtube = _config(remarks='YouTube-1080')
+    original = json.loads(json.dumps(youtube))
+
+    result = _patched([youtube, _config(remarks='Netflix')], exclude_remarks=['youtube'])
+
+    assert result[0] == original
+
+
+def test_all_profiles_excluded_returns_none():
+    body = json.dumps([_config(remarks='YouTube-1080')], separators=(',', ':')).encode()
+
+    result = patch_adblock_dns(
+        body,
+        address=ADDRESS,
+        port=PORT,
+        timeout_ms=1000,
+        tag=TAG,
+        exclude_remarks=['youtube'],
+    )
+
+    assert result is None
+
+
+def test_missing_remarks_is_patched():
+    config = _config()
+    config.pop('remarks')
+
+    result = _patched([config], exclude_remarks=['youtube'])
+
+    assert result[0]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_multiple_exclude_tokens():
+    result = _patched(
+        [_config(remarks='YouTube-1080'), _config(remarks='YT music'), _config(remarks='Netflix')],
+        exclude_remarks=['youtube', 'yt'],
+    )
+
+    assert 'dns_adblock' not in json.dumps(result[0])
+    assert 'dns_adblock' not in json.dumps(result[1])
+    assert result[2]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_empty_exclude_list_patches_youtube():
+    result = _patched([_config(remarks='YouTube-1080')], exclude_remarks=[])
+
+    assert result[0]['dns']['servers'][0]['tag'] == TAG

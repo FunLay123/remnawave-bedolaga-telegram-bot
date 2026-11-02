@@ -283,6 +283,30 @@ def test_adblock_on_requests_identity_encoding(adblock_env):
     assert request.headers['accept-encoding'] == 'identity'
 
 
+def test_adblock_excludes_profiles_with_youtube_remarks(adblock_env, monkeypatch):
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_EXCLUDE_REMARKS', 'youtube')
+    youtube = _xray_config()
+    youtube['remarks'] = 'YouTube-1080'
+    netflix = _xray_config()
+    netflix['remarks'] = 'Netflix'
+
+    def upstream(request):
+        body = json.dumps([youtube, netflix], separators=(',', ':')).encode()
+        return _upstream(
+            {'subscription-userinfo': PANEL_USERINFO, 'content-type': 'application/json'},
+            body,
+        )
+
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    response = _client(upstream, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    configs = json.loads(response.content)
+    assert 'dns_adblock' not in json.dumps(configs[0])
+    assert configs[1]['dns']['servers'][0]['tag'] == 'dns_adblock'
+
+
 def test_adblock_on_gzip_body_is_patched_and_encoding_dropped(adblock_env):
     compressed = gzip.compress(json.dumps([_xray_config()]).encode())
 
@@ -404,6 +428,12 @@ def _adblock_session(monkeypatch, rows):
     monkeypatch.setattr(subscription_proxy, 'AsyncSessionLocal', lambda: session)
     monkeypatch.setattr(type(subscription_proxy.settings), 'is_adblock_dns_enabled', lambda self: True)
     return session
+
+
+def test_adblock_exclude_remarks_are_parsed_case_insensitively(monkeypatch):
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_EXCLUDE_REMARKS', ' YouTube, YT ,, ')
+
+    assert subscription_proxy.settings.get_adblock_dns_exclude_remarks() == ['youtube', 'yt']
 
 
 async def test_lookup_adblock_enabled_true_for_single_enabled_subscription(monkeypatch):

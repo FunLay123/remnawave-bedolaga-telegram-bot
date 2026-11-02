@@ -362,6 +362,10 @@ class Settings(BaseSettings):
     ADBLOCK_DNS_PORT: int = 1153
     ADBLOCK_DNS_TIMEOUT_MS: int = 1000
     ADBLOCK_DNS_TAG: str = 'dns_adblock'
+    # Профили, в remarks которых встречается любая из этих подстрок (без учёта
+    # регистра), не патчатся: например, youtube — чтобы отдельный YouTube-профиль
+    # оставался без adblock-DNS. Пусто — патчить все профили.
+    ADBLOCK_DNS_EXCLUDE_REMARKS: str = ''
     RESET_DEVICES_ON_RENEWAL: bool = False
     TARIFF_SWITCH_UPGRADE_ENABLED: bool = True
     TARIFF_SWITCH_DOWNGRADE_ENABLED: bool = True
@@ -2250,6 +2254,11 @@ class Settings(BaseSettings):
 
     def is_adblock_dns_enabled(self) -> bool:
         return bool(self.ADBLOCK_DNS_ENABLED) and bool((self.ADBLOCK_DNS_ADDRESS or '').strip())
+
+    def get_adblock_dns_exclude_remarks(self) -> list[str]:
+        return [
+            token.strip().casefold() for token in (self.ADBLOCK_DNS_EXCLUDE_REMARKS or '').split(',') if token.strip()
+        ]
 
     def is_remnawave_webhook_enabled(self) -> bool:
         return (

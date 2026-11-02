@@ -310,6 +310,7 @@ def patch_adblock_dns(
     timeout_ms: int = 1000,
     tag: str = ADBLOCK_DNS_TAG,
     block_cidrs: Iterable[str] = ADBLOCK_BLOCK_CIDRS,
+    exclude_remarks: Iterable[str] = (),
 ) -> bytes | None:
     """Добавить adblock-DNS и правила в Xray JSON, не трогая остальное.
 
@@ -334,9 +335,13 @@ def patch_adblock_dns(
     else:
         return None
 
+    exclude_tokens = tuple(str(token).strip().casefold() for token in exclude_remarks if str(token).strip())
     patched_any = False
     for item in configs:
         if not _is_xray_config(item):
+            continue
+        remarks = item.get('remarks')
+        if exclude_tokens and isinstance(remarks, str) and any(token in remarks.casefold() for token in exclude_tokens):
             continue
         patched_any = (
             _patch_xray_config(
@@ -488,6 +493,7 @@ class SubscriptionProxyMiddleware:
                 port=settings.ADBLOCK_DNS_PORT,
                 timeout_ms=settings.ADBLOCK_DNS_TIMEOUT_MS,
                 tag=settings.ADBLOCK_DNS_TAG,
+                exclude_remarks=settings.get_adblock_dns_exclude_remarks(),
             )
         except Exception as error:
             logger.warning('Не удалось применить adblock-DNS к подписке', error=str(error))
