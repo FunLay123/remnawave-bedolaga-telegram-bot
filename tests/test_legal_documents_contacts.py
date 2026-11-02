@@ -75,6 +75,17 @@ def test_contacts_text_contains_details_and_escapes_html(monkeypatch):
     assert '@example_support' in text
 
 
+def test_whitelist_term_is_defined_as_an_option_not_a_bypass_tool():
+    offer = _all_pages('offer')
+    rules = _all_pages('rules')
+
+    assert '«Белые списки»' in offer
+    assert 'опции/группы серверов' in offer
+    assert 'не предназначена для обхода' in offer
+    assert '«Белые списки»' in rules
+    assert 'обхода блокировок или ограничений' in rules
+
+
 def test_legal_keyboards_expose_contacts_button():
     gate_buttons = [button for row in get_legal_gate_keyboard().inline_keyboard for button in row]
     docs_buttons = [button for row in get_legal_documents_keyboard('ru').inline_keyboard for button in row]
