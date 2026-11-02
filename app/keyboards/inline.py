@@ -3372,7 +3372,7 @@ def get_adblock_button(
         return InlineKeyboardButton(
             text=texts.t('SUBSCRIPTION_ADBLOCK_BUTTON_ON', 'Реклама отключена'),
             callback_data=callback_data,
-            style='success',
+            style='primary',
             icon_custom_emoji_id=ADBLOCK_BUTTON_ON_ICON,
         )
     return InlineKeyboardButton(

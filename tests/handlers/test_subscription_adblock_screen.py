@@ -96,7 +96,7 @@ async def test_connect_link_screen_shows_adblock_on_button(monkeypatch):
     await links_mod.handle_connect_subscription(callback, _user(), AsyncMock())
 
     button = _button(callback, 'Реклама отключена')
-    assert button.style == 'success'
+    assert button.style == 'primary'
     assert button.icon_custom_emoji_id == ON_ICON
     assert button.callback_data == 'sub_adblock'
 
