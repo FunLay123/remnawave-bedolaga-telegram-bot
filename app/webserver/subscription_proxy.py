@@ -153,6 +153,31 @@ async def lookup_adblock_enabled(short_uuids: list[str]) -> bool:
 
 ADBLOCK_BLOCK_CIDRS = ('0.0.0.0/8', '::/128')
 ADBLOCK_DNS_TAG = 'dns_adblock'
+# Стилизованные имена профилей часто содержат кириллические гомоглифы
+# («Youtubе» с U+0435). Для сравнения exclusion-токенов приводим такие
+# символы к латинице, иначе «youtube» не находит «Youtubе».
+_MATCH_HOMOGLYPHS = str.maketrans(
+    {
+        'а': 'a',
+        'в': 'b',
+        'е': 'e',
+        'ё': 'e',
+        'к': 'k',
+        'м': 'm',
+        'о': 'o',
+        'р': 'p',
+        'с': 'c',
+        'т': 't',
+        'у': 'y',
+        'х': 'x',
+    }
+)
+
+
+def _normalize_for_match(value: str) -> str:
+    return value.casefold().translate(_MATCH_HOMOGLYPHS)
+
+
 PROXY_OUTBOUND_PROTOCOLS = frozenset(
     {
         'hysteria',
@@ -335,13 +360,17 @@ def patch_adblock_dns(
     else:
         return None
 
-    exclude_tokens = tuple(str(token).strip().casefold() for token in exclude_remarks if str(token).strip())
+    exclude_tokens = tuple(_normalize_for_match(str(token).strip()) for token in exclude_remarks if str(token).strip())
     patched_any = False
     for item in configs:
         if not _is_xray_config(item):
             continue
         remarks = item.get('remarks')
-        if exclude_tokens and isinstance(remarks, str) and any(token in remarks.casefold() for token in exclude_tokens):
+        if (
+            exclude_tokens
+            and isinstance(remarks, str)
+            and any(token in _normalize_for_match(remarks) for token in exclude_tokens)
+        ):
             continue
         patched_any = (
             _patch_xray_config(

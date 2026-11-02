@@ -281,3 +281,38 @@ def test_empty_exclude_list_patches_youtube():
     result = _patched([_config(remarks='YouTube-1080')], exclude_remarks=[])
 
     assert result[0]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_excluded_remarks_handle_cyrillic_homoglyphs():
+    # "☕Youtubе без рекламы": в конце "Youtubе" кириллическая е (U+0435).
+    remark = '☕Youtubе без рекламы'
+
+    result = _patched(
+        [_config(remarks=remark), _config(remarks='Netflix')],
+        exclude_remarks=['youtube'],
+    )
+
+    assert 'dns_adblock' not in json.dumps(result[0])
+    assert result[1]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_cyrillic_token_matches_latin_remark():
+    # Токен с кириллической е тоже должен находить латинский YouTube.
+    result = _patched(
+        [_config(remarks='YouTube-1080'), _config(remarks='Netflix')],
+        exclude_remarks=['youtubе'],
+    )
+
+    assert 'dns_adblock' not in json.dumps(result[0])
+    assert result[1]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_cyrillic_o_homoglyph_is_normalized():
+    # "Yоutube" с кириллической о (U+043E).
+    result = _patched(
+        [_config(remarks='Yоutube'), _config(remarks='Netflix')],
+        exclude_remarks=['youtube'],
+    )
+
+    assert 'dns_adblock' not in json.dumps(result[0])
+    assert result[1]['dns']['servers'][0]['tag'] == TAG
