@@ -154,6 +154,9 @@ async def lookup_adblock_enabled(short_uuids: list[str]) -> bool:
 
 ADBLOCK_BLOCK_CIDRS = ('0.0.0.0/8', '::/128')
 ADBLOCK_DNS_TAG = 'dns_adblock'
+TARGET_STRATEGY_USE_IP = 'UseIP'
+# blackhole не подключается, а dns-outbound сам обслуживает DNS-трафик.
+TARGET_STRATEGY_SKIP_PROTOCOLS = frozenset({'blackhole', 'dns'})
 # Стилизованные имена профилей часто содержат кириллические гомоглифы
 # («Youtubе» с U+0435). Для сравнения exclusion-токенов приводим такие
 # символы к латинице, иначе «youtube» не находит «Youtubе».
@@ -231,6 +234,38 @@ def _block_tag(outbounds: list[Any]) -> str:
     return tag
 
 
+def _outbound_display_name(outbound: dict[str, Any]) -> str:
+    """Название outbound'а для exclusion-токенов: tag/name/remarks."""
+    return ' '.join(
+        str(outbound[key])
+        for key in ('tag', 'name', 'remarks')
+        if isinstance(outbound.get(key), str) and outbound[key].strip()
+    )
+
+
+def _apply_target_strategy(outbounds: list[Any], exclude_tokens: Iterable[str]) -> bool:
+    """Проставить targetStrategy=UseIP подключающимся outbound'ам.
+
+    exclude_tokens уже нормализованы _normalize_for_match. blackhole/dns
+    пропускаются: первому резолв не нужен, второй сам обслуживает DNS.
+    """
+    exclude_tokens = tuple(exclude_tokens)
+    changed = False
+    for outbound in outbounds:
+        if not isinstance(outbound, dict):
+            continue
+        protocol = str(outbound.get('protocol') or '').strip().lower()
+        if not protocol or protocol in TARGET_STRATEGY_SKIP_PROTOCOLS:
+            continue
+        name = _normalize_for_match(_outbound_display_name(outbound))
+        if any(token in name for token in exclude_tokens):
+            continue
+        if outbound.get('targetStrategy') != TARGET_STRATEGY_USE_IP:
+            outbound['targetStrategy'] = TARGET_STRATEGY_USE_IP
+            changed = True
+    return changed
+
+
 def _rule_has_inbound_tag(rule: Any, tag: str) -> bool:
     if not isinstance(rule, dict):
         return False
@@ -278,6 +313,7 @@ def _patch_xray_config(
     timeout_ms: int,
     tag: str,
     block_cidrs: Iterable[str],
+    target_strategy_exclude: Iterable[str] = (),
 ) -> bool:
     outbounds = config.get('outbounds')
     if not isinstance(outbounds, list) or not outbounds:
@@ -333,6 +369,7 @@ def _patch_xray_config(
         {'type': 'field', 'ip': list(block_cidrs), 'outboundTag': block_tag},
         block_cidrs,
     )
+    _apply_target_strategy(outbounds, target_strategy_exclude)
     return True
 
 
@@ -345,6 +382,7 @@ def patch_adblock_dns(
     tag: str = ADBLOCK_DNS_TAG,
     block_cidrs: Iterable[str] = ADBLOCK_BLOCK_CIDRS,
     exclude_remarks: Iterable[str] = (),
+    exclude_outbounds: Iterable[str] = (),
 ) -> bytes | None:
     """Добавить adblock-DNS и правила в Xray JSON, не трогая остальное.
 
@@ -370,6 +408,9 @@ def patch_adblock_dns(
         return None
 
     exclude_tokens = tuple(_normalize_for_match(str(token).strip()) for token in exclude_remarks if str(token).strip())
+    target_strategy_exclude = tuple(
+        _normalize_for_match(str(token).strip()) for token in exclude_outbounds if str(token).strip()
+    )
     patched_any = False
     for item in configs:
         if not _is_xray_config(item):
@@ -389,6 +430,7 @@ def patch_adblock_dns(
                 timeout_ms=timeout_ms,
                 tag=tag,
                 block_cidrs=block_cidrs,
+                target_strategy_exclude=target_strategy_exclude,
             )
             or patched_any
         )
@@ -532,6 +574,7 @@ class SubscriptionProxyMiddleware:
                 timeout_ms=settings.ADBLOCK_DNS_TIMEOUT_MS,
                 tag=settings.ADBLOCK_DNS_TAG,
                 exclude_remarks=settings.get_adblock_dns_exclude_remarks(),
+                exclude_outbounds=settings.get_adblock_target_strategy_exclude_outbounds(),
             )
         except Exception as error:
             logger.warning('Не удалось применить adblock-DNS к подписке', error=str(error))

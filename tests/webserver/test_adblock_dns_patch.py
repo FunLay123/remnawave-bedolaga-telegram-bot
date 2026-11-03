@@ -49,9 +49,13 @@ def _config(**overrides):
     return config
 
 
-def _patched(configs, *, exclude_remarks=None, address=ADDRESS):
+def _patched(configs, *, exclude_remarks=None, exclude_outbounds=None, address=ADDRESS):
     body = json.dumps(configs, separators=(',', ':')).encode()
-    kwargs = {} if exclude_remarks is None else {'exclude_remarks': exclude_remarks}
+    kwargs = {}
+    if exclude_remarks is not None:
+        kwargs['exclude_remarks'] = exclude_remarks
+    if exclude_outbounds is not None:
+        kwargs['exclude_outbounds'] = exclude_outbounds
     result = patch_adblock_dns(body, address=address, port=PORT, timeout_ms=1000, tag=TAG, **kwargs)
     assert result is not None
     return json.loads(result)
@@ -275,6 +279,94 @@ def test_multiple_exclude_tokens():
     assert 'dns_adblock' not in json.dumps(result[0])
     assert 'dns_adblock' not in json.dumps(result[1])
     assert result[2]['dns']['servers'][0]['tag'] == TAG
+
+
+def test_adds_target_strategy_to_connecting_outbounds():
+    result = _patched([_config()])[0]
+    outbounds = {outbound['tag']: outbound for outbound in result['outbounds']}
+
+    assert outbounds['proxy']['targetStrategy'] == 'UseIP'
+    assert outbounds['direct']['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in outbounds['block']
+
+
+def test_target_strategy_is_not_added_to_dns_outbound():
+    config = _config(
+        outbounds=[
+            {'tag': 'proxy', 'protocol': 'vless'},
+            {'tag': 'dns', 'protocol': 'dns'},
+        ]
+    )
+    result = _patched([config])[0]
+    outbounds = {outbound['tag']: outbound for outbound in result['outbounds']}
+
+    assert outbounds['proxy']['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in outbounds['dns']
+
+
+def test_target_strategy_excludes_outbounds_by_name_case_insensitively():
+    config = _config(
+        outbounds=[
+            {'tag': 'proxy', 'protocol': 'vless'},
+            {'tag': 'Direct-RU', 'protocol': 'freedom'},
+            {'tag': 'wireguard', 'protocol': 'wireguard'},
+            {'tag': 'block', 'protocol': 'blackhole'},
+        ]
+    )
+    result = _patched([config], exclude_outbounds=['ru'])[0]
+    outbounds = {outbound['tag']: outbound for outbound in result['outbounds']}
+
+    assert outbounds['proxy']['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in outbounds['Direct-RU']
+    assert outbounds['wireguard']['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in outbounds['block']
+
+
+def test_target_strategy_exclusion_matches_name_and_remarks_fields():
+    config = _config(
+        outbounds=[
+            {'tag': 'proxy', 'protocol': 'vless'},
+            {'name': 'geo-detect', 'protocol': 'freedom'},
+            {'remarks': 'server-resolve', 'protocol': 'trojan'},
+        ]
+    )
+    result = _patched([config], exclude_outbounds=['geo', 'SERVER'])[0]
+    outbounds = result['outbounds']
+
+    assert outbounds[0]['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in outbounds[1]
+    assert 'targetStrategy' not in outbounds[2]
+
+
+def test_target_strategy_overwrites_existing_value():
+    config = _config(
+        outbounds=[
+            {'tag': 'proxy', 'protocol': 'vless', 'targetStrategy': 'AsIs'},
+        ]
+    )
+    result = _patched([config])[0]
+
+    assert result['outbounds'][0]['targetStrategy'] == 'UseIP'
+
+
+def test_target_strategy_is_idempotent():
+    first = _patched([_config()])[0]
+    body = json.dumps([first], separators=(',', ':')).encode()
+    second = json.loads(patch_adblock_dns(body, address=ADDRESS, port=PORT, timeout_ms=1000, tag=TAG))
+
+    for outbound in second[0]['outbounds']:
+        if outbound['protocol'] in {'vless', 'freedom'}:
+            assert outbound['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in next(o for o in second[0]['outbounds'] if o['protocol'] == 'blackhole')
+
+
+def test_target_strategy_applies_to_each_patched_config():
+    result = _patched([_config(remarks='node1'), _config(remarks='node2')])
+
+    for item in result:
+        outbounds = {outbound['tag']: outbound for outbound in item['outbounds']}
+        assert outbounds['proxy']['targetStrategy'] == 'UseIP'
+        assert outbounds['direct']['targetStrategy'] == 'UseIP'
 
 
 def test_empty_exclude_list_patches_youtube():

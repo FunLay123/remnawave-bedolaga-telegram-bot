@@ -237,6 +237,30 @@ def test_adblock_body_and_userinfo_are_rewritten_together(adblock_env):
     assert adblock_calls == [['Ab3dEf9hJk']]
 
 
+def test_adblock_adds_target_strategy_to_client_outbounds(adblock_env):
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    response = _client(_xray_response, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    outbounds = {outbound['tag']: outbound for outbound in json.loads(response.content)[0]['outbounds']}
+    assert outbounds['proxy']['targetStrategy'] == 'UseIP'
+    assert outbounds['direct']['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in outbounds['block']
+
+
+def test_adblock_target_strategy_exclusion_applies_from_settings(adblock_env, monkeypatch):
+    monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_TARGET_STRATEGY_EXCLUDE_OUTBOUNDS', ' DIRECT ')
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    response = _client(_xray_response, usage, adblock_lookup=adblock).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    outbounds = {outbound['tag']: outbound for outbound in json.loads(response.content)[0]['outbounds']}
+    assert outbounds['proxy']['targetStrategy'] == 'UseIP'
+    assert 'targetStrategy' not in outbounds['direct']
+
+
 def test_adblock_off_keeps_xray_body(adblock_env):
     usage, _ = _usage(None)
     adblock, adblock_calls = _adblock(False)
@@ -446,6 +470,16 @@ def test_adblock_exclude_remarks_are_parsed_case_insensitively(monkeypatch):
     monkeypatch.setattr(subscription_proxy.settings, 'ADBLOCK_DNS_EXCLUDE_REMARKS', ' YouTube, YT ,, ')
 
     assert subscription_proxy.settings.get_adblock_dns_exclude_remarks() == ['youtube', 'yt']
+
+
+def test_adblock_target_strategy_exclude_outbounds_are_parsed_case_insensitively(monkeypatch):
+    monkeypatch.setattr(
+        subscription_proxy.settings,
+        'ADBLOCK_TARGET_STRATEGY_EXCLUDE_OUTBOUNDS',
+        ' Direct-RU, geo ,, ',
+    )
+
+    assert subscription_proxy.settings.get_adblock_target_strategy_exclude_outbounds() == ['direct-ru', 'geo']
 
 
 async def test_lookup_adblock_enabled_true_for_single_enabled_subscription(monkeypatch):

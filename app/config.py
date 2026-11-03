@@ -373,6 +373,12 @@ class Settings(BaseSettings):
     # регистра), не патчатся: например, youtube — чтобы отдельный YouTube-профиль
     # оставался без adblock-DNS. Пусто — патчить все профили.
     ADBLOCK_DNS_EXCLUDE_REMARKS: str = ''
+    # Outbound'ы, в названии (tag/name/remarks) которых встречается любая из этих
+    # подстрок, не получают targetStrategy=UseIP при включённом adblock-DNS.
+    # Нужно для outbound'ов, которые должны резолвить домен на сервере, а не на
+    # клиенте (например, geo-detect/proxy-специфичные цепочки). Пусто — ставить
+    # targetStrategy всем подключающимся outbound'ам.
+    ADBLOCK_TARGET_STRATEGY_EXCLUDE_OUTBOUNDS: str = ''
     RESET_DEVICES_ON_RENEWAL: bool = False
     TARIFF_SWITCH_UPGRADE_ENABLED: bool = True
     TARIFF_SWITCH_DOWNGRADE_ENABLED: bool = True
@@ -2265,6 +2271,13 @@ class Settings(BaseSettings):
     def get_adblock_dns_exclude_remarks(self) -> list[str]:
         return [
             token.strip().casefold() for token in (self.ADBLOCK_DNS_EXCLUDE_REMARKS or '').split(',') if token.strip()
+        ]
+
+    def get_adblock_target_strategy_exclude_outbounds(self) -> list[str]:
+        return [
+            token.strip().casefold()
+            for token in (self.ADBLOCK_TARGET_STRATEGY_EXCLUDE_OUTBOUNDS or '').split(',')
+            if token.strip()
         ]
 
     def is_remnawave_webhook_enabled(self) -> bool:
