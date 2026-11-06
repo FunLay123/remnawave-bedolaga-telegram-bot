@@ -1436,8 +1436,11 @@ def get_trial_keyboard(language: str = 'ru') -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text=texts.t('TRIAL_ACTIVATE_BUTTON', '🎁 Активировать'), callback_data='trial_activate'
+                apply_button_style(
+                    InlineKeyboardButton(
+                        text=texts.t('TRIAL_ACTIVATE_BUTTON', '🎁 Активировать'), callback_data='trial_activate'
+                    ),
+                    'subscription:trial_activate',
                 ),
                 InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu'),
             ]
@@ -2794,7 +2797,13 @@ def get_add_traffic_keyboard(
     )
 
     premium_button = (
-        [InlineKeyboardButton(text='💠 Белые списки', callback_data='premium_traffic_topup')]
+        [
+            InlineKeyboardButton(
+                text='Белые списки',
+                callback_data='premium_traffic_topup',
+                icon_custom_emoji_id='5335020345717973061',
+            )
+        ]
         if has_premium_topup
         else None
     )
@@ -2898,7 +2907,13 @@ def get_add_traffic_keyboard_from_tariff(
     )
 
     premium_button = (
-        [InlineKeyboardButton(text='💠 Белые списки', callback_data='premium_traffic_topup')]
+        [
+            InlineKeyboardButton(
+                text='Белые списки',
+                callback_data='premium_traffic_topup',
+                icon_custom_emoji_id='5335020345717973061',
+            )
+        ]
         if has_premium_topup
         else None
     )

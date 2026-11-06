@@ -21,8 +21,8 @@ class _LegacyTexts:
     """Texts stub emulating a custom locale with the legacy {days} placeholder."""
 
     def t(self, key: str, default: str | None = None) -> str:
-        if key == 'SUBSCRIPTION_EXPIRING_PAID':
-            return 'Подписка{tariff_label} истекает через {days} дн. ({days_text}) — {end_date}\n{autopay_status}\n{action_text}'
+        if key.startswith('SUBSCRIPTION_EXPIRING_'):
+            return 'Подписка{tariff_label} истекает через {days} дн. ({days_text}) — {end_date}\n{balance}\n{required}'
         return default if default is not None else key
 
 

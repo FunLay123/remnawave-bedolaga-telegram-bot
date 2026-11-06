@@ -1,5 +1,6 @@
 import asyncio
 import html
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -81,6 +82,7 @@ from app.utils.formatters import format_username_link
 from app.utils.message_patch import caption_exceeds_telegram_limit
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button, build_subscription_extend_button
 from app.utils.notification_emoji import style_notification_text
+from app.utils.notification_prefs import is_subscription_expiry_enabled
 from app.utils.promo_offer import get_user_active_promo_discount_percent
 from app.utils.rich_notify import try_send_rich_notification
 from app.utils.subscription_time import ends_within_days
@@ -98,9 +100,17 @@ class AutopayFailState:
     count: int = 0
     last_sent_ts: float = 0.0
     final_sent: bool = False
+    # Когда отправляли объединённую карточку «истекает + автоплатёж не прошёл».
+    # Плановое предупреждение в течение часа после этого не дублируем.
+    merged_expiring_ts: float = 0.0
 
     def to_dict(self) -> dict:
-        return {'count': self.count, 'last_sent_ts': self.last_sent_ts, 'final_sent': self.final_sent}
+        return {
+            'count': self.count,
+            'last_sent_ts': self.last_sent_ts,
+            'final_sent': self.final_sent,
+            'merged_expiring_ts': self.merged_expiring_ts,
+        }
 
     @classmethod
     def from_dict(cls, data: dict | None) -> 'AutopayFailState':
@@ -110,6 +120,7 @@ class AutopayFailState:
             count=int(data.get('count', 0)),
             last_sent_ts=float(data.get('last_sent_ts', 0.0)),
             final_sent=bool(data.get('final_sent', False)),
+            merged_expiring_ts=float(data.get('merged_expiring_ts', 0.0)),
         )
 
 
@@ -161,6 +172,86 @@ def apply_autopay_fail_notification(state: AutopayFailState, reason: str, now_ts
     if reason == 'final':
         state.final_sent = True
     return state
+
+
+# Новые шаблоны предупреждения об истечении: состояние выбирает текст и primary-кнопку.
+EXPIRING_TEMPLATE_KEYS = {
+    'autopay_off': 'SUBSCRIPTION_EXPIRING_AUTOPAY_OFF',
+    'autopay_ok': 'SUBSCRIPTION_EXPIRING_AUTOPAY_OK',
+    'autopay_short': 'SUBSCRIPTION_EXPIRING_AUTOPAY_SHORT',
+}
+
+# Окно, в котором объединённая карточка заменяет плановое предупреждение.
+MERGED_EXPIRING_SUPPRESS_SECONDS = 3600
+
+
+def decide_expiring_notification_state(*, autopay_enabled: bool, balance_kopeks: int, required_kopeks: int) -> str:
+    """Pick the expiry template by the facts the user will see.
+
+    - autopay off → renew manually;
+    - autopay on and enough money → it will renew itself;
+    - autopay on and not enough money → top up first.
+    """
+    if not autopay_enabled:
+        return 'autopay_off'
+    if balance_kopeks >= required_kopeks:
+        return 'autopay_ok'
+    return 'autopay_short'
+
+
+def expiring_template_key(state: str) -> str:
+    return EXPIRING_TEMPLATE_KEYS[state]
+
+
+def should_suppress_expiring_notification(
+    merged_ts: float,
+    now_ts: float,
+    *,
+    window_seconds: int = MERGED_EXPIRING_SUPPRESS_SECONDS,
+) -> bool:
+    """True while a merged autopay-failure card still covers the same warning."""
+    if merged_ts <= 0:
+        return False
+    elapsed = now_ts - merged_ts
+    return 0 <= elapsed < window_seconds
+
+
+def should_merge_autopay_failure_with_expiring(
+    *,
+    is_final: bool,
+    expiry_notifications_enabled: bool,
+    days_left: int,
+    warning_days: list[int],
+) -> bool:
+    """Merge only a non-final failure into a warning that is actually due."""
+    if is_final or not expiry_notifications_enabled or not warning_days:
+        return False
+    return days_left <= max(warning_days)
+
+
+def build_traffic_warning_keyboard(texts):
+    """Кнопки предупреждения о трафике: докупка — главное действие."""
+    from aiogram.types import InlineKeyboardMarkup
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                build_miniapp_or_callback_button(
+                    text=texts.t('BUY_TRAFFIC_BUTTON', 'Докупить трафик'),
+                    callback_data='buy_traffic',
+                    style='primary',
+                    icon_custom_emoji_id='5303396278179210513',
+                )
+            ],
+            [
+                build_miniapp_or_callback_button(
+                    text=texts.t('MY_SUBSCRIPTION_BUTTON', 'Моя подписка'),
+                    callback_data='menu_subscription',
+                    icon_custom_emoji_id='5431374840332302296',
+                )
+            ],
+        ]
+    )
 
 
 # Размер батча для проверки подписок на каналы (keyset pagination)
@@ -569,9 +660,21 @@ class MonitoringService:
             return
 
         is_final = reason == 'final'
+        days_left = max(1, math.ceil((subscription.end_date - current_time).total_seconds() / 86400))
+        merge_with_expiry = should_merge_autopay_failure_with_expiring(
+            is_final=is_final,
+            expiry_notifications_enabled=is_subscription_expiry_enabled(user),
+            days_left=days_left,
+            warning_days=settings.get_autopay_warning_days(),
+        )
         if user.telegram_id and self.bot:
             await self._send_autopay_failed_notification(
-                user, user.balance_kopeks, charge_amount, subscription=subscription, is_final=is_final
+                user,
+                int(getattr(user, 'balance_kopeks', 0) or 0),
+                charge_amount,
+                subscription=subscription,
+                is_final=is_final,
+                merge_with_expiry=merge_with_expiry,
             )
         elif not user.telegram_id:
             if is_final:
@@ -583,6 +686,8 @@ class MonitoringService:
             await notification_delivery_service.notify_autopay_failed(user=user, reason=reason_text)
 
         apply_autopay_fail_notification(state, reason, now_ts)
+        if merge_with_expiry and user.telegram_id:
+            state.merged_expiring_ts = now_ts
         ttl_seconds = int(max(0.0, hours_left) * 3600) + 72 * 3600
         await self._save_autopay_fail_state(subscription.id, cycle_token, state, ttl_seconds)
 
@@ -667,7 +772,13 @@ class MonitoringService:
                 )
                 skip_notify = skip_notify or other_active.scalar_one_or_none() is not None
             if not skip_notify:
-                await self._send_subscription_expired_notification(user, subscription, tariff_name=_tariff_name)
+                price_kopeks = await self._resolve_renewal_cost_kopeks(db, subscription, user)
+                await self._send_subscription_expired_notification(
+                    user,
+                    subscription,
+                    tariff_name=_tariff_name,
+                    price_kopeks=price_kopeks,
+                )
 
         logger.info("🔴 Подписка пользователя истекла и статус изменен на 'expired'", user_id=subscription.user_id)
 
@@ -882,6 +993,29 @@ class MonitoringService:
             logger.error('Ошибка обновления RemnaWave пользователя', error=e)
             return None
 
+    async def _resolve_renewal_cost_kopeks(self, db: AsyncSession, subscription: Subscription, user: User) -> int:
+        """Цена продления для уведомления — та же, что попытается списать автоплатёж."""
+        tariff = getattr(subscription, 'tariff', None)
+        try:
+            period = (
+                resolve_autopay_period_candidate(getattr(subscription, 'autopay_period_days', None), tariff)
+                or resolve_autopay_period_candidate(getattr(settings, 'DEFAULT_AUTOPAY_PERIOD_DAYS', 0), tariff)
+                or (tariff.get_shortest_period() if tariff else None)
+                or 30
+            )
+            from app.services.pricing_engine import pricing_engine
+
+            pricing = await pricing_engine.calculate_renewal_price(db, subscription, period, user=user)
+            return max(0, int(pricing.final_total))
+        except Exception as error:
+            logger.warning(
+                'Не удалось рассчитать цену продления для уведомления, используем PRICE_30_DAYS',
+                subscription_id=getattr(subscription, 'id', None),
+                user_id=getattr(user, 'id', None),
+                error=str(error),
+            )
+            return max(0, int(getattr(settings, 'PRICE_30_DAYS', 0) or 0))
+
     async def _check_expiring_subscriptions(self, db: AsyncSession):
         if not NotificationSettingsService.are_notifications_globally_enabled():
             return
@@ -956,6 +1090,22 @@ class MonitoringService:
                     if not should_send:
                         continue
 
+                    # Объединённая карточка об ошибке автоплатежа уже содержит дату и
+                    # сумму — не дублируем её плановым предупреждением в том же окне.
+                    if user.telegram_id and subscription.autopay_enabled:
+                        cycle_token = int(subscription.end_date.timestamp())
+                        fail_state = await self._load_autopay_fail_state(subscription.id, cycle_token)
+                        if should_suppress_expiring_notification(
+                            fail_state.merged_expiring_ts,
+                            datetime.now(UTC).timestamp(),
+                        ):
+                            logger.info(
+                                'Пропуск планового предупреждения: объединённая карточка уже отправлена',
+                                user_identifier=user_identifier,
+                                days=days,
+                            )
+                            continue
+
                     # Handle email-only users via notification delivery service
                     if not user.telegram_id:
                         success = await notification_delivery_service.notify_subscription_expiring(
@@ -975,8 +1125,13 @@ class MonitoringService:
                         continue
 
                     if self.bot:
+                        required_kopeks = await self._resolve_renewal_cost_kopeks(db, subscription, user)
                         success = await self._send_subscription_expiring_notification(
-                            user, subscription, days, has_saved_card=has_saved_card
+                            user,
+                            subscription,
+                            days,
+                            has_saved_card=has_saved_card,
+                            required_kopeks=required_kopeks,
                         )
                         if success:
                             await record_notification(db, user.id, subscription.id, 'expiring', days)
@@ -1474,6 +1629,7 @@ class MonitoringService:
                             offer.expires_at,
                             offer.id,
                             'second',
+                            db=db,
                         )
                         if success:
                             await record_notification(db, user.id, subscription.id, 'expired_discount_wave2')
@@ -1504,6 +1660,7 @@ class MonitoringService:
                                 offer.id,
                                 'third',
                                 trigger_days=trigger_days,
+                                db=db,
                             )
                             if success:
                                 await record_notification(db, user.id, subscription.id, 'expired_discount_wave3')
@@ -1999,7 +2156,12 @@ class MonitoringService:
             logger.error('Ошибка обработки автоплатежей', error=e, exc_info=True)
 
     async def _send_subscription_expired_notification(
-        self, user: User, subscription: Subscription, *, tariff_name: str | None = None
+        self,
+        user: User,
+        subscription: Subscription,
+        *,
+        tariff_name: str | None = None,
+        price_kopeks: int | None = None,
     ) -> bool:
         try:
             if not user.telegram_id:
@@ -2008,19 +2170,17 @@ class MonitoringService:
                     notification_type=NotificationType.SUBSCRIPTION_EXPIRED,
                     context={'tariff_name': tariff_name or ''},
                 )
-            tariff_label = ''
-            if settings.is_multi_tariff_enabled():
-                if tariff_name:
-                    tariff_label = f' «{tariff_name}»'
-                elif hasattr(subscription, 'tariff') and subscription.tariff:
-                    tariff_label = f' «{subscription.tariff.name}»'
-            message = f"""
-⛔ <b>Подписка{tariff_label} истекла</b>
-
-Ваша подписка истекла. Для восстановления доступа продлите подписку.
-
-🔧 Доступ к серверам заблокирован до продления.
-"""
+            texts = get_texts(getattr(user, 'language', 'ru'))
+            price = int(price_kopeks) if price_kopeks is not None else int(getattr(settings, 'PRICE_30_DAYS', 0) or 0)
+            message = texts.t(
+                'SUBSCRIPTION_EXPIRED',
+                '⛔ <b>Подписка закончилась</b>\n\n'
+                'Баланс <b>{balance}</b> · продление <b>{price}</b>\n\n'
+                'Продлите подписку, чтобы снова подключиться.',
+            ).format(
+                balance=settings.format_price(int(getattr(user, 'balance_kopeks', 0) or 0)),
+                price=settings.format_price(price),
+            )
 
             from aiogram.types import InlineKeyboardMarkup
 
@@ -2028,7 +2188,7 @@ class MonitoringService:
                 inline_keyboard=[
                     [
                         build_subscription_extend_button(
-                            '💎 Продлить подписку',
+                            texts.t('SUBSCRIPTION_EXTEND', 'Продлить подписку'),
                             subscription.id,
                             style='primary',
                             icon_custom_emoji_id='5334552404736104314',
@@ -2036,7 +2196,7 @@ class MonitoringService:
                     ],
                     [
                         build_miniapp_or_callback_button(
-                            text='💳 Пополнить баланс',
+                            text=texts.t('BALANCE_TOPUP', 'Пополнить баланс'),
                             callback_data='balance_topup',
                             icon_custom_emoji_id='5258500422393415126',
                         )
@@ -2068,102 +2228,102 @@ class MonitoringService:
             return False
 
     async def _send_subscription_expiring_notification(
-        self, user: User, subscription: Subscription, days: int, *, has_saved_card: bool = False
+        self,
+        user: User,
+        subscription: Subscription,
+        days: int,
+        *,
+        has_saved_card: bool = False,
+        required_kopeks: int | None = None,
     ) -> bool:
         try:
             from app.utils.formatters import format_days_declension
 
-            texts = get_texts(user.language)
-            days_text = format_days_declension(days, user.language)
+            texts = get_texts(getattr(user, 'language', 'ru'))
+            days_text = format_days_declension(days, getattr(user, 'language', 'ru'))
+            required = (
+                int(required_kopeks)
+                if required_kopeks is not None
+                else max(0, int(getattr(settings, 'PRICE_30_DAYS', 0) or 0))
+            )
 
-            if subscription.autopay_enabled and has_saved_card:
-                autopay_status = texts.t(
-                    'AUTOPAY_STATUS_CARD_ACTIVE',
-                    '✅ Включен — будет автоматическое списание с карты',
-                )
-                action_text = texts.t(
-                    'AUTOPAY_ACTION_CHECK_BALANCE',
-                    '💰 Убедитесь, что на балансе достаточно средств: {balance}',
-                ).format(balance=texts.format_price(user.balance_kopeks))
-            elif subscription.autopay_enabled:
-                autopay_status = texts.t(
-                    'AUTOPAY_STATUS_NO_CARD',
-                    '✅ Включен — подписка продлится автоматически',
-                )
-                action_text = texts.t(
-                    'AUTOPAY_ACTION_CHECK_BALANCE',
-                    '💰 Убедитесь, что на балансе достаточно средств: {balance}',
-                ).format(balance=texts.format_price(user.balance_kopeks))
-            else:
-                autopay_status = texts.t(
-                    'AUTOPAY_STATUS_OFF',
-                    '❌ Отключен — не забудьте продлить вручную!',
-                )
-                if settings.ENABLE_AUTOPAY:
-                    action_text = texts.t(
-                        'AUTOPAY_ACTION_ENABLE',
-                        '💡 Включите автоплатеж или продлите подписку вручную',
-                    )
-                else:
-                    action_text = texts.t(
-                        'AUTOPAY_ACTION_RENEW',
-                        '💡 Продлите подписку вручную',
-                    )
+            state = decide_expiring_notification_state(
+                autopay_enabled=bool(subscription.autopay_enabled),
+                balance_kopeks=int(getattr(user, 'balance_kopeks', 0) or 0),
+                required_kopeks=required,
+            )
 
             end_date = format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M')
             # Add tariff name for multi-subscription clarity
             tariff_label = ''
             if settings.is_multi_tariff_enabled() and hasattr(subscription, 'tariff') and subscription.tariff:
                 tariff_label = f' «{subscription.tariff.name}»'
-            message = texts.t(
-                'SUBSCRIPTION_EXPIRING_PAID',
-                '\n⚠️ <b>Подписка{tariff_label} истекает через {days_text}!</b>\n\n'
-                'Ваша платная подписка истекает {end_date}.\n\n'
-                '💳 <b>Автоплатеж:</b> {autopay_status}\n\n'
-                '{action_text}\n',
-            ).format(
+
+            defaults = {
+                'autopay_off': (
+                    '\n⚠️ <b>Подписка{tariff_label} истекает через {days_text}</b>\n\n'
+                    'До <b>{end_date}</b>\n'
+                    'Автоплатёж выключен · баланс <b>{balance}</b>\n\n'
+                    'Продлите подписку вручную, чтобы сохранить доступ.\n'
+                ),
+                'autopay_ok': (
+                    '\n⚠️ <b>Подписка{tariff_label} истекает через {days_text}</b>\n\n'
+                    'До <b>{end_date}</b>\n'
+                    'Автоплатёж включён · баланс <b>{balance}</b>\n\n'
+                    'Продление пройдёт автоматически.\n'
+                ),
+                'autopay_short': (
+                    '\n⚠️ <b>Подписка{tariff_label} истекает через {days_text}</b>\n\n'
+                    'До <b>{end_date}</b>\n'
+                    'Автоплатёж включён · баланс <b>{balance}</b> · нужно <b>{required}</b>\n\n'
+                    'Пополните баланс — продление пройдёт автоматически.\n'
+                ),
+            }
+            message = texts.t(expiring_template_key(state), defaults[state]).format(
                 # Кастомные/старые локали используют {days} вместо {days_text} —
                 # передаём оба, иначе .format() падает с KeyError('days') (#2737).
                 days=days,
                 days_text=days_text,
                 end_date=end_date,
-                autopay_status=autopay_status,
-                action_text=action_text,
+                balance=settings.format_price(int(getattr(user, 'balance_kopeks', 0) or 0)),
+                required=settings.format_price(required),
                 tariff_label=tariff_label,
             )
 
             from aiogram.types import InlineKeyboardMarkup
 
             sub_btn_text = texts.t(
-                'BTN_MY_SUBSCRIPTIONS' if settings.is_multi_tariff_enabled() else 'BTN_MY_SUBSCRIPTION',
-                '📱 Мои подписки' if settings.is_multi_tariff_enabled() else '📱 Моя подписка',
+                'MY_SUBSCRIPTIONS_BUTTON' if settings.is_multi_tariff_enabled() else 'MY_SUBSCRIPTION_BUTTON',
+                'Мои подписки' if settings.is_multi_tariff_enabled() else 'Моя подписка',
             )
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        build_subscription_extend_button(
-                            texts.t('BTN_RENEW_SUBSCRIPTION', '⏰ Продлить подписку'),
-                            subscription.id,
-                            style='primary',
-                            icon_custom_emoji_id='5334552404736104314',
-                        )
-                    ],
-                    [
-                        build_miniapp_or_callback_button(
-                            text=texts.t('BTN_TOPUP_BALANCE', '💳 Пополнить баланс'),
-                            callback_data='balance_topup',
-                            icon_custom_emoji_id='5258500422393415126',
-                        )
-                    ],
-                    [
-                        build_miniapp_or_callback_button(
-                            text=sub_btn_text,
-                            callback_data='menu_subscription',
-                            icon_custom_emoji_id='5431374840332302296',
-                        )
-                    ],
-                ]
+            renew_primary = state in {'autopay_off', 'autopay_ok'}
+            topup_primary = state == 'autopay_short'
+
+            renew_button = build_subscription_extend_button(
+                texts.t('BTN_RENEW_SUBSCRIPTION', 'Продлить подписку'),
+                subscription.id,
+                style='primary' if renew_primary else None,
+                icon_custom_emoji_id='5334552404736104314',
             )
+            topup_button = build_miniapp_or_callback_button(
+                text=texts.t('BTN_TOPUP_BALANCE', 'Пополнить баланс'),
+                callback_data='balance_topup',
+                style='primary' if topup_primary else None,
+                icon_custom_emoji_id='5258500422393415126',
+            )
+            sub_button = build_miniapp_or_callback_button(
+                text=sub_btn_text,
+                callback_data='menu_subscription',
+                icon_custom_emoji_id='5431374840332302296',
+            )
+
+            if state == 'autopay_ok':
+                rows = [[renew_button], [sub_button]]
+            elif state == 'autopay_short':
+                rows = [[topup_button], [renew_button], [sub_button]]
+            else:
+                rows = [[renew_button], [topup_button], [sub_button]]
+            keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
 
             await self._send_message_with_logo(
                 chat_id=user.telegram_id,
@@ -2201,21 +2361,16 @@ class MonitoringService:
                     notification_type=NotificationType.WINBACK_TRIAL_ENDING,
                     context={},
                 )
-            get_texts(user.language)
-
-            tariff_label = ''
-            if settings.is_multi_tariff_enabled() and hasattr(subscription, 'tariff') and subscription.tariff:
-                tariff_label = f' «{subscription.tariff.name}»'
-            message = f"""
-🎁 <b>Тестовая подписка{tariff_label} скоро закончится!</b>
-
-Ваша тестовая подписка истекает через 2 часа.
-
-💎 <b>Не хотите остаться без VPN?</b>
-Переходите на полную подписку!
-
-⚡️ Успейте оформить до окончания тестового периода!
-"""
+            texts = get_texts(getattr(user, 'language', 'ru'))
+            message = texts.t(
+                'TRIAL_ENDING_SOON',
+                '\n⏰ <b>Тестовый период закончится через 2 часа</b>\n\n'
+                'Тариф <b>{price} за 30 дней</b> · баланс <b>{balance}</b>\n\n'
+                'Оформите подписку, чтобы доступ не отключился.\n',
+            ).format(
+                price=settings.format_price(int(getattr(settings, 'PRICE_30_DAYS', 0) or 0)),
+                balance=settings.format_price(int(getattr(user, 'balance_kopeks', 0) or 0)),
+            )
 
             from aiogram.types import InlineKeyboardMarkup
 
@@ -2351,37 +2506,27 @@ class MonitoringService:
                     notification_type=NotificationType.WINBACK_EXPIRED_1D,
                     context={'end_date': format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M')},
                 )
-            texts = get_texts(user.language)
+            texts = get_texts(getattr(user, 'language', 'ru'))
             tariff = getattr(subscription, 'tariff', None)
             tariff_label = ''
             if settings.is_multi_tariff_enabled() and tariff:
                 tariff_label = f' «{tariff.name}»'
 
-            renewal_period = (tariff.get_shortest_period() if tariff else None) or 30
-            try:
-                from app.services.pricing_engine import pricing_engine
-
-                pricing = await pricing_engine.calculate_renewal_price(db, subscription, renewal_period, user=user)
-                renewal_price_kopeks = pricing.final_total
-            except Exception as price_error:
-                logger.warning(
-                    'Не удалось рассчитать цену продления для уведомления expired_1d, используем PRICE_30_DAYS',
-                    subscription_id=subscription.id,
-                    user_id=user.id,
-                    error=str(price_error),
-                )
-                renewal_price_kopeks = settings.PRICE_30_DAYS
+            renewal_price_kopeks = await self._resolve_renewal_cost_kopeks(db, subscription, user)
 
             template = texts.get(
                 'SUBSCRIPTION_EXPIRED_1D',
                 (
                     '⛔ <b>Подписка{tariff_label} закончилась</b>\n\n'
-                    'Доступ был отключён {end_date}. Продлите подписку, чтобы вернуться в сервис.'
+                    'Отключена <b>{end_date}</b>\n'
+                    'Баланс <b>{balance}</b> · продление <b>{price}</b>\n\n'
+                    'Продлите подписку, чтобы восстановить доступ.'
                 ),
             )
             message = template.format(
                 end_date=format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M'),
                 price=settings.format_price(renewal_price_kopeks),
+                balance=settings.format_price(int(getattr(user, 'balance_kopeks', 0) or 0)),
                 tariff_label=tariff_label,
             )
 
@@ -2391,19 +2536,24 @@ class MonitoringService:
                 inline_keyboard=[
                     [
                         build_subscription_extend_button(
-                            texts.t('SUBSCRIPTION_EXTEND', '💎 Продлить подписку'),
+                            texts.t('SUBSCRIPTION_EXTEND', 'Продлить подписку'),
                             subscription.id,
+                            style='primary',
+                            icon_custom_emoji_id='5334552404736104314',
                         )
                     ],
                     [
                         build_miniapp_or_callback_button(
-                            text=texts.t('BALANCE_TOPUP', '💳 Пополнить баланс'),
+                            text=texts.t('BALANCE_TOPUP', 'Пополнить баланс'),
                             callback_data='balance_topup',
+                            icon_custom_emoji_id='5258500422393415126',
                         )
                     ],
                     [
                         InlineKeyboardButton(
-                            text=texts.t('SUPPORT_BUTTON', '🆘 Поддержка'), callback_data='menu_support'
+                            text=texts.t('SUPPORT_BUTTON', 'Поддержка'),
+                            callback_data='menu_support',
+                            icon_custom_emoji_id='5988023995125993550',
                         )
                     ],
                 ]
@@ -2446,6 +2596,8 @@ class MonitoringService:
         offer_id: int,
         wave: str,
         trigger_days: int = None,
+        *,
+        db: AsyncSession | None = None,
     ) -> bool:
         try:
             if not user.telegram_id:
@@ -2458,62 +2610,54 @@ class MonitoringService:
                         'trigger_days': trigger_days or '',
                     },
                 )
-            texts = get_texts(user.language)
+            texts = get_texts(getattr(user, 'language', 'ru'))
 
             tariff_label = ''
             if settings.is_multi_tariff_enabled() and hasattr(subscription, 'tariff') and subscription.tariff:
                 tariff_label = f' «{subscription.tariff.name}»'
 
-            if wave == 'second':
-                template = texts.get(
-                    'SUBSCRIPTION_EXPIRED_SECOND_WAVE',
-                    (
-                        '🔥 <b>Скидка {percent}% на продление{tariff_label}</b>\n\n'
-                        'Активируйте предложение, чтобы получить дополнительную скидку. '
-                        'Она суммируется с вашей промогруппой и действует до {expires_at}.'
-                    ),
-                )
-            else:
-                template = texts.get(
-                    'SUBSCRIPTION_EXPIRED_THIRD_WAVE',
-                    (
-                        '🎁 <b>Индивидуальная скидка {percent}%{tariff_label}</b>\n\n'
-                        'Прошло {trigger_days} дней без подписки — возвращайтесь и активируйте дополнительную скидку. '
-                        'Она суммируется с промогруппой и действует до {expires_at}.'
-                    ),
-                )
+            base_price = (
+                await self._resolve_renewal_cost_kopeks(db, subscription, user)
+                if db is not None
+                else max(0, int(getattr(settings, 'PRICE_30_DAYS', 0) or 0))
+            )
+            discounted_price = int(round(base_price * (100 - max(0, min(100, int(percent)))) / 100))
+
+            template = texts.get(
+                'SUBSCRIPTION_EXPIRED_SECOND_WAVE' if wave == 'second' else 'SUBSCRIPTION_EXPIRED_THIRD_WAVE',
+                (
+                    '⚠️ <b>Скидка {percent} % на продление подписки</b>\n\n'
+                    'Действует до <b>{expires_at}</b>\n'
+                    'Цена со скидкой: <b>{discounted_price}</b>\n\n'
+                    'Заберите скидку и продлите доступ.'
+                ),
+            )
 
             message = template.format(
                 percent=percent,
                 expires_at=format_local_datetime(expires_at, '%d.%m.%Y %H:%M'),
+                discounted_price=settings.format_price(discounted_price),
                 trigger_days=trigger_days or '',
                 tariff_label=tariff_label,
             )
 
-            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+            from aiogram.types import InlineKeyboardMarkup
 
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
                         build_miniapp_or_callback_button(
-                            text='🎁 Получить скидку', callback_data=f'claim_discount_{offer_id}'
-                        )
-                    ],
-                    [
-                        build_subscription_extend_button(
-                            texts.t('SUBSCRIPTION_EXTEND', '💎 Продлить подписку'),
-                            subscription.id,
+                            text=texts.t('CLAIM_DISCOUNT_BUTTON', 'Получить скидку'),
+                            callback_data=f'claim_discount_{offer_id}',
+                            style='primary',
+                            icon_custom_emoji_id='5334552404736104314',
                         )
                     ],
                     [
                         build_miniapp_or_callback_button(
-                            text=texts.t('BALANCE_TOPUP', '💳 Пополнить баланс'),
+                            text=texts.t('BALANCE_TOPUP', 'Пополнить баланс'),
                             callback_data='balance_topup',
-                        )
-                    ],
-                    [
-                        InlineKeyboardButton(
-                            text=texts.t('SUPPORT_BUTTON', '🆘 Поддержка'), callback_data='menu_support'
+                            icon_custom_emoji_id='5258500422393415126',
                         )
                     ],
                 ]
@@ -2547,18 +2691,27 @@ class MonitoringService:
         self, user: User, amount: int, days: int, *, subscription: Subscription | None = None
     ):
         try:
-            texts = get_texts(user.language)
-            tariff_label = ''
-            if (
-                settings.is_multi_tariff_enabled()
-                and subscription
-                and hasattr(subscription, 'tariff')
-                and subscription.tariff
-            ):
-                tariff_label = f' «{subscription.tariff.name}»'
-            message = texts.AUTOPAY_SUCCESS.format(days=days, amount=settings.format_price(amount))
-            if tariff_label:
-                message += f'\n📦 Тариф:{tariff_label}'
+            from app.utils.formatters import format_days_declension
+
+            texts = get_texts(getattr(user, 'language', 'ru'))
+            days_text = format_days_declension(days, getattr(user, 'language', 'ru'))
+            end_date = (
+                format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M')
+                if subscription is not None and getattr(subscription, 'end_date', None)
+                else '—'
+            )
+            message = texts.t(
+                'AUTOPAY_SUCCESS',
+                '\n✅ <b>Подписка продлена на {days_text}</b>\n\n'
+                'До <b>{end_date}</b>\n'
+                'Списано <b>{amount}</b> · баланс <b>{balance}</b>\n',
+            ).format(
+                days=days,
+                days_text=days_text,
+                end_date=end_date,
+                amount=settings.format_price(amount),
+                balance=settings.format_price(int(getattr(user, 'balance_kopeks', 0) or 0)),
+            )
             await self._send_message_with_logo(
                 chat_id=user.telegram_id,
                 text=message,
@@ -2586,48 +2739,85 @@ class MonitoringService:
         *,
         subscription: Subscription | None = None,
         is_final: bool = False,
+        merge_with_expiry: bool = False,
     ):
         try:
-            texts = get_texts(user.language)
+            from app.utils.formatters import format_days_declension
+
+            texts = get_texts(getattr(user, 'language', 'ru'))
+            tariff_label = ''
+            if settings.is_multi_tariff_enabled() and subscription and getattr(subscription, 'tariff', None):
+                tariff_label = f' «{subscription.tariff.name}»'
+
             if is_final:
-                template = texts.t(
-                    'AUTOPAY_FAILED_FINAL',
-                    '\n⏰ <b>Последнее напоминание</b>\n\n'
-                    'Подписка скоро отключится — автоплатёж не прошёл из-за нехватки средств.\n'
-                    'Баланс: {balance}\nТребуется: {required}\n\n'
-                    'Пополните баланс сейчас, чтобы не потерять доступ.\n',
+                template_key = 'AUTOPAY_FAILED_FINAL'
+                default = (
+                    '\n⏰ <b>Подписка отключится через 3 часа</b>\n\n'
+                    'Баланс <b>{balance}</b> · нужно <b>{required}</b>\n\n'
+                    'Пополните баланс сейчас, чтобы не потерять доступ.\n'
+                )
+            elif merge_with_expiry and subscription is not None:
+                template_key = 'AUTOPAY_FAILED_MERGED'
+                days_left = max(1, math.ceil((subscription.end_date - datetime.now(UTC)).total_seconds() / 86400))
+                days_text = format_days_declension(days_left, getattr(user, 'language', 'ru'))
+                default = (
+                    '\n⚠️ <b>Подписка{tariff_label} истекает через {days_text} — автоплатёж не прошёл</b>\n\n'
+                    'До <b>{end_date}</b>\n'
+                    'Баланс <b>{balance}</b> · нужно <b>{required}</b>\n\n'
+                    'Пополните баланс — продление пройдёт автоматически.\n'
                 )
             else:
-                template = texts.AUTOPAY_FAILED
-            message = template.format(balance=settings.format_price(balance), required=settings.format_price(required))
-            if (
-                settings.is_multi_tariff_enabled()
-                and subscription
-                and hasattr(subscription, 'tariff')
-                and subscription.tariff
-            ):
-                message += f'\n📦 Тариф: «{subscription.tariff.name}»'
+                template_key = 'AUTOPAY_FAILED'
+                default = (
+                    '\n⚠️ <b>Автоплатёж не прошёл</b>\n\n'
+                    'Баланс <b>{balance}</b> · нужно <b>{required}</b>\n\n'
+                    'Пополните баланс или продлите подписку вручную.\n'
+                )
+
+            template = texts.t(template_key, default)
+            format_kwargs = {
+                'balance': settings.format_price(balance),
+                'required': settings.format_price(required),
+                'tariff_label': tariff_label,
+            }
+            if template_key == 'AUTOPAY_FAILED_MERGED':
+                format_kwargs.update(
+                    end_date=format_local_datetime(subscription.end_date, '%d.%m.%Y %H:%M'),
+                    days_text=days_text,
+                    days=days_left,
+                )
+            message = template.format(**format_kwargs)
 
             from aiogram.types import InlineKeyboardMarkup
 
-            keyboard = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        build_miniapp_or_callback_button(
-                            text='💳 Пополнить баланс',
-                            callback_data='balance_topup',
-                            icon_custom_emoji_id='5258500422393415126',
-                        )
-                    ],
-                    [
-                        build_miniapp_or_callback_button(
-                            text='📱 Моя подписка',
-                            callback_data='menu_subscription',
-                            icon_custom_emoji_id='5431374840332302296',
-                        )
-                    ],
-                ]
+            sub_btn_text = texts.t(
+                'MY_SUBSCRIPTIONS_BUTTON' if settings.is_multi_tariff_enabled() else 'MY_SUBSCRIPTION_BUTTON',
+                'Мои подписки' if settings.is_multi_tariff_enabled() else 'Моя подписка',
             )
+            topup_button = build_miniapp_or_callback_button(
+                text=texts.t('BTN_TOPUP_BALANCE', 'Пополнить баланс'),
+                callback_data='balance_topup',
+                style='primary',
+                icon_custom_emoji_id='5258500422393415126',
+            )
+            sub_button = build_miniapp_or_callback_button(
+                text=sub_btn_text,
+                callback_data='menu_subscription',
+                icon_custom_emoji_id='5431374840332302296',
+            )
+            rows = [[topup_button]]
+            if template_key == 'AUTOPAY_FAILED_MERGED' and subscription is not None:
+                rows.append(
+                    [
+                        build_subscription_extend_button(
+                            texts.t('BTN_RENEW_SUBSCRIPTION', 'Продлить подписку'),
+                            subscription.id,
+                            icon_custom_emoji_id='5334552404736104314',
+                        )
+                    ]
+                )
+            rows.append([sub_button])
+            keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
 
             await self._send_message_with_logo(
                 chat_id=user.telegram_id,
@@ -2739,22 +2929,26 @@ class MonitoringService:
                 try:
                     language = getattr(user, 'language', 'ru') or 'ru'
                     texts = get_texts(language)
+                    remaining_percent = max(0.0, 100.0 - current_percent)
                     message = texts.get(
                         'TRAFFIC_WARNING_ALERT',
-                        '⚠️ <b>Предупреждение о трафике</b>\n\n'
-                        'Использовано: {used:.1f} / {limit} ГБ ({percent:.0f}%)\n\n'
-                        'Ваш лимит трафика почти исчерпан.',
+                        '⚠️ <b>Осталось {remaining_percent:.0f} % трафика</b>\n\n'
+                        'Использовано <b>{used:.1f} из {limit} ГБ</b>\n\n'
+                        'Докупите пакет трафика, чтобы скорость не снизилась.',
                     )
                     message = message.format(
                         used=traffic_used,
                         limit=traffic_limit,
                         percent=current_percent,
+                        remaining_percent=remaining_percent,
                     )
                     message = style_notification_text(message)
-                    await self.bot.send_message(
-                        user.telegram_id,
-                        message,
+                    await self._send_message_with_logo(
+                        chat_id=user.telegram_id,
+                        text=message,
                         parse_mode='HTML',
+                        reply_markup=build_traffic_warning_keyboard(texts),
+                        user=user,
                     )
                     try:
                         await cache.set(cache_key_str, '1', expire=86400)

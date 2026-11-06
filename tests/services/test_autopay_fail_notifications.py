@@ -198,7 +198,7 @@ async def test_maybe_notify_sends_first_then_silent(monkeypatch):
     svc = ms.MonitoringService(bot=object())  # truthy bot so the telegram branch is taken
     sent: list[bool] = []
 
-    async def fake_send(user, balance, required, *, subscription=None, is_final=False):
+    async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
         sent.append(is_final)
 
     monkeypatch.setattr(svc, '_send_autopay_failed_notification', fake_send)
@@ -224,7 +224,7 @@ async def test_maybe_notify_final_when_inside_window(monkeypatch):
     svc = ms.MonitoringService(bot=object())
     sent: list[bool] = []
 
-    async def fake_send(user, balance, required, *, subscription=None, is_final=False):
+    async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
         sent.append(is_final)
 
     monkeypatch.setattr(svc, '_send_autopay_failed_notification', fake_send)
@@ -312,7 +312,12 @@ async def test_save_persists_with_ttl_floor(monkeypatch):
 
     args, kwargs = set_mock.await_args
     assert args[0] == 'autopay_fail:7:111'
-    assert args[1] == {'count': 1, 'last_sent_ts': 5.0, 'final_sent': False}
+    assert args[1] == {
+        'count': 1,
+        'last_sent_ts': 5.0,
+        'final_sent': False,
+        'merged_expiring_ts': 0.0,
+    }
     assert kwargs['expire'] == 60  # floored up from 10
 
 
