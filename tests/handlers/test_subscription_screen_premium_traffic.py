@@ -86,7 +86,7 @@ def _states():
     ]
 
 
-async def _render(subscription, *, tariff=None):
+async def _render(subscription, *, tariff=None, hide_link: bool = True):
     """Отрисовать экран подписки и вернуть текст сообщения."""
     cb, user = _callback(), _user()
     user.subscription = subscription
@@ -115,7 +115,7 @@ async def _render(subscription, *, tariff=None):
         patch('app.config.Settings.is_multi_tariff_enabled', lambda self: False),
         patch('app.config.Settings.is_tariffs_mode', lambda self: True),
         patch('app.config.Settings.is_devices_selection_enabled', lambda self: False),
-        patch('app.config.Settings.should_hide_subscription_link', lambda self: True),
+        patch('app.config.Settings.should_hide_subscription_link', lambda self: hide_link),
         patch('app.config.Settings.is_happ_cryptolink_mode', lambda self: False),
     ]
 
@@ -171,3 +171,14 @@ async def test_exhausted_general_limit_hides_numbers_and_whitelists():
     assert 'Лимит трафика исчерпан — белые списки тоже недоступны' in text
     assert '32.7' not in text
     assert not _squad_lines(text), text
+
+
+@pytest.mark.anyio('asyncio')
+async def test_active_subscription_link_renders_without_name_error():
+    """Ссылка подписки требует локальный actual_status — регрессия после отката тела."""
+    sub = _subscription(limit_gb=100, used_gb=1.0)
+    sub.subscription_url = 'https://example.test/sub'
+
+    text = await _render(sub, tariff=_tariff(), hide_link=False)
+
+    assert 'https://example.test/sub' in text

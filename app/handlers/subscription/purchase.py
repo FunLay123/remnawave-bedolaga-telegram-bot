@@ -276,6 +276,19 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     await db.refresh(db_user)
     await db.refresh(db_user, ['subscriptions'])
 
+    current_time = datetime.now(UTC)
+
+    if subscription.status == 'limited':
+        actual_status = 'limited'
+    elif subscription.status == 'disabled':
+        actual_status = 'disabled'
+    elif subscription.status == 'expired' or subscription.end_date <= current_time:
+        actual_status = 'expired'
+    elif subscription.status == 'active' and subscription.end_date > current_time:
+        actual_status = 'trial_active' if subscription.is_trial else 'paid_active'
+    else:
+        actual_status = 'unknown'
+
     used_traffic = f'{subscription.traffic_used_gb:.1f}'
     if subscription.traffic_limit_gb == 0:
         traffic_used_display = texts.t(
