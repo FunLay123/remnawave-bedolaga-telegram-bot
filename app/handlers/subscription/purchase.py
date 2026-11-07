@@ -117,7 +117,7 @@ from app.utils.pricing_utils import (
     calculate_months_from_days,
     format_period_description,
 )
-from app.utils.subscription_time import format_expiry_warning, format_time_left
+from app.utils.subscription_time import format_time_left
 from app.utils.subscription_utils import (
     get_display_subscription_link,
     resolve_simple_subscription_device_limit,
@@ -157,7 +157,6 @@ from .devices import (
     confirm_change_devices,
     execute_change_devices,
     get_current_devices_count,
-    get_servers_display_names,
     handle_app_selection,
     handle_change_devices,
     handle_device_guide,
@@ -277,42 +276,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     await db.refresh(db_user)
     await db.refresh(db_user, ['subscriptions'])
 
-    current_time = datetime.now(UTC)
-
-    if subscription.status == 'limited':
-        actual_status = 'limited'
-        status_display = texts.t('SUBSCRIPTION_STATUS_LIMITED', 'Трафик исчерпан')
-        status_emoji = '⚠️'
-    elif subscription.status == 'disabled':
-        actual_status = 'disabled'
-        status_display = texts.t('SUBSCRIPTION_STATUS_DISABLED', 'Приостановлена')
-        status_emoji = '⏸️'
-    elif subscription.status == 'expired' or subscription.end_date <= current_time:
-        actual_status = 'expired'
-        status_display = texts.t('SUBSCRIPTION_STATUS_EXPIRED', 'Истекла')
-        status_emoji = '🔴'
-    elif subscription.status == 'active' and subscription.end_date > current_time:
-        if subscription.is_trial:
-            actual_status = 'trial_active'
-            status_display = texts.t('SUBSCRIPTION_STATUS_TRIAL', 'Тестовая')
-            status_emoji = '🎯'
-        else:
-            actual_status = 'paid_active'
-            status_display = texts.t('SUBSCRIPTION_STATUS_ACTIVE', 'Активна')
-            status_emoji = '💎'
-    else:
-        actual_status = 'unknown'
-        status_display = texts.t('SUBSCRIPTION_STATUS_UNKNOWN', 'Неизвестно')
-        status_emoji = '❓'
-
-    warning_text = format_expiry_warning(texts, subscription.end_date, current_time)
-
-    subscription_type = (
-        texts.t('SUBSCRIPTION_TYPE_TRIAL', 'Триал')
-        if subscription.is_trial
-        else texts.t('SUBSCRIPTION_TYPE_PAID', 'Платная')
-    )
-
     used_traffic = f'{subscription.traffic_used_gb:.1f}'
     if subscription.traffic_limit_gb == 0:
         traffic_used_display = texts.t(
@@ -367,11 +330,10 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             devices_used = await get_current_devices_count(db_user)
             devices_used_str = str(devices_used)
 
-    servers_names = await get_servers_display_names(subscription.connected_squads)
-    servers_display = servers_names or texts.t('SUBSCRIPTION_NO_SERVERS', 'Нет серверов')
+    device_limit_value = int(subscription.device_limit or 0)
+    devices_over_limit = device_limit_value > 0 and devices_count > device_limit_value
 
     # Получаем информацию о тарифе для режима тарифов
-    tariff_info_block = ''
     tariff = None
     if settings.is_tariffs_mode() and subscription.tariff_id:
         try:
@@ -381,84 +343,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             if tariff:
                 # Прикрепляем тариф к подписке для использования в клавиатуре
                 subscription.tariff = tariff
-
-                # Формируем блок информации о тарифе
-                is_daily = getattr(tariff, 'is_daily', False)
-                tariff_type_str = '🔄 Суточный' if is_daily else '📅 Периодный'
-
-                tariff_info_lines = [
-                    f'<b>📦 {html.escape(tariff.name)}</b>',
-                    f'Тип: {tariff_type_str}',
-                    f'Трафик: {tariff.traffic_limit_gb} ГБ' if tariff.traffic_limit_gb > 0 else 'Трафик: ∞ Безлимит',
-                    f'Устройства: {Texts.format_device_limit(tariff.device_limit)}',
-                ]
-
-                if is_daily:
-                    # Для суточного тарифа показываем цену с учётом скидки промогруппы + promo-offer
-                    raw_daily_kopeks = getattr(tariff, 'daily_price_kopeks', 0)
-                    promo_group = (
-                        db_user.get_primary_promo_group() if hasattr(db_user, 'get_primary_promo_group') else None
-                    )
-                    daily_group_pct = promo_group.get_discount_percent('period', 1) if promo_group else 0
-                    from app.services.pricing_engine import PricingEngine
-                    from app.utils.promo_offer import get_user_active_promo_discount_percent
-
-                    daily_offer_pct = get_user_active_promo_discount_percent(db_user)
-                    if daily_group_pct > 0 or daily_offer_pct > 0:
-                        daily_kopeks, _, _ = PricingEngine.apply_stacked_discounts(
-                            raw_daily_kopeks, daily_group_pct, daily_offer_pct
-                        )
-                    else:
-                        daily_kopeks = raw_daily_kopeks
-                    daily_price = daily_kopeks / 100
-                    tariff_info_lines.append(f'Цена: {daily_price:.2f} ₽/день')
-
-                    # Прогресс-бар до следующего списания
-                    last_charge = getattr(subscription, 'last_daily_charge_at', None)
-                    is_paused = getattr(subscription, 'is_daily_paused', False)
-
-                    if is_paused:
-                        tariff_info_lines.append('')
-                        tariff_info_lines.append('⏸️ <b>Подписка приостановлена</b>')
-                        # Показываем оставшееся время даже при паузе
-                        if last_charge:
-                            next_charge = last_charge + timedelta(hours=24)
-                            now = datetime.now(UTC)
-                            if next_charge > now:
-                                time_until = next_charge - now
-                                hours_left = time_until.seconds // 3600
-                                minutes_left = (time_until.seconds % 3600) // 60
-                                tariff_info_lines.append(f'⏳ Осталось: {hours_left}ч {minutes_left}мин')
-                                tariff_info_lines.append('💤 Списание приостановлено')
-                    elif last_charge:
-                        next_charge = last_charge + timedelta(hours=24)
-                        now = datetime.now(UTC)
-
-                        if next_charge > now:
-                            time_until = next_charge - now
-                            hours_left = time_until.seconds // 3600
-                            minutes_left = (time_until.seconds % 3600) // 60
-
-                            # Процент оставшегося времени (24 часа = 100%)
-                            total_seconds = 24 * 3600
-                            remaining_seconds = time_until.total_seconds()
-                            percent = min(100, max(0, (remaining_seconds / total_seconds) * 100))
-
-                            # Генерируем прогресс-бар
-                            bar_length = 10
-                            filled = int(bar_length * percent / 100)
-                            empty = bar_length - filled
-                            progress_bar = '▓' * filled + '░' * empty
-
-                            tariff_info_lines.append('')
-                            tariff_info_lines.append(f'⏳ До списания: {hours_left}ч {minutes_left}мин')
-                            tariff_info_lines.append(f'[{progress_bar}] {percent:.0f}%')
-                    else:
-                        tariff_info_lines.append('')
-                        tariff_info_lines.append('⏳ Первое списание скоро')
-
-                tariff_info_block = '\n<blockquote expandable>' + '\n'.join(tariff_info_lines) + '</blockquote>'
-
         except Exception as e:
             logger.warning('Ошибка получения тарифа', error=e, exc_info=True)
 
@@ -531,16 +415,8 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     device_limit_display = Texts.format_device_limit(subscription.device_limit)
 
     message = message_template.format(
-        full_name=html.escape(db_user.full_name or ''),
-        balance=settings.format_price(db_user.balance_kopeks),
-        status_emoji=status_emoji,
-        status_display=status_display,
-        warning=warning_text,
-        tariff_info_block=tariff_info_block,
-        subscription_type=subscription_type,
         end_date=end_date_text,
         traffic=traffic_used_display,
-        servers=servers_display,
         devices_used=devices_used_str,
         device_limit=device_limit_display,
     )
@@ -639,6 +515,7 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             subscription=subscription,
             gift_enabled=gift_enabled,
             has_premium_topup=has_premium_topup,
+            devices_over_limit=devices_over_limit,
         ),
         parse_mode='HTML',
     )

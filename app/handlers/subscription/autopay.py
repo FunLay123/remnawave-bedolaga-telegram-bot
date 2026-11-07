@@ -99,6 +99,15 @@ async def handle_autopay_menu(callback: types.CallbackQuery, db_user: User, db: 
         )
         return
 
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled') and not getattr(
+        subscription, 'autopay_enabled', False
+    ):
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     # Суточные подписки имеют свой механизм продления, глобальный autopay не применяется
     try:
         await db.refresh(subscription, ['tariff'])
@@ -195,6 +204,16 @@ async def toggle_autopay(callback: types.CallbackQuery, db_user: User, db: Async
         enable = False
     else:
         enable = not subscription.autopay_enabled
+
+    # На неактивной подписке включать автоплатёж нечего продлевать; выключить
+    # разрешаем всегда — иначе старую привязку не остановить из бота.
+    if enable and (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        texts = get_texts(db_user.language)
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
 
     if enable:
         # Trial subscriptions cannot use autopay

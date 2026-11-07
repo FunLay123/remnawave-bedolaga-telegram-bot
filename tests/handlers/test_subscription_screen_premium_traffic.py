@@ -101,7 +101,6 @@ async def _render(subscription, *, tariff=None):
 
     patches = [
         patch.object(purchase_mod, 'SubscriptionService', lambda: service),
-        patch.object(purchase_mod, 'get_servers_display_names', new=AsyncMock(return_value='')),
         patch(
             'app.database.crud.subscription.check_and_update_subscription_status',
             new=AsyncMock(return_value=subscription),

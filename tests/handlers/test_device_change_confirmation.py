@@ -39,12 +39,13 @@ def _user(balance_kopeks: int = 10_000_000):
     return user
 
 
-def _subscription(device_limit: int = 3):
+def _subscription(device_limit: int = 3, status: str = 'active'):
     sub = MagicMock()
     sub.id = SUB_ID
     sub.is_trial = False
     sub.tariff_id = TARIFF_ID
     sub.device_limit = device_limit
+    sub.actual_status = status
     sub.connected_squads = []
     sub.end_date = datetime.now(UTC) + timedelta(days=30)
     return sub
@@ -135,3 +136,28 @@ async def test_confirmation_rejects_more_than_ten_devices():
     cb.message.edit_text.assert_not_awaited()
     assert cb.answer.await_args.kwargs['show_alert'] is True
     assert '10' in cb.answer.await_args.args[0]
+
+
+@pytest.mark.anyio('asyncio')
+async def test_inactive_subscription_cannot_buy_more_devices():
+    """Истёкшая/отключённая подписка не должна списывать доплату за устройства."""
+    cb = _callback('change_devices_5')
+    with (
+        patch.object(
+            devices_mod,
+            '_resolve_subscription',
+            new=AsyncMock(return_value=(_subscription(3, status='expired'), SUB_ID)),
+        ),
+        patch('app.database.crud.tariff.get_tariff_by_id', new=AsyncMock(return_value=_tariff())),
+    ):
+        await devices_mod.confirm_change_devices(cb, _user(), AsyncMock(), None)
+
+    cb.message.edit_text.assert_not_awaited()
+    assert cb.answer.await_args.kwargs.get('show_alert') is True
+
+
+@pytest.mark.anyio('asyncio')
+async def test_inactive_subscription_can_reduce_devices():
+    """Уменьшение/сброс устройств на неактивной подписке разрешено — так чинится 3/1."""
+    text = await _run('change_devices_3', _subscription(4, status='expired'), connected=4)
+    assert '4 → 3' in text

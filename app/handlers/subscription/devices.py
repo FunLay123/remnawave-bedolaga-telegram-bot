@@ -346,6 +346,18 @@ async def confirm_change_devices(
 
     current_devices = subscription.device_limit
 
+    # На истёкшей/отключённой подписке нельзя докупать устройства: это списание
+    # за период, которого нет. Уменьшение/сброс разрешаем — так чинится 3/1.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in (
+        'expired',
+        'disabled',
+    ) and new_devices_count > current_devices:
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     if new_devices_count == current_devices:
         await callback.answer(
             texts.t('DEVICES_NO_CHANGE', 'ℹ️ Количество устройств не изменилось'),

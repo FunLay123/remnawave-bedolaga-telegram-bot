@@ -1129,6 +1129,7 @@ def get_subscription_keyboard(
     gift_enabled: bool = False,
     has_premium_topup: bool = False,
     show_trial: bool = False,
+    devices_over_limit: bool = False,
 ) -> InlineKeyboardMarkup:
     from app.config import settings
 
@@ -1171,8 +1172,10 @@ def get_subscription_keyboard(
     )
 
     if has_subscription:
+        actual_status = (getattr(subscription, 'actual_status', None) or '').lower()
+        is_inactive = actual_status in ('expired', 'disabled')
         happ_row = get_happ_download_button_row(texts)
-        if happ_row:
+        if happ_row and not is_inactive:
             keyboard.append(happ_row)
 
         if is_trial:
@@ -1243,17 +1246,34 @@ def get_subscription_keyboard(
                     text='Автоплатёж', callback_data='subscription_autopay', icon_custom_emoji_id='5454156248813432363'
                 )
 
-            # [Устройства] [Автоплатёж] — автоплатёж есть только у обычного тарифа
-            devices_row = [
-                InlineKeyboardButton(
-                    text='Устройства',
-                    callback_data='subscription_manage_devices',
-                    icon_custom_emoji_id=DEVICES_BUTTON_ICON_ID,
+            # Истёкшей/отключённой подписке автоплатёж не нужен: включать его
+            # на неактивной подписке бессмысленно. Устройства оставляем только
+            # когда лимит реально превышен — это единственный способ починить 3/1.
+            if is_inactive:
+                autopay_button = None
+            if not is_inactive or devices_over_limit:
+                devices_row = [
+                    InlineKeyboardButton(
+                        text='Устройства',
+                        callback_data='subscription_manage_devices',
+                        icon_custom_emoji_id=DEVICES_BUTTON_ICON_ID,
+                    )
+                ]
+                if autopay_button is not None:
+                    devices_row.append(autopay_button)
+                keyboard.append(devices_row)
+            # Если автоплатёж уже был привязан, на неактивной подписке оставляем
+            # вход только чтобы выключить его — иначе привязку не остановить.
+            if is_inactive and getattr(subscription, 'autopay_enabled', False):
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            text='Автоплатёж',
+                            callback_data='subscription_autopay',
+                            icon_custom_emoji_id='5454156248813432363',
+                        )
+                    ]
                 )
-            ]
-            if autopay_button is not None:
-                devices_row.append(autopay_button)
-            keyboard.append(devices_row)
 
             # «Настройки» показываем, только если в них есть что-то кроме «Назад»
             # (управление устройствами и перевыпуск вынесены отдельными пунктами ниже).
@@ -1264,7 +1284,7 @@ def get_subscription_keyboard(
                 subscription=subscription,
                 is_legacy_subscription=is_legacy_subscription,
             )
-            if len(settings_markup.inline_keyboard) > 1:
+            if len(settings_markup.inline_keyboard) > 1 and not is_inactive:
                 keyboard.append(
                     [
                         InlineKeyboardButton(
@@ -1273,10 +1293,12 @@ def get_subscription_keyboard(
                         )
                     ]
                 )
-            # Вкладка «Тариф» скрыта. Для истёкшей/отключённой подписки оставляем
-            # «Купить тариф» — иначе из экрана некуда вернуться к покупке.
+            # В single-tariff «Продлить» — единственное действие по тарифу;
+            # «Купить тариф» дублирует его и вдобавок сбрасывает трафик при
+            # покупке. Оставляем кнопку только для мульти-тарифа.
             if (
-                settings.is_tariffs_mode()
+                settings.is_multi_tariff_enabled()
+                and settings.is_tariffs_mode()
                 and subscription
                 and not is_legacy_subscription
                 and getattr(subscription, 'actual_status', None) in ('expired', 'disabled')
@@ -1307,7 +1329,7 @@ def get_subscription_keyboard(
             if has_premium_topup:
                 show_traffic_topup = True
 
-            if show_traffic_topup:
+            if show_traffic_topup and not is_inactive:
                 keyboard.append(
                     [
                         InlineKeyboardButton(
@@ -1331,7 +1353,7 @@ def get_subscription_keyboard(
 
     # [Перевыпустить] [Промокод]
     revoke_promo_row: list[InlineKeyboardButton] = []
-    if has_subscription and settings.is_subscription_revoke_enabled():
+    if has_subscription and settings.is_subscription_revoke_enabled() and not is_inactive:
         revoke_promo_row.append(
             InlineKeyboardButton(
                 text='Перевыпустить', callback_data='subscription_revoke', icon_custom_emoji_id='4911241630633165627'

@@ -106,3 +106,107 @@ async def test_trial_subscription_still_rejected(monkeypatch):
 
     mock_update.assert_not_awaited()
     cb.answer.assert_awaited()
+
+
+@pytest.mark.anyio('asyncio')
+async def test_inactive_subscription_cannot_enable_autopay(monkeypatch):
+    """На истёкшей/отключённой подписке включать автоплатёж нечего продлевать."""
+    cb = SimpleNamespace(data='autopay_toggle', answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
+    user = SimpleNamespace(language='ru', id=1)
+    subscription = SimpleNamespace(
+        id=10,
+        user_id=1,
+        is_trial=False,
+        tariff_id=5,
+        tariff=None,
+        autopay_enabled=False,
+        actual_status='expired',
+    )
+
+    monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
+    mock_update = AsyncMock(return_value=subscription)
+    monkeypatch.setattr(autopay_mod, 'update_subscription_autopay', mock_update)
+
+    await autopay_mod.toggle_autopay(cb, user, AsyncMock())
+
+    mock_update.assert_not_awaited()
+    assert cb.answer.await_args.kwargs.get('show_alert') is True
+
+
+@pytest.mark.anyio('asyncio')
+async def test_inactive_subscription_can_disable_autopay(monkeypatch):
+    """Выключить старую привязку можно даже на неактивной подписке."""
+    cb = SimpleNamespace(data='autopay_toggle', answer=AsyncMock(), message=SimpleNamespace(edit_text=AsyncMock()))
+    user = SimpleNamespace(language='ru', id=1)
+    subscription = SimpleNamespace(
+        id=10,
+        user_id=1,
+        is_trial=False,
+        tariff_id=5,
+        tariff=None,
+        autopay_enabled=True,
+        actual_status='expired',
+    )
+
+    monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
+    mock_update = AsyncMock(return_value=subscription)
+    monkeypatch.setattr(autopay_mod, 'update_subscription_autopay', mock_update)
+    monkeypatch.setattr(autopay_mod, 'handle_autopay_menu', AsyncMock())
+
+    await autopay_mod.toggle_autopay(cb, user, AsyncMock())
+
+    assert mock_update.await_args.args[2] is False
+
+
+@pytest.mark.anyio('asyncio')
+async def test_autopay_menu_blocked_for_inactive(monkeypatch):
+    cb = SimpleNamespace(
+        data='subscription_autopay',
+        answer=AsyncMock(),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+    )
+    user = SimpleNamespace(language='ru', id=1)
+    subscription = SimpleNamespace(
+        id=10,
+        user_id=1,
+        is_trial=False,
+        tariff_id=5,
+        tariff=None,
+        autopay_enabled=False,
+        actual_status='disabled',
+    )
+
+    monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
+
+    await autopay_mod.handle_autopay_menu(cb, user, AsyncMock(), None)
+
+    cb.message.edit_text.assert_not_awaited()
+    assert cb.answer.await_args.kwargs.get('show_alert') is True
+
+
+@pytest.mark.anyio('asyncio')
+async def test_autopay_menu_allowed_for_inactive_when_bound(monkeypatch):
+    """Если автоплатёж уже привязан, экран открывается, чтобы его выключить."""
+    cb = SimpleNamespace(
+        data='subscription_autopay',
+        answer=AsyncMock(),
+        message=SimpleNamespace(edit_text=AsyncMock()),
+    )
+    user = SimpleNamespace(language='ru', id=1)
+    subscription = SimpleNamespace(
+        id=10,
+        user_id=1,
+        is_trial=False,
+        tariff_id=5,
+        tariff=None,
+        autopay_enabled=True,
+        autopay_days_before=3,
+        autopay_period_days=None,
+        actual_status='disabled',
+    )
+
+    monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
+
+    await autopay_mod.handle_autopay_menu(cb, user, AsyncMock(), None)
+
+    cb.message.edit_text.assert_awaited()

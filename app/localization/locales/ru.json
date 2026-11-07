@@ -2152,6 +2152,7 @@
   "GUIDE_CONFIG_NOT_SET": "⚠️ <b>Конфигурация не настроена</b>\n\nАдминистратор ещё не настроил конфигурацию приложений.\nОбратитесь к администратору.",
   "SUBSCRIPTION_STATUS_LIMITED": "Трафик исчерпан",
   "SUBSCRIPTION_STATUS_DISABLED": "Приостановлена",
+  "SUBSCRIPTION_RENEW_REQUIRED": "Сначала продлите подписку",
   "SUBSCRIPTION_PURCHASED_TRAFFIC_FOOTER": "</blockquote>",
   "SUBSCRIPTION_PURCHASED_TRAFFIC_TITLE": "<blockquote>📦 <b>Докупленный трафик:</b>\n",
   "TRIAL_DISABLED_FOR_USER_TYPE": "Пробный период недоступен",
