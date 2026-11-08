@@ -200,6 +200,7 @@ async def test_maybe_notify_sends_first_then_silent(monkeypatch):
 
     async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
         sent.append(is_final)
+        return True
 
     monkeypatch.setattr(svc, '_send_autopay_failed_notification', fake_send)
     monkeypatch.setattr(ms.cache, 'get', AsyncMock(return_value=None))
@@ -226,6 +227,7 @@ async def test_maybe_notify_final_when_inside_window(monkeypatch):
 
     async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
         sent.append(is_final)
+        return True
 
     monkeypatch.setattr(svc, '_send_autopay_failed_notification', fake_send)
     monkeypatch.setattr(ms.cache, 'get', AsyncMock(return_value=None))

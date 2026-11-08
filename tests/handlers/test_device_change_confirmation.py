@@ -161,3 +161,36 @@ async def test_inactive_subscription_can_reduce_devices():
     """Уменьшение/сброс устройств на неактивной подписке разрешено — так чинится 3/1."""
     text = await _run('change_devices_3', _subscription(4, status='expired'), connected=4)
     assert '4 → 3' in text
+
+
+@pytest.mark.anyio('asyncio')
+async def test_execute_change_devices_rejects_inactive_increase():
+    """Старое подтверждение не должно списать доплату за мёртвый период."""
+    cb = _callback('execute_change_devices_5_1000')
+    user = _user()
+    with (
+        patch.object(devices_mod, 'lock_user_for_pricing', new=AsyncMock(return_value=user)),
+        patch.object(
+            devices_mod,
+            '_resolve_subscription',
+            new=AsyncMock(return_value=(_subscription(3, status='expired'), SUB_ID)),
+        ),
+    ):
+        await devices_mod.execute_change_devices(cb, user, AsyncMock(), None)
+
+    cb.answer.assert_awaited()
+    assert cb.answer.await_args.kwargs.get('show_alert') is True
+
+
+@pytest.mark.anyio('asyncio')
+async def test_confirm_add_devices_rejects_inactive():
+    cb = _callback('add_devices_1')
+    with patch.object(
+        devices_mod,
+        '_resolve_subscription',
+        new=AsyncMock(return_value=(_subscription(3, status='disabled'), SUB_ID)),
+    ):
+        await devices_mod.confirm_add_devices(cb, _user(), AsyncMock(), None)
+
+    cb.answer.assert_awaited()
+    assert cb.answer.await_args.kwargs.get('show_alert') is True

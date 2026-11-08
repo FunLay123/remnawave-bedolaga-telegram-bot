@@ -357,7 +357,7 @@ async def test_maybe_notify_autopay_failure_marks_merged_expiring(monkeypatch):
 
     monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
     monkeypatch.setattr(service, '_save_autopay_fail_state', fake_save)
-    monkeypatch.setattr(service, '_send_autopay_failed_notification', AsyncMock())
+    monkeypatch.setattr(service, '_send_autopay_failed_notification', AsyncMock(return_value=True))
     monkeypatch.setattr(ms, 'is_subscription_expiry_enabled', lambda _user: True)
 
     now = datetime.now(UTC)
@@ -644,3 +644,116 @@ def test_tariff_traffic_keyboard_premium_button_has_icon():
     }
     assert buttons['premium_traffic_topup'].icon_custom_emoji_id == '5335020345717973061'
     assert '💠' not in buttons['premium_traffic_topup'].text
+
+
+async def test_maybe_notify_does_not_merge_outside_user_window(monkeypatch):
+    """Пользователь сузил окно до 1 дня — карточка «через 3 дня» не должна уходить."""
+    from app.services import monitoring_service as ms
+
+    service = MonitoringService(bot=object())
+    sent: list[bool] = []
+
+    async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
+        sent.append(merge_with_expiry)
+        return True
+
+    monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
+    monkeypatch.setattr(service, '_save_autopay_fail_state', AsyncMock())
+    monkeypatch.setattr(service, '_send_autopay_failed_notification', fake_send)
+    monkeypatch.setattr(ms, 'is_subscription_expiry_enabled', lambda _user: True)
+
+    now = datetime.now(UTC)
+    user = SimpleNamespace(
+        id=1,
+        telegram_id=555,
+        balance_kopeks=0,
+        notification_settings={'subscription_expiry_days': 1},
+    )
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=40))
+
+    await service._maybe_notify_autopay_failure(user, 15000, sub, now)
+
+    assert sent == [False]
+
+
+async def test_maybe_notify_failed_send_does_not_mark_merged_expiring(monkeypatch):
+    """Если отправка упала, плановое предупреждение нельзя глушить на час."""
+    from app.services import monitoring_service as ms
+
+    service = MonitoringService(bot=object())
+    saved: dict = {}
+
+    async def fake_save(subscription_id, cycle_token, state, ttl_seconds):
+        saved.update(state.to_dict())
+
+    monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
+    monkeypatch.setattr(service, '_save_autopay_fail_state', fake_save)
+    monkeypatch.setattr(service, '_send_autopay_failed_notification', AsyncMock(return_value=False))
+    monkeypatch.setattr(ms, 'is_subscription_expiry_enabled', lambda _user: True)
+
+    now = datetime.now(UTC)
+    user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0, notification_settings={})
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=40))
+
+    await service._maybe_notify_autopay_failure(user, 15000, sub, now)
+
+    assert saved['merged_expiring_ts'] == 0.0
+
+
+# ── Multi-tariff labels: one subscription must be identifiable ──────────────
+
+
+async def test_autopay_success_keeps_tariff_label_in_multi_tariff(monkeypatch):
+    _set_sender_settings(monkeypatch)
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: True)
+    bot = _sender_bot()
+    service = MonitoringService(bot=bot)
+
+    await service._send_autopay_success_notification(
+        _sender_user(balance=50000),
+        15000,
+        30,
+        subscription=_sender_subscription(tariff=SimpleNamespace(name='Тест')),
+    )
+
+    text = bot.send_message.await_args.kwargs['text']
+    assert 'Тариф: «Тест»' in text
+
+
+async def test_expired_notification_keeps_tariff_label_in_multi_tariff(monkeypatch):
+    _set_sender_settings(monkeypatch)
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: True)
+    bot = _sender_bot()
+    service = MonitoringService(bot=bot)
+
+    result = await service._send_subscription_expired_notification(
+        _sender_user(),
+        _sender_subscription(),
+        tariff_name='Тест',
+        price_kopeks=15000,
+    )
+
+    assert result is True
+    text = bot.send_message.await_args.kwargs['text']
+    assert 'Подписка «Тест» закончилась' in text
+
+
+async def test_discount_wave_keeps_tariff_label_in_multi_tariff(monkeypatch):
+    _set_sender_settings(monkeypatch)
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: True)
+    bot = _sender_bot()
+    service = MonitoringService(bot=bot)
+
+    result = await service._send_expired_discount_notification(
+        db=None,
+        user=_sender_user(),
+        subscription=_sender_subscription(hours=-48, tariff=SimpleNamespace(name='Тест')),
+        percent=10,
+        expires_at=datetime.now(UTC) + timedelta(hours=24),
+        offer_id=1,
+        wave='second',
+    )
+
+    assert result is True
+    text = bot.send_message.await_args.kwargs['text']
+    assert '«Тест»' in text

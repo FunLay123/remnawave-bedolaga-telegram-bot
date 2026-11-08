@@ -23,6 +23,14 @@ def test_cross_and_clock_use_warning_icon():
         assert f'<tg-emoji emoji-id="{MILL_EMOJI_ID}">{glyph}</tg-emoji>' not in styled
 
 
+def test_stop_sign_uses_warning_icon():
+    """⛔ — «Подписка закончилась» — должен читаться как предупреждение."""
+    styled = style_notification_text('⛔ Подписка закончилась')
+
+    assert f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">⛔</tg-emoji>' in styled
+    assert f'<tg-emoji emoji-id="{MILL_EMOJI_ID}">⛔</tg-emoji>' not in styled
+
+
 def test_other_leading_emoji_keeps_mill():
     styled = style_notification_text('✅ Готово')
 

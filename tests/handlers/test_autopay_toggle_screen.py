@@ -151,11 +151,14 @@ async def test_inactive_subscription_can_disable_autopay(monkeypatch):
     monkeypatch.setattr(autopay_mod, '_resolve_subscription', AsyncMock(return_value=(subscription, 10)))
     mock_update = AsyncMock(return_value=subscription)
     monkeypatch.setattr(autopay_mod, 'update_subscription_autopay', mock_update)
-    monkeypatch.setattr(autopay_mod, 'handle_autopay_menu', AsyncMock())
+    menu_mock = AsyncMock()
+    monkeypatch.setattr(autopay_mod, 'handle_autopay_menu', menu_mock)
 
     await autopay_mod.toggle_autopay(cb, user, AsyncMock())
 
     assert mock_update.await_args.args[2] is False
+    menu_mock.assert_not_awaited()
+    cb.message.edit_text.assert_awaited()
 
 
 @pytest.mark.anyio('asyncio')

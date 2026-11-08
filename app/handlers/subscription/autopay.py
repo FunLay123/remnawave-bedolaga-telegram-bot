@@ -278,6 +278,17 @@ async def toggle_autopay(callback: types.CallbackQuery, db_user: User, db: Async
     status = texts.t('AUTOPAY_STATUS_ENABLED', 'включен') if enable else texts.t('AUTOPAY_STATUS_DISABLED', 'выключен')
     await callback.answer(texts.t('AUTOPAY_TOGGLE_SUCCESS', '✅ Автоплатеж {status}!').format(status=status))
 
+    # После выключения на неактивной подписке menu больше не откроется (guard
+    # выше), поэтому не перерисовываем его: показываем нейтральный экран.
+    if not enable and (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        await callback.message.edit_text(
+            texts.t('AUTOPAY_DISABLED_SCREEN', 'Автоплатёж выключен'),
+            reply_markup=types.InlineKeyboardMarkup(
+                inline_keyboard=[[types.InlineKeyboardButton(text=texts.BACK, callback_data='menu_subscription')]]
+            ),
+        )
+        return
+
     try:
         await handle_autopay_menu(callback, db_user, db, state)
     except TelegramBadRequest as e:

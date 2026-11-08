@@ -1136,6 +1136,7 @@ def get_subscription_keyboard(
     texts = get_texts(language)
     keyboard = []
     autopay_button: InlineKeyboardButton | None = None
+    hide_dead_actions = False
 
     # Покупка и пробный период живут не на главном экране, а здесь: человеку
     # без подписки больше некуда нажать, кроме как «Подключиться» → «Подписка».
@@ -1173,9 +1174,9 @@ def get_subscription_keyboard(
 
     if has_subscription:
         actual_status = (getattr(subscription, 'actual_status', None) or '').lower()
-        is_inactive = actual_status in ('expired', 'disabled')
+        hide_dead_actions = actual_status in ('expired', 'disabled')
         happ_row = get_happ_download_button_row(texts)
-        if happ_row and not is_inactive:
+        if happ_row and not hide_dead_actions:
             keyboard.append(happ_row)
 
         if is_trial:
@@ -1204,13 +1205,13 @@ def get_subscription_keyboard(
 
                 sub_status = getattr(subscription, 'status', None)
                 is_paused = getattr(subscription, 'is_daily_paused', False)
-                is_inactive = sub_status in (
+                is_daily_inactive = sub_status in (
                     SubscriptionStatus.DISABLED.value,
                     SubscriptionStatus.EXPIRED.value,
                     SubscriptionStatus.LIMITED.value,
                 )
 
-                if is_inactive or is_paused:
+                if is_daily_inactive or is_paused:
                     # Подписка остановлена (системой или пользователем) — показываем «Возобновить»
                     pause_text = texts.t('RESUME_DAILY_BUTTON', '▶️ Возобновить подписку')
                 else:
@@ -1249,9 +1250,9 @@ def get_subscription_keyboard(
             # Истёкшей/отключённой подписке автоплатёж не нужен: включать его
             # на неактивной подписке бессмысленно. Устройства оставляем только
             # когда лимит реально превышен — это единственный способ починить 3/1.
-            if is_inactive:
+            if hide_dead_actions:
                 autopay_button = None
-            if not is_inactive or devices_over_limit:
+            if not hide_dead_actions or devices_over_limit:
                 devices_row = [
                     InlineKeyboardButton(
                         text='Устройства',
@@ -1264,7 +1265,7 @@ def get_subscription_keyboard(
                 keyboard.append(devices_row)
             # Если автоплатёж уже был привязан, на неактивной подписке оставляем
             # вход только чтобы выключить его — иначе привязку не остановить.
-            if is_inactive and getattr(subscription, 'autopay_enabled', False):
+            if hide_dead_actions and getattr(subscription, 'autopay_enabled', False):
                 keyboard.append(
                     [
                         InlineKeyboardButton(
@@ -1284,7 +1285,7 @@ def get_subscription_keyboard(
                 subscription=subscription,
                 is_legacy_subscription=is_legacy_subscription,
             )
-            if len(settings_markup.inline_keyboard) > 1 and not is_inactive:
+            if len(settings_markup.inline_keyboard) > 1 and not hide_dead_actions:
                 keyboard.append(
                     [
                         InlineKeyboardButton(
@@ -1329,7 +1330,7 @@ def get_subscription_keyboard(
             if has_premium_topup:
                 show_traffic_topup = True
 
-            if show_traffic_topup and not is_inactive:
+            if show_traffic_topup and not hide_dead_actions:
                 keyboard.append(
                     [
                         InlineKeyboardButton(
@@ -1340,7 +1341,7 @@ def get_subscription_keyboard(
                     ]
                 )
 
-    if has_subscription and is_trial:
+    if has_subscription and is_trial and (not hide_dead_actions or devices_over_limit):
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -1353,7 +1354,7 @@ def get_subscription_keyboard(
 
     # [Перевыпустить] [Промокод]
     revoke_promo_row: list[InlineKeyboardButton] = []
-    if has_subscription and settings.is_subscription_revoke_enabled() and not is_inactive:
+    if has_subscription and settings.is_subscription_revoke_enabled() and not hide_dead_actions:
         revoke_promo_row.append(
             InlineKeyboardButton(
                 text='Перевыпустить', callback_data='subscription_revoke', icon_custom_emoji_id='4911241630633165627'

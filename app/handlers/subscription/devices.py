@@ -593,6 +593,19 @@ async def execute_change_devices(
         return
     current_devices = subscription.device_limit
 
+    # Подтверждение могло быть создано до истечения/отключения подписки.
+    # Увеличение устройств — это оплата периода, которого уже нет; блокируем
+    # и здесь, у списания, а не только на экране подтверждения.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in (
+        'expired',
+        'disabled',
+    ) and new_devices_count > current_devices:
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     # Проверяем тариф подписки
     tariff = None
     if subscription.tariff_id:
@@ -1413,6 +1426,15 @@ async def confirm_add_devices(callback: types.CallbackQuery, db_user: User, db: 
     texts = get_texts(db_user.language)
     subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
     if subscription is None:
+        return
+
+    # Старая кнопка добавления на неактивной подписке — тот же запрет, что и
+    # в confirm_change_devices: нельзя оплачивать устройства в мёртвый период.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
         return
 
     # Проверяем тариф подписки

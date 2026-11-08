@@ -11,7 +11,7 @@
 Тест гоняет настоящий ``show_subscription_info`` с замоканным вводом-выводом.
 """
 
-from contextlib import ExitStack
+from contextlib import ExitStack, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -86,8 +86,30 @@ def _states():
     ]
 
 
-async def _render(subscription, *, tariff=None, hide_link: bool = True):
-    """Отрисовать экран подписки и вернуть текст сообщения."""
+@asynccontextmanager
+async def _remnawave_client(total: int):
+    api = SimpleNamespace(get_user_devices=AsyncMock(return_value={'total': total, 'devices': []}))
+    yield api
+
+
+class _FakeRemnawaveService:
+    def __init__(self, total: int):
+        self.total = total
+
+    def get_api_client(self):
+        return _remnawave_client(self.total)
+
+
+async def _render(
+    subscription,
+    *,
+    tariff=None,
+    hide_link: bool = True,
+    show_devices: bool = False,
+    devices_total: int = 0,
+    return_keyboard: bool = False,
+):
+    """Отрисовать экран подписки и вернуть текст (и клавиатуру, если нужно)."""
     cb, user = _callback(), _user()
     user.subscription = subscription
     db = MagicMock()
@@ -111,10 +133,11 @@ async def _render(subscription, *, tariff=None, hide_link: bool = True):
             'app.database.crud.server_squad.get_squad_display_names',
             new=AsyncMock(return_value={SQUAD_CH: 'Швейцария', SQUAD_NL: 'Нидерланды'}),
         ),
+        patch('app.services.remnawave_service.RemnaWaveService', lambda: _FakeRemnawaveService(devices_total)),
         patch('app.handlers.subscription.traffic._get_purchasable_premium_squads', new=AsyncMock(return_value=[])),
         patch('app.config.Settings.is_multi_tariff_enabled', lambda self: False),
         patch('app.config.Settings.is_tariffs_mode', lambda self: True),
-        patch('app.config.Settings.is_devices_selection_enabled', lambda self: False),
+        patch('app.config.Settings.is_devices_selection_enabled', lambda self: show_devices),
         patch('app.config.Settings.should_hide_subscription_link', lambda self: hide_link),
         patch('app.config.Settings.is_happ_cryptolink_mode', lambda self: False),
     ]
@@ -124,7 +147,10 @@ async def _render(subscription, *, tariff=None, hide_link: bool = True):
             stack.enter_context(p)
         await purchase_mod.show_subscription_info(cb, user, db)
 
-    return cb.message.edit_text.await_args.args[0]
+    rendered = cb.message.edit_text.await_args.args[0]
+    if return_keyboard:
+        return rendered, cb.message.edit_text.await_args.kwargs['reply_markup']
+    return rendered
 
 
 def _squad_lines(text: str) -> list[str]:
@@ -182,3 +208,30 @@ async def test_active_subscription_link_renders_without_name_error():
     text = await _render(sub, tariff=_tariff(), hide_link=False)
 
     assert 'https://example.test/sub' in text
+
+
+@pytest.mark.anyio('asyncio')
+async def test_expired_screen_passes_devices_over_limit_to_keyboard():
+    """3 / 1 на истёкшей подписке должен оставлять кнопку «Устройства»."""
+    sub = _subscription(limit_gb=100, used_gb=1.0)
+    sub.status = 'expired'
+    sub.actual_status = 'expired'
+    sub.device_limit = 1
+
+    _, keyboard = await _render(sub, tariff=_tariff(), show_devices=True, devices_total=3, return_keyboard=True)
+    callbacks = {button.callback_data for row in keyboard.inline_keyboard for button in row}
+
+    assert 'subscription_manage_devices' in callbacks
+
+
+@pytest.mark.anyio('asyncio')
+async def test_expired_screen_hides_devices_without_overrun():
+    sub = _subscription(limit_gb=100, used_gb=1.0)
+    sub.status = 'expired'
+    sub.actual_status = 'expired'
+    sub.device_limit = 1
+
+    _, keyboard = await _render(sub, tariff=_tariff(), show_devices=True, devices_total=1, return_keyboard=True)
+    callbacks = {button.callback_data for row in keyboard.inline_keyboard for button in row}
+
+    assert 'subscription_manage_devices' not in callbacks

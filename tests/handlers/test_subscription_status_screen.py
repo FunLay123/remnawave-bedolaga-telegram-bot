@@ -1,8 +1,8 @@
 """Status-aware single-tariff subscription screen.
 
 Approved behaviour:
-- one tariff: "Продлить" is the single purchase action; "Купить тариф" is hidden
-  when traffic is reset on payment (kept as a fallback when it is not);
+- one tariff: "Продлить" is the single purchase action; "Купить тариф" is
+  hidden completely in single-tariff mode (the multi-tariff branch is kept);
 - inactive keyboards don't offer Happ, autopay, revoke or traffic top-up;
   device management stays only when the device limit is exceeded.
 """
@@ -135,3 +135,89 @@ def test_inactive_keyboard_keeps_autopay_only_when_bound(monkeypatch):
 
     assert 'subscription_autopay' in bound
     assert 'subscription_autopay' not in unbound
+
+
+def _daily_subscription(*, status: str = 'limited', topup: bool = True):
+    return SimpleNamespace(
+        id=8,
+        status=status,
+        actual_status=status,
+        is_trial=False,
+        is_active=status == 'active',
+        end_date=datetime.now(UTC) + timedelta(days=1),
+        traffic_limit_gb=10,
+        traffic_used_gb=10.0,
+        device_limit=1,
+        autopay_enabled=False,
+        is_daily_paused=False,
+        tariff_id=6,
+        tariff=SimpleNamespace(
+            id=6,
+            name='Суточный',
+            is_daily=True,
+            device_limit=1,
+            can_topup_traffic=lambda: topup,
+        ),
+        last_revoke_at=None,
+    )
+
+
+def _trial_subscription(*, status: str = 'expired'):
+    return SimpleNamespace(
+        id=9,
+        status=status,
+        actual_status=status,
+        is_trial=True,
+        is_active=False,
+        end_date=datetime.now(UTC) - timedelta(days=1),
+        traffic_limit_gb=10,
+        traffic_used_gb=0.0,
+        device_limit=1,
+        autopay_enabled=False,
+        tariff_id=5,
+        tariff=SimpleNamespace(
+            id=5,
+            name='Тест',
+            is_daily=False,
+            device_limit=1,
+            can_topup_traffic=lambda: False,
+        ),
+        last_revoke_at=None,
+    )
+
+
+def test_daily_limited_keeps_devices_topup_and_revoke(monkeypatch):
+    """Daily limited — это не expired/disabled: гейты не должны его прятать."""
+    _single_tariff_settings(monkeypatch, reset_on_payment=False)
+    callbacks = _callback_data(
+        get_subscription_keyboard('ru', has_subscription=True, subscription=_daily_subscription(status='limited'))
+    )
+
+    assert 'toggle_daily_subscription_pause' in callbacks
+    assert 'subscription_manage_devices' in callbacks
+    assert 'buy_traffic' in callbacks
+    assert 'subscription_revoke' in callbacks
+
+
+def test_inactive_trial_hides_devices_without_overrun(monkeypatch):
+    _single_tariff_settings(monkeypatch, reset_on_payment=False)
+    callbacks = _callback_data(
+        get_subscription_keyboard('ru', has_subscription=True, is_trial=True, subscription=_trial_subscription())
+    )
+
+    assert 'subscription_manage_devices' not in callbacks
+
+
+def test_inactive_trial_keeps_devices_when_limit_exceeded(monkeypatch):
+    _single_tariff_settings(monkeypatch, reset_on_payment=False)
+    callbacks = _callback_data(
+        get_subscription_keyboard(
+            'ru',
+            has_subscription=True,
+            is_trial=True,
+            subscription=_trial_subscription(),
+            devices_over_limit=True,
+        )
+    )
+
+    assert 'subscription_manage_devices' in callbacks

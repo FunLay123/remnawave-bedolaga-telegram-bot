@@ -1,4 +1,4 @@
-"""SUBSCRIPTION_EXPIRING_PAID must format templates that use {days} (#2737).
+"""The expiring templates must format templates that use {days} (#2737).
 
 Custom/older locale files (e.g. fa.json) use a {days} placeholder while the code
 historically passed only days_text= to .format(). The KeyError('days') was

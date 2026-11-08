@@ -342,6 +342,10 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             logger.error('Ошибка получения устройств для отображения', error=e)
             devices_used = await get_current_devices_count(db_user)
             devices_used_str = str(devices_used)
+            try:
+                devices_count = int(devices_used or 0)
+            except (TypeError, ValueError):
+                devices_count = 0
 
     device_limit_value = int(subscription.device_limit or 0)
     devices_over_limit = device_limit_value > 0 and devices_count > device_limit_value
