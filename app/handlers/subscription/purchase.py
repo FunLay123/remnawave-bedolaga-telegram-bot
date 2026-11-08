@@ -1,6 +1,5 @@
 import html
 from datetime import UTC, datetime, timedelta
-from time import perf_counter
 from typing import Any
 
 import structlog
@@ -259,12 +258,9 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         await callback.answer()
         return
 
-    timing_started = perf_counter()
-
     from app.database.crud.subscription import check_and_update_subscription_status
 
     subscription = await check_and_update_subscription_status(db, subscription)
-    timing_status = perf_counter()
 
     subscription_service = SubscriptionService()
 
@@ -283,13 +279,11 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             snapshot_loaded = True
         except Exception as e:
             logger.warning('Не удалось получить снимок панели для экрана подписки', error=e)
-    timing_snapshot = perf_counter()
 
     if snapshot_loaded and panel_user is not None:
         await subscription_service.apply_panel_user_usage(db, subscription, panel_user)
     else:
         await subscription_service.sync_subscription_usage(db, subscription)
-    timing_usage = perf_counter()
 
     # Проверяем и синхронизируем подписку с RemnaWave если необходимо.
     # Загруженный снимок избавляет ensure_subscription_synced от повторного GET.
@@ -300,7 +294,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
         logger.warning(
             'Не удалось синхронизировать подписку с RemnaWave', subscription_id=subscription.id, sync_error=sync_error
         )
-    timing_sync = perf_counter()
 
     await db.refresh(subscription)
     await db.refresh(db_user)
@@ -381,8 +374,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             except (TypeError, ValueError):
                 devices_count = 0
 
-    timing_devices = perf_counter()
-
     device_limit_value = int(subscription.device_limit or 0)
     devices_over_limit = device_limit_value > 0 and devices_count > device_limit_value
 
@@ -398,7 +389,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
                 subscription.tariff = tariff
         except Exception as e:
             logger.warning('Ошибка получения тарифа', error=e, exc_info=True)
-    timing_tariff = perf_counter()
 
     # Определяем, суточный ли тариф для выбора шаблона
     is_daily_tariff = tariff and getattr(tariff, 'is_daily', False)
@@ -414,7 +404,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             premium_lines = await premium_squad_lines(subscription, tariff, texts, db)
         except Exception as premium_error:
             logger.debug('Не удалось собрать белые списки для экрана подписки', error=str(premium_error))
-    timing_premium = perf_counter()
 
     # Известное ограничение (docs/premium-traffic-limits.md): панель считает
     # расход на весь аккаунт, и в общем трафике сидит трафик премиум-сквадов.
@@ -557,27 +546,10 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
 
     # Доступность премиум-докупки считаем здесь: клавиатура строится без сессии,
     # а решение требует запроса к состояниям посквадных лимитов.
-    timing_build = perf_counter()
     from app.handlers.subscription.traffic import _get_purchasable_premium_squads
 
     has_premium_topup = bool(await _get_purchasable_premium_squads(db, subscription))
-    timing_topup = perf_counter()
 
-    logger.info(
-        '⏱️ Тайминги экрана подписки (до отправки)',
-        status_ms=round((timing_status - timing_started) * 1000),
-        snapshot_ms=round((timing_snapshot - timing_status) * 1000),
-        usage_ms=round((timing_usage - timing_snapshot) * 1000),
-        sync_ms=round((timing_sync - timing_usage) * 1000),
-        devices_ms=round((timing_devices - timing_sync) * 1000),
-        tariff_ms=round((timing_tariff - timing_devices) * 1000),
-        premium_ms=round((timing_premium - timing_tariff) * 1000),
-        build_ms=round((timing_build - timing_premium) * 1000),
-        topup_ms=round((timing_topup - timing_build) * 1000),
-        total_ms=round((timing_topup - timing_started) * 1000),
-    )
-
-    timing_edit_started = perf_counter()
     await callback.message.edit_text(
         message,
         reply_markup=get_subscription_keyboard(
@@ -590,12 +562,6 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
             devices_over_limit=devices_over_limit,
         ),
         parse_mode='HTML',
-    )
-    timing_edit_done = perf_counter()
-    logger.info(
-        '⏱️ Тайминг отправки экрана подписки',
-        edit_ms=round((timing_edit_done - timing_edit_started) * 1000),
-        total_ms=round((timing_edit_done - timing_started) * 1000),
     )
     await callback.answer()
 
