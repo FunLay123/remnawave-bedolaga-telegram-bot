@@ -263,10 +263,33 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     subscription = await check_and_update_subscription_status(db, subscription)
 
     subscription_service = SubscriptionService()
-    await subscription_service.sync_subscription_usage(db, subscription)
 
-    # Проверяем и синхронизируем подписку с RemnaWave если необходимо
-    sync_success, sync_error = await subscription_service.ensure_subscription_synced(db, subscription)
+    # Один идентификатор панели на весь экран: снимок, синхронизация и
+    # подсчёт устройств должны смотреть на одного и того же пользователя.
+    panel_user_id = (
+        getattr(subscription, 'remnawave_id', None) if settings.is_multi_tariff_enabled() else None
+    ) or db_user.remnawave_id
+
+    panel_user = None
+    devices_info = None
+    snapshot_loaded = False
+    if panel_user_id:
+        try:
+            panel_user, devices_info = await subscription_service.get_panel_snapshot(panel_user_id)
+            snapshot_loaded = True
+        except Exception as e:
+            logger.warning('Не удалось получить снимок панели для экрана подписки', error=e)
+
+    if snapshot_loaded and panel_user is not None:
+        await subscription_service.apply_panel_user_usage(db, subscription, panel_user)
+    else:
+        await subscription_service.sync_subscription_usage(db, subscription)
+
+    # Проверяем и синхронизируем подписку с RemnaWave если необходимо.
+    # Загруженный снимок избавляет ensure_subscription_synced от повторного GET.
+    sync_success, sync_error = await subscription_service.ensure_subscription_synced(
+        db, subscription, panel_user=panel_user, panel_user_loaded=snapshot_loaded
+    )
     if not sync_success:
         logger.warning(
             'Не удалось синхронизировать подписку с RemnaWave', subscription_id=subscription.id, sync_error=sync_error
@@ -275,6 +298,14 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
     await db.refresh(subscription)
     await db.refresh(db_user)
     await db.refresh(db_user, ['subscriptions'])
+
+    # Синхронизация выше могла создать/перепривязать панельный аккаунт.
+    # Ключ снимка (panel_user_id) остаётся снятым до синхронизации, а для
+    # устройств id считаем заново — уже по обновлённым строкам, иначе свежий
+    # аккаунт, заведённый только что, остался бы без счётчика устройств.
+    device_panel_id = (
+        getattr(subscription, 'remnawave_id', None) if settings.is_multi_tariff_enabled() else None
+    ) or db_user.remnawave_id
 
     current_time = datetime.now(UTC)
 
@@ -311,32 +342,28 @@ async def show_subscription_info(callback: types.CallbackQuery, db_user: User, d
 
     if show_devices:
         try:
-            _device_panel_id = (
-                getattr(subscription, 'remnawave_id', None)
-                if settings.is_multi_tariff_enabled() and subscription
-                else None
-            ) or db_user.remnawave_id
-            if _device_panel_id:
+            # Снимок уже содержит устройства; отдельный GET нужен, только если
+            # снимок не загрузился или устройства в нём не получены. Панельный
+            # id берём после синхронизации: она могла завести аккаунт только что.
+            if devices_info is None and device_panel_id:
                 from app.services.remnawave_service import RemnaWaveService
 
                 service = RemnaWaveService()
 
                 async with service.get_api_client() as api:
-                    devices_info = await api.get_user_devices(_device_panel_id)
+                    devices_info = await api.get_user_devices(device_panel_id)
 
-                    if isinstance(devices_info, dict):
-                        devices_count = devices_info.get('total', 0)
-                        devices_list = devices_info.get('devices', [])
-                        devices_used_str = str(devices_count)
-                        logger.info(
-                            'Найдено устройств для пользователя',
-                            devices_count=devices_count,
-                            telegram_id=db_user.telegram_id,
-                        )
-                    else:
-                        logger.warning(
-                            'Не удалось получить информацию об устройствах для', telegram_id=db_user.telegram_id
-                        )
+            if isinstance(devices_info, dict):
+                devices_count = devices_info.get('total', 0)
+                devices_list = devices_info.get('devices', [])
+                devices_used_str = str(devices_count)
+                logger.info(
+                    'Найдено устройств для пользователя',
+                    devices_count=devices_count,
+                    telegram_id=db_user.telegram_id,
+                )
+            elif devices_info is not None:
+                logger.warning('Не удалось получить информацию об устройствах для', telegram_id=db_user.telegram_id)
 
         except Exception as e:
             logger.error('Ошибка получения устройств для отображения', error=e)

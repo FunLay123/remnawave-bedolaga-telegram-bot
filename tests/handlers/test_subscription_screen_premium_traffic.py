@@ -87,17 +87,23 @@ def _states():
 
 
 @asynccontextmanager
-async def _remnawave_client(total: int):
-    api = SimpleNamespace(get_user_devices=AsyncMock(return_value={'total': total, 'devices': []}))
+async def _remnawave_client(total: int, recorded_ids: list[int] | None = None):
+    async def _get_user_devices(user_id: int):
+        if recorded_ids is not None:
+            recorded_ids.append(user_id)
+        return {'total': total, 'devices': []}
+
+    api = SimpleNamespace(get_user_devices=AsyncMock(side_effect=_get_user_devices))
     yield api
 
 
 class _FakeRemnawaveService:
     def __init__(self, total: int):
         self.total = total
+        self.device_ids: list[int] = []
 
     def get_api_client(self):
-        return _remnawave_client(self.total)
+        return _remnawave_client(self.total, self.device_ids)
 
 
 async def _render(
@@ -108,9 +114,17 @@ async def _render(
     show_devices: bool = False,
     devices_total: int = 0,
     return_keyboard: bool = False,
+    return_service: bool = False,
+    snapshot_user=None,
+    snapshot_devices=None,
+    snapshot_error: Exception | None = None,
+    devices_service=None,
+    user_remnawave_id: int | None = 4242,
+    sync_side_effect=None,
 ):
-    """Отрисовать экран подписки и вернуть текст (и клавиатуру, если нужно)."""
+    """Отрисовать экран подписки и вернуть текст (и клавиатуру/сервис, если нужно)."""
     cb, user = _callback(), _user()
+    user.remnawave_id = user_remnawave_id
     user.subscription = subscription
     db = MagicMock()
     db.refresh = AsyncMock()
@@ -120,6 +134,19 @@ async def _render(
     service = MagicMock()
     service.sync_subscription_usage = AsyncMock()
     service.ensure_subscription_synced = AsyncMock(return_value=(True, None))
+    service.apply_panel_user_usage = AsyncMock()
+    service.get_panel_snapshot = AsyncMock(return_value=(snapshot_user, snapshot_devices))
+    if snapshot_error is not None:
+        service.get_panel_snapshot.side_effect = snapshot_error
+    if sync_side_effect is not None:
+
+        async def _sync_side_effect(db, *args, **kwargs):
+            return sync_side_effect(user, subscription)
+
+        service.ensure_subscription_synced.side_effect = _sync_side_effect
+
+    if devices_service is None:
+        devices_service = _FakeRemnawaveService(devices_total)
 
     patches = [
         patch.object(purchase_mod, 'SubscriptionService', lambda: service),
@@ -133,7 +160,7 @@ async def _render(
             'app.database.crud.server_squad.get_squad_display_names',
             new=AsyncMock(return_value={SQUAD_CH: 'Швейцария', SQUAD_NL: 'Нидерланды'}),
         ),
-        patch('app.services.remnawave_service.RemnaWaveService', lambda: _FakeRemnawaveService(devices_total)),
+        patch('app.services.remnawave_service.RemnaWaveService', lambda: devices_service),
         patch('app.handlers.subscription.traffic._get_purchasable_premium_squads', new=AsyncMock(return_value=[])),
         patch('app.config.Settings.is_multi_tariff_enabled', lambda self: False),
         patch('app.config.Settings.is_tariffs_mode', lambda self: True),
@@ -148,6 +175,8 @@ async def _render(
         await purchase_mod.show_subscription_info(cb, user, db)
 
     rendered = cb.message.edit_text.await_args.args[0]
+    if return_service:
+        return rendered, service
     if return_keyboard:
         return rendered, cb.message.edit_text.await_args.kwargs['reply_markup']
     return rendered
@@ -235,3 +264,88 @@ async def test_expired_screen_hides_devices_without_overrun():
     callbacks = {button.callback_data for row in keyboard.inline_keyboard for button in row}
 
     assert 'subscription_manage_devices' not in callbacks
+
+
+@pytest.mark.anyio('asyncio')
+async def test_snapshot_skips_usage_sync_and_devices_fetch():
+    """Снимок дал пользователя и устройства — повторных запросов в панель нет."""
+    sub = _subscription(limit_gb=100, used_gb=12.3)
+    panel_user = SimpleNamespace(used_traffic_bytes=5 * BYTES_IN_GB)
+    devices_service = MagicMock()
+
+    text, service = await _render(
+        sub,
+        tariff=_tariff(),
+        show_devices=True,
+        snapshot_user=panel_user,
+        snapshot_devices={'total': 2, 'devices': []},
+        devices_service=devices_service,
+        return_service=True,
+    )
+
+    service.get_panel_snapshot.assert_awaited_once_with(4242)
+    service.sync_subscription_usage.assert_not_awaited()
+    service.apply_panel_user_usage.assert_awaited_once()
+    assert service.apply_panel_user_usage.await_args.args[2] is panel_user
+    assert service.ensure_subscription_synced.await_args.kwargs == {
+        'panel_user': panel_user,
+        'panel_user_loaded': True,
+    }
+    # Устройства из снимка — отдельного GET в панель нет.
+    devices_service.get_api_client.assert_not_called()
+    assert '2 / 3' in text, text
+
+
+@pytest.mark.anyio('asyncio')
+async def test_snapshot_failure_falls_back_to_legacy_panel_calls():
+    """Панель не отдала снимок — экран работает по старому пути из трёх запросов."""
+    sub = _subscription(limit_gb=100, used_gb=12.3)
+
+    text, service = await _render(
+        sub,
+        tariff=_tariff(),
+        show_devices=True,
+        devices_total=3,
+        snapshot_error=RuntimeError('panel down'),
+        return_service=True,
+    )
+
+    service.get_panel_snapshot.assert_awaited_once_with(4242)
+    service.sync_subscription_usage.assert_awaited_once()
+    service.apply_panel_user_usage.assert_not_awaited()
+    assert service.ensure_subscription_synced.await_args.kwargs == {
+        'panel_user': None,
+        'panel_user_loaded': False,
+    }
+    assert '3 / 3' in text, text
+
+
+@pytest.mark.anyio('asyncio')
+async def test_devices_fallback_uses_panel_id_assigned_by_sync():
+    """Синхронизация завела панельный аккаунт — устройства берём по новому id.
+
+    До синхронизации `db_user.remnawave_id` пуст, поэтому снимок не запрашивался
+    и `devices_info` нет. Если бы блок устройств использовал pre-sync id, запрос
+    не выполнился бы вовсе и строка осталась бы пустой («Устройства:  / 3»)
+    на том самом рендере, который починил аккаунт.
+    """
+    new_panel_id = 7777
+    sub = _subscription(limit_gb=100, used_gb=12.3)
+    devices_service = _FakeRemnawaveService(0)
+
+    def _assign_panel_id(user, subscription):
+        user.remnawave_id = new_panel_id
+        subscription.remnawave_id = new_panel_id
+        return (True, None)
+
+    text = await _render(
+        sub,
+        tariff=_tariff(),
+        show_devices=True,
+        user_remnawave_id=None,
+        sync_side_effect=_assign_panel_id,
+        devices_service=devices_service,
+    )
+
+    assert devices_service.device_ids == [new_panel_id]
+    assert '0 / 3' in text, text

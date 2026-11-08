@@ -1677,6 +1677,9 @@
 - `app/services/panel_online.py` — Python-модуль
   Классы: `PanelOnlineSnapshot` (2 методов)
   Функции: `fetch_online_snapshot` — Обойти список панели по убыванию ``onlineAt``, пока отметка свежее окна., `get_online_snapshot` — Отметки подключений; ``None`` — панель не настроена или не ответила (это «не знаем», не «никого»).
+- `app/services/panel_snapshot_cache.py` — Python-модуль
+  Классы: нет
+  Функции: `get` — Вернуть ``(user, devices)``, если снимок свежий; просроченный выбросить., `put` — Положить снимок, сначала вычистив просроченные записи., `invalidate_all` — Сбросить весь кэш — вызывается перед любой записью в панель., `invalidate` — Сбросить снимок одного пользователя.
 - `app/services/panel_sync/`
 - `app/services/paritypay_service.py` — Python-модуль
   Классы: `ParityPayAPIError` (1 методов), `ParityPayNetworkError`, `ParityPayService` (18 методов)
@@ -1855,7 +1858,7 @@
   Классы: `SubscriptionRenewalError`, `SubscriptionRenewalChargeError`, `SubscriptionRenewalPricing` (2 методов), `SubscriptionRenewalResult`, `RenewalPaymentDescriptor` (1 методов), `SubscriptionRenewalService` (1 методов)
   Функции: `build_renewal_period_id`, `build_payment_descriptor`, `encode_payment_payload`, `decode_payment_payload`, `build_payment_metadata`, `parse_payment_metadata`, `with_admin_notification_service`, `calculate_missing_amount`
 - `app/services/subscription_service.py` — Python-модуль
-  Классы: `PropagateSquadsResult`, `SubscriptionService` (32 методов)
+  Классы: `PropagateSquadsResult`, `SubscriptionService` (34 методов)
   Функции: `reset_subscription_with_panel` — Обнулить подписку «как будто не оформляли» и снять доступ в панели RemnaWave,
 - `app/services/support_settings_service.py` — Python-модуль
   Классы: `SupportSettingsService` (25 методов)
@@ -4451,7 +4454,7 @@
   Функции: `test_confirm_button_is_primary_with_reissue_icon`, `test_confirmation_screen_is_compact`, `test_success_keyboard_uses_connect_and_main_menu_icons`, `test_success_text_is_compact`
 - `tests/handlers/test_subscription_screen_premium_traffic.py` — Python-модуль
   Классы: нет
-  Функции: `test_screen_shows_a_line_per_connected_whitelist` — Белые списки видны отдельными строками со своим расходом., `test_unlimited_overall_hides_the_total_line_but_keeps_whitelists` — Безлимитный общий трафик при белых списках — общая строка уходит., `test_no_whitelists_leaves_the_total_line` — Без подключённых белых списков общая строка остаётся, как раньше., `test_exhausted_general_limit_hides_numbers_and_whitelists` — Общий лимит выбран: вместо цифр и сквадов — одна причина., `test_active_subscription_link_renders_without_name_error` — Ссылка подписки требует локальный actual_status — регрессия после отката тела., `test_expired_screen_passes_devices_over_limit_to_keyboard` — 3 / 1 на истёкшей подписке должен оставлять кнопку «Устройства»., `test_expired_screen_hides_devices_without_overrun`
+  Функции: `test_screen_shows_a_line_per_connected_whitelist` — Белые списки видны отдельными строками со своим расходом., `test_unlimited_overall_hides_the_total_line_but_keeps_whitelists` — Безлимитный общий трафик при белых списках — общая строка уходит., `test_no_whitelists_leaves_the_total_line` — Без подключённых белых списков общая строка остаётся, как раньше., `test_exhausted_general_limit_hides_numbers_and_whitelists` — Общий лимит выбран: вместо цифр и сквадов — одна причина., `test_active_subscription_link_renders_without_name_error` — Ссылка подписки требует локальный actual_status — регрессия после отката тела., `test_expired_screen_passes_devices_over_limit_to_keyboard` — 3 / 1 на истёкшей подписке должен оставлять кнопку «Устройства»., `test_expired_screen_hides_devices_without_overrun`, `test_snapshot_skips_usage_sync_and_devices_fetch` — Снимок дал пользователя и устройства — повторных запросов в панель нет., `test_snapshot_failure_falls_back_to_legacy_panel_calls` — Панель не отдала снимок — экран работает по старому пути из трёх запросов., `test_devices_fallback_uses_panel_id_assigned_by_sync` — Синхронизация завела панельный аккаунт — устройства берём по новому id.
 - `tests/handlers/test_subscription_status_screen.py` — Python-модуль
   Классы: нет
   Функции: `test_active_keyboard_keeps_current_actions`, `test_inactive_keyboard_never_shows_buy_tariff_in_single_tariff`, `test_inactive_keyboard_hides_dead_actions`, `test_inactive_keyboard_keeps_devices_only_when_limit_exceeded`, `test_inactive_keyboard_keeps_autopay_only_when_bound` — Старую привязку автоплатежа на неактивной подписке нужно уметь выключить., `test_daily_limited_keeps_devices_topup_and_revoke` — Daily limited — это не expired/disabled: гейты не должны его прятать., `test_inactive_trial_hides_devices_without_overrun`, `test_inactive_trial_hides_devices_even_when_limit_exceeded` — Триалу управление устройствами недоступно: handler отклоняет любой trial.
@@ -4881,6 +4884,9 @@
 - `tests/services/test_panel_online.py` — Python-модуль
   Классы: нет
   Функции: `test_api_sorts_users_by_online_at_like_panel_table`, `test_collects_accounts_until_mark_is_older_than_window`, `test_never_connected_account_ends_the_list`, `test_pages_through_while_whole_page_is_online`, `test_page_limit_stops_runaway_listing`, `test_window_matches_panel_green_dot`, `test_user_is_connected_by_any_of_his_panel_keys`, `test_cached_between_calls_and_none_when_panel_fails`, `test_panel_failure_is_remembered_so_list_does_not_wait_again` — Панель лежит — список открывается сразу без отметок, а не ждёт таймаут на каждом открытии., `test_who_is_online_is_recounted_at_request_time_not_at_fetch_time` — Ответ панели живёт в кэше 20 секунд — «онлайн» за это время обязан гаснуть сам., `test_snapshot_gives_each_row_its_own_mark` — Строке списка нужна отметка, а не готовое «да/нет»: по ней кабинет сам гасит точку., `test_several_accounts_of_one_person_give_the_freshest_mark` — Мультитариф: у человека несколько аккаунтов панели — считается самый свежий.
+- `tests/services/test_panel_snapshot_cache.py` — Python-модуль
+  Классы: нет
+  Функции: `test_put_then_get_returns_user_and_devices`, `test_get_unknown_key_returns_none`, `test_entry_is_fresh_within_ttl`, `test_entry_expires_after_ttl_and_is_removed`, `test_put_refreshes_fetched_at`, `test_invalidate_drops_only_that_user`, `test_invalidate_unknown_key_is_noop`, `test_invalidate_all_clears_everything`, `test_put_prunes_expired_entries_first`, `test_put_drops_oldest_insertion_when_full`, `test_repeated_put_moves_entry_out_of_eviction_order`, `test_cache_is_bounded_by_max_entries`, `test_non_get_panel_request_invalidates_cache` — Любая запись в панель сбрасывает снимок: продление/сброс/удаление., `test_get_panel_request_keeps_cache`
 - `tests/services/test_panel_to_bot_multi_sync_relink.py` — Python-модуль
   Классы: нет
   Функции: `test_recreated_account_is_relinked_to_the_existing_row`, `test_row_update_reads_the_payment_date_of_its_own_user` — Строка нашлась по id сразу: проход не должен падать на несуществующей переменной., `test_row_bound_to_a_live_account_is_never_relinked`, `test_unrelated_account_of_the_same_person_is_not_relinked`, `test_short_uuid_match_relinks`
@@ -5154,6 +5160,9 @@
 - `tests/services/test_subscription_extend_cabinet_mode.py` — Python-модуль
   Классы: нет
   Функции: `cabinet_mode` — Полностью настроенный cabinet-режим: и режим меню, и URL кабинета., `test_multi_tariff_cabinet_button_opens_that_subscription_renewal` — РЕГРЕССИЯ: раньше здесь была callback-кнопка, уводившая в бота., `test_single_tariff_cabinet_button_opens_cabinet` — Одиночный режим работал и раньше — поведение не должно поменяться., `test_multi_tariff_without_id_falls_back_to_subscription_list` — Без id конкретной подписки вести некуда — открываем список подписок., `test_bot_mode_keeps_callback_button` — Вне cabinet-режима кнопка обязана остаться обычным callback'ом., `test_cabinet_mode_without_url_falls_back_to_callback` — Cabinet-режим без ``MINIAPP_CUSTOM_URL`` не должен ломать кнопку., `test_dynamic_callback_keeps_subscription_section_styling` — Стиль берётся по секции ``subscription``, а не теряется из-за ``se:{id}``., `test_dynamic_callback_is_not_added_to_static_mapping` — ``se:{id}`` динамический — в статическом маппинге ему места нет., `test_call_sites_do_not_build_extend_callback_by_hand` — РЕГРЕССИЯ: каждый ручной ``f'se:{...}'`` — это ещё одна кнопка в бота., `test_expired_notification_keyboard_opens_cabinet` — Сквозная проверка на том самом уведомлении из отчёта пользователя.
+- `tests/services/test_subscription_service.py` — Python-модуль
+  Классы: нет
+  Функции: `test_snapshot_fetches_panel_once_and_serves_repeat_from_cache`, `test_snapshot_refetches_after_invalidate_all`, `test_devices_failure_caches_user_without_devices`, `test_missing_panel_user_is_cached_without_devices`, `test_panel_error_propagates_and_is_not_cached`, `test_apply_panel_user_usage_writes_traffic_without_panel_access`, `test_loaded_panel_user_skips_existence_get`, `test_loaded_missing_panel_user_triggers_sync`, `test_default_path_still_checks_panel_user`
 - `tests/services/test_subscription_service_sync.py` — Python-модуль
   Классы: нет
   Функции: `test_sync_picks_create_or_update_by_panel_id`, `test_missing_user_falls_to_create_which_reports_it` — Пользователя нет в базе: не падаем, create сам залогирует и вернёт None.

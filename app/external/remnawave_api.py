@@ -593,6 +593,14 @@ class RemnaWaveAPI:
     async def _make_request(
         self, method: str, endpoint: str, data: dict | None = None, params: dict | None = None
     ) -> dict:
+        # Любая запись в панель обесценивает снимок экрана подписки: следующий
+        # открытый экран должен увидеть новый трафик/устройства/статус, а не
+        # кэш, снятый до изменения. GET-кэш сюда не относится.
+        if method.upper() != 'GET':
+            from app.services.panel_snapshot_cache import invalidate_all
+
+            invalidate_all()
+
         if not self.session:
             raise RemnaWaveAPIError('Session not initialized. Use async context manager.')
 

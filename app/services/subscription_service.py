@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from typing import Any
 
 import structlog
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from app.external.remnawave_api import (
     RemnaWaveUser,
     is_user_not_found_error,
 )
+from app.services import panel_snapshot_cache
 
 # Правила поля стратегии живут в пакете синхронизации; имя оставлено здесь для
 # внешнего кода, который импортировал его из сервиса.
@@ -985,16 +987,71 @@ class SubscriptionService:
             logger.error('Ошибка синхронизации трафика', error=e)
             return False
 
+    async def get_panel_snapshot(self, panel_user_id: int) -> tuple[RemnaWaveUser | None, dict[str, Any] | None]:
+        """Снимок пользователя панели для read-only экрана подписки.
+
+        Один GET пользователя и один GET устройств на холодном пути; повторные
+        открытия экрана в пределах TTL панель не трогают. Ошибка устройств не
+        ломает снимок — экран умеет добрать устройства отдельно. Ошибку GET
+        пользователя пробрасываем: вызывающий откатывается на старый путь.
+        Неудачные ответы не кэшируются, кроме ``user is None`` — это валидный
+        ответ панели «пользователя нет» (404).
+        """
+        cached = panel_snapshot_cache.get(panel_user_id)
+        if cached is not None:
+            return cached
+
+        async with self.get_api_client() as api:
+            user = await api.get_user_by_id(panel_user_id)
+            devices: dict[str, Any] | None = None
+            if user is not None:
+                try:
+                    devices = await api.get_user_devices(panel_user_id)
+                except Exception as e:
+                    logger.warning(
+                        'Не удалось получить устройства для снимка панели',
+                        panel_user_id=panel_user_id,
+                        error=e,
+                    )
+
+            panel_snapshot_cache.put(panel_user_id, user, devices)
+            return user, devices
+
+    async def apply_panel_user_usage(
+        self, db: AsyncSession, subscription: Subscription, panel_user: RemnaWaveUser
+    ) -> bool:
+        """Сохранить трафик из готового снимка панели — без повторного GET."""
+        try:
+            subscription.traffic_used_gb = self._bytes_to_gb(panel_user.used_traffic_bytes)
+            await db.commit()
+            logger.debug(
+                'Синхронизирован трафик для подписки ГБ',
+                subscription_id=subscription.id,
+                used_gb=subscription.traffic_used_gb,
+            )
+            return True
+        except Exception as e:
+            logger.error('Ошибка применения трафика из снимка панели', error=e, subscription_id=subscription.id)
+            return False
+
     async def ensure_subscription_synced(
         self,
         db: AsyncSession,
         subscription: Subscription,
+        *,
+        panel_user: RemnaWaveUser | None = None,
+        panel_user_loaded: bool = False,
     ) -> tuple[bool, str | None]:
         """
         Проверяет и синхронизирует подписку с RemnaWave при необходимости.
 
         Если subscription_url отсутствует или данные не синхронизированы,
         пытается обновить/создать пользователя в RemnaWave.
+
+        ``panel_user_loaded=True`` означает, что вызывающий уже получил
+        пользователя панели (снимок экрана подписки): повторный GET ради
+        проверки существования не нужен. ``panel_user=None`` в этом режиме —
+        панель пользователя не знает, включаем синхронизацию.
 
         Returns:
             Tuple[bool, Optional[str]]: (успех, сообщение об ошибке)
@@ -1010,19 +1067,32 @@ class SubscriptionService:
             needs_sync = not subscription.subscription_url or not panel_user_id
 
             if not needs_sync:
-                # Проверяем, существует ли пользователь в RemnaWave
-                try:
-                    async with self.get_api_client() as api:
-                        remnawave_user = await api.get_user_by_id(panel_user_id)
-                        if not remnawave_user:
-                            needs_sync = True
-                            logger.warning(
-                                'Пользователь не найден в RemnaWave, требуется синхронизация',
-                                remnawave_id=panel_user_id,
-                            )
-                except Exception as check_error:
-                    logger.warning('Не удалось проверить пользователя в RemnaWave', check_error=check_error)
-                    # Продолжаем, возможно проблема временная
+                if panel_user_loaded:
+                    # Снимок уже ответил, существует ли пользователь в панели:
+                    # отдельный GET ради этой проверки — ровно тот запрос,
+                    # который кэш и убирает.
+                    if panel_user is None:
+                        needs_sync = True
+                        logger.warning(
+                            'Пользователь не найден в RemnaWave, требуется синхронизация',
+                            remnawave_id=panel_user_id,
+                        )
+                    else:
+                        return True, None
+                else:
+                    # Проверяем, существует ли пользователь в RemnaWave
+                    try:
+                        async with self.get_api_client() as api:
+                            remnawave_user = await api.get_user_by_id(panel_user_id)
+                            if not remnawave_user:
+                                needs_sync = True
+                                logger.warning(
+                                    'Пользователь не найден в RemnaWave, требуется синхронизация',
+                                    remnawave_id=panel_user_id,
+                                )
+                    except Exception as check_error:
+                        logger.warning('Не удалось проверить пользователя в RemnaWave', check_error=check_error)
+                        # Продолжаем, возможно проблема временная
 
             if not needs_sync:
                 return True, None
