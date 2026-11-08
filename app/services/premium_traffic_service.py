@@ -244,6 +244,24 @@ class PremiumTrafficService:
 
                 await db.commit()
 
+                # Снимок скалярных данных цели. После `db.rollback()` все объекты
+                # сессии истекают, и обращение к `target.subscription` (даже к
+                # `id`) поднимает MissingGreenlet. Всё, что нужно после отката,
+                # снимаем заранее, пока объекты ещё живые.
+                target_details = {
+                    id(target): (
+                        target.subscription.id,
+                        target.config.squad_uuid,
+                        period_starts[(target.subscription.id, target.config.squad_uuid)],
+                        target.panel_user_id,
+                    )
+                    for group in groups.values()
+                    for target in group
+                }
+                # После отката объекты сессии истекли; до следующего обращения к
+                # `target.subscription` их надо перечитать из базы.
+                needs_orm_refresh = False
+
                 for (squad_uuid, start_date), group in groups.items():
                     try:
                         usage = await self._fetch_usage(api, squad_uuid, start_date, now)
@@ -260,23 +278,37 @@ class PremiumTrafficService:
                         continue
 
                     for target in group:
+                        subscription_id, target_squad_uuid, period_start, panel_user_id = target_details[id(target)]
                         stats['checked'] += 1
                         try:
+                            if needs_orm_refresh:
+                                # После отката объекты сессии истекли; без
+                                # перечитывания первое же обращение к
+                                # `target.subscription` в `_apply_usage` упадёт
+                                # с MissingGreenlet.
+                                await db.refresh(target.subscription)
                             outcome = await self._apply_usage(
                                 db,
                                 api,
                                 target,
-                                used_bytes=usage.get(target.panel_user_id, 0),
-                                period_start=period_starts[(target.subscription.id, target.config.squad_uuid)],
+                                used_bytes=usage.get(panel_user_id, 0),
+                                period_start=period_start,
                                 now=now,
-                                panel_user=self._cached_panel_user(target.panel_user_id),
+                                panel_user=self._cached_panel_user(panel_user_id),
                             )
                         except Exception as error:
+                            # Сессия осталась в упавшей транзакции: без отката
+                            # следующая цель упрётся в PendingRollbackError, и
+                            # один сбой утянет за собой весь проход. После отката
+                            # работаем только со снимком скаляров: ORM-объекты
+                            # истекли и доступны лишь через `db.refresh`.
+                            await db.rollback()
+                            needs_orm_refresh = True
                             stats['errors'] += 1
                             logger.error(
                                 'Ошибка обработки премиум-лимита',
-                                subscription_id=target.subscription.id,
-                                squad_uuid=squad_uuid,
+                                subscription_id=subscription_id,
+                                squad_uuid=target_squad_uuid,
                                 error=error,
                                 exc_info=True,
                             )
@@ -578,12 +610,17 @@ class PremiumTrafficService:
         нечего, отправка берёт набор именно из права.
 
         Право сверяем с тарифом: сквад возвращаем, только если тариф его
-        по-прежнему даёт.
+        по-прежнему даёт. Пустой ``allowed_squads`` значит «все серверы» —
+        ровно как в `get_effective_tariff_squad_uuids`.
         """
         tariff = getattr(subscription, 'tariff', None)
-        allowed = getattr(tariff, 'allowed_squads', None) or []
+        if tariff is None:
+            return False
+        allowed = getattr(tariff, 'allowed_squads', None)
         connected = list(subscription.connected_squads or [])
-        if state.squad_uuid not in allowed or state.squad_uuid in connected:
+        if allowed and state.squad_uuid not in allowed:
+            return False
+        if state.squad_uuid in connected:
             return False
 
         subscription.connected_squads = [*connected, state.squad_uuid]

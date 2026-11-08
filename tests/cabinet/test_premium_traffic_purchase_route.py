@@ -235,3 +235,69 @@ async def test_purchase_route_rolls_back_the_charge_when_the_cap_is_hit(monkeypa
     assert db.calls == ['rollback']
     # Проводки на неслучившуюся покупку тоже быть не должно.
     assert transactions == []
+
+
+class _TrialSubscription(_FakeSubscription):
+    is_trial = True
+
+
+@pytest.mark.asyncio
+async def test_purchase_route_rejects_trial_before_quote(monkeypatch):
+    """Пробной подписке премиум-докупка недоступна — отказ до расчёта цены."""
+
+    async def _fake_resolve(db, user, subscription_id):
+        return _TrialSubscription()
+
+    monkeypatch.setattr(traffic_route, 'resolve_subscription', _fake_resolve)
+
+    quote_calls: list[tuple[str, int]] = []
+
+    async def _fake_quote(db, subscription, squad_uuid, gb):
+        quote_calls.append((squad_uuid, gb))
+        raise AssertionError('quote_premium_topup не должен вызываться для trial')
+
+    monkeypatch.setattr(purchase_service, 'quote_premium_topup', _fake_quote)
+
+    user = _make_user()
+    request = PremiumTrafficPurchaseRequest(squad_uuid=SQUAD, gb=5)
+
+    with pytest.raises(HTTPException) as error:
+        await traffic_route.purchase_premium_traffic(request, user=user, db=object(), subscription_id=None)
+
+    assert error.value.status_code == 400
+    assert error.value.detail['code'] == 'trial_not_allowed'
+    assert quote_calls == []
+    assert user.balance_kopeks == 1_000_000
+
+
+@pytest.mark.parametrize('actual_status', ['expired', 'disabled'])
+@pytest.mark.asyncio
+async def test_purchase_route_rejects_inactive_subscription_before_quote(monkeypatch, actual_status):
+    """Истёкшая/отключённая подписка — платить не за что, отказ до расчёта цены."""
+
+    subscription = _FakeSubscription()
+    subscription.actual_status = actual_status
+
+    async def _fake_resolve(db, user, subscription_id):
+        return subscription
+
+    monkeypatch.setattr(traffic_route, 'resolve_subscription', _fake_resolve)
+
+    quote_calls: list[tuple[str, int]] = []
+
+    async def _fake_quote(db, subscription, squad_uuid, gb):
+        quote_calls.append((squad_uuid, gb))
+        raise AssertionError('quote_premium_topup не должен вызываться для неактивной подписки')
+
+    monkeypatch.setattr(purchase_service, 'quote_premium_topup', _fake_quote)
+
+    user = _make_user()
+    request = PremiumTrafficPurchaseRequest(squad_uuid=SQUAD, gb=5)
+
+    with pytest.raises(HTTPException) as error:
+        await traffic_route.purchase_premium_traffic(request, user=user, db=object(), subscription_id=None)
+
+    assert error.value.status_code == 400
+    assert error.value.detail['code'] == 'subscription_inactive'
+    assert quote_calls == []
+    assert user.balance_kopeks == 1_000_000

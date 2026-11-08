@@ -1119,8 +1119,11 @@ class MiniAppSubscriptionPurchaseService:
             subscription.device_limit = pricing.selection.devices
             subscription.connected_squads = pricing.selection.servers
 
+            # При конверсии триала остаток уже перенесён в bonus_period, поэтому
+            # база — «сейчас»: иначе остаток посчитался бы дважды (в дате
+            # окончания триала и в bonus_period).
             extension_base_date = now
-            if subscription.end_date and subscription.end_date > now:
+            if not was_trial_conversion and subscription.end_date and subscription.end_date > now:
                 extension_base_date = subscription.end_date
             else:
                 subscription.start_date = now

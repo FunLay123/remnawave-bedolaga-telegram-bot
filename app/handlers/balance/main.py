@@ -1,5 +1,5 @@
 import html
-import math
+from decimal import Decimal, InvalidOperation
 
 import structlog
 from aiogram import Dispatcher, F, types
@@ -40,6 +40,13 @@ from app.utils.timezone import format_local_datetime
 logger = structlog.get_logger(__name__)
 
 TRANSACTIONS_PER_PAGE = 10
+
+# Границы ручного ввода в рублях. Сравнивать Decimal с ними обязательно ДО
+# умножения на 100: у сумм вроде ``1e999999`` умножение поднимает
+# ``decimal.Overflow``, а ``int()`` попытался бы построить число гигантского
+# размера. Сравнение Decimal с int дешёвое, точное и не переполняется.
+DEFAULT_TOPUP_MIN_RUBLES = Decimal(DEFAULT_TOPUP_MIN_KOPEKS) / 100
+DEFAULT_TOPUP_MAX_RUBLES = Decimal(DEFAULT_TOPUP_MAX_KOPEKS) / 100
 
 CREDIT_TRANSACTION_TYPES: frozenset[str] = frozenset(
     {
@@ -565,12 +572,22 @@ async def process_topup_amount(message: types.Message, db_user: User, state: FSM
             )
             return
 
-        amount_rubles = float(amount_text.replace(',', '.'))
-        if not math.isfinite(amount_rubles):
-            raise ValueError(f'Amount must be finite: {amount_text!r}')
-        amount_kopeks = int(amount_rubles * 100)
+        # Decimal, а не float: 261.03 ₽ — это ровно 26103 копейки, тогда как
+        # float(261.03) * 100 даёт 26102.999… и int() теряет копейку.
+        try:
+            amount_rubles = Decimal(amount_text.replace(',', '.'))
+        except InvalidOperation:
+            amount_rubles = None
 
-        if amount_kopeks < DEFAULT_TOPUP_MIN_KOPEKS:
+        if amount_rubles is None or not amount_rubles.is_finite():
+            await message.answer(
+                payment_amount_error_text('Введите сумму числом, например 500'),
+                reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                parse_mode='HTML',
+            )
+            return
+
+        if amount_rubles < DEFAULT_TOPUP_MIN_RUBLES:
             await message.answer(
                 payment_amount_error_text(f'Минимальная сумма — {format_min_rubles(DEFAULT_TOPUP_MIN_KOPEKS)}'),
                 reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
@@ -578,13 +595,15 @@ async def process_topup_amount(message: types.Message, db_user: User, state: FSM
             )
             return
 
-        if amount_kopeks > DEFAULT_TOPUP_MAX_KOPEKS:
+        if amount_rubles > DEFAULT_TOPUP_MAX_RUBLES:
             await message.answer(
                 payment_amount_error_text(f'Максимальная сумма — {format_max_rubles(DEFAULT_TOPUP_MAX_KOPEKS)}'),
                 reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
                 parse_mode='HTML',
             )
             return
+
+        amount_kopeks = int(amount_rubles * 100)
         data = await state.get_data()
         payment_method = data.get('payment_method', 'stars')
 
@@ -601,9 +620,9 @@ async def process_topup_amount(message: types.Message, db_user: User, state: FSM
         if not await route_payment_by_method(message, db_user, amount_kopeks, state, payment_method):
             await message.answer('Неизвестный способ оплаты')
 
-    except (ValueError, OverflowError):
-        # OverflowError — конечное, но огромное число: float('1e307') * 100 → inf,
-        # int(inf) бросает его мимо проверки isfinite.
+    except (ValueError, OverflowError, InvalidOperation):
+        # Страховка на случай других путей разбора суммы: пользователь должен
+        # получить подсказку, а не трейсбек.
         await message.answer(
             payment_amount_error_text('Введите сумму числом, например 500'),
             reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),

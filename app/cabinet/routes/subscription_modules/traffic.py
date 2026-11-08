@@ -952,6 +952,26 @@ async def purchase_premium_traffic(
     if not subscription:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='No subscription found')
 
+    # Докупка премиум-трафика — доплата к уже оплаченному периоду: на пробной
+    # подписке её не продаём, а на истёкшей/отключённой платить не за что.
+    if getattr(subscription, 'is_trial', False):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'trial_not_allowed',
+                'message': 'Premium traffic top-up is not available for trial subscriptions',
+            },
+        )
+
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                'code': 'subscription_inactive',
+                'message': 'Сначала продлите подписку',
+            },
+        )
+
     try:
         quote = await quote_premium_topup(db, subscription, request.squad_uuid, request.gb)
     except PremiumTopupError as error:

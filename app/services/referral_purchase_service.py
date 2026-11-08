@@ -78,6 +78,24 @@ async def has_first_purchase_marker(db: AsyncSession, referee_id: int) -> bool:
     return result.scalar_one_or_none() is not None
 
 
+async def has_paid_subscription_before_attach(db: AsyncSession, user_id: int) -> bool:
+    """Есть ли у пользователя уже оплаченная подписка на момент поздней привязки.
+
+    Единый предикат «оплата уже была»: им пользуется и запись маркера, и выбор
+    текста уведомлений при регистрации реферала, чтобы обе стороны не
+    разошлись в том, считается ли покупка уже учтённой.
+    """
+    paid_exists = await db.execute(
+        select(Subscription.id)
+        .where(
+            Subscription.user_id == user_id,
+            _already_paid_subscription_condition(),
+        )
+        .limit(1)
+    )
+    return paid_exists.scalar_one_or_none() is not None
+
+
 async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int) -> bool:
     """Записать маркер рефералу, который уже оплатил подписку до привязки.
 
@@ -104,15 +122,7 @@ async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int
     if await has_first_purchase_marker(db, user_id):
         return False
 
-    paid_exists = await db.execute(
-        select(Subscription.id)
-        .where(
-            Subscription.user_id == user_id,
-            _already_paid_subscription_condition(),
-        )
-        .limit(1)
-    )
-    if paid_exists.scalar_one_or_none() is None:
+    if not await has_paid_subscription_before_attach(db, user_id):
         return False
 
     db.add(

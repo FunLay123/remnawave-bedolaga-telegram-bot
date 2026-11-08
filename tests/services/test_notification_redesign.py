@@ -3,7 +3,7 @@
 The spec lives in `notification-design-brief-2026-11-06.md`:
 - no emoji/custom-emoji inside the message body (only the leading header emoji);
 - no blockquote/table, so rich messages keep <h4> + <hr/>;
-- autopay failure + planned expiry warning are merged (B2/I3) with a ~1h dedupe;
+- autopay failure + planned expiry warning are merged (B2/I3) with a ~3h dedupe;
 - primary button depends on balance/required/autopay state.
 """
 
@@ -65,15 +65,17 @@ def test_template_keys_match_states():
     assert expiring_template_key('autopay_short') == 'SUBSCRIPTION_EXPIRING_AUTOPAY_SHORT'
 
 
-def test_suppress_within_one_hour():
+def test_suppress_within_three_hours():
     now = 1_000_000.0
     assert should_suppress_expiring_notification(now - 60, now) is True
+    assert should_suppress_expiring_notification(now - 3600, now) is True
     assert should_suppress_expiring_notification(now - 3599, now) is True
+    assert should_suppress_expiring_notification(now - 10799, now) is True
 
 
 def test_do_not_suppress_after_window_or_without_marker():
     now = 1_000_000.0
-    assert should_suppress_expiring_notification(now - 3600, now) is False
+    assert should_suppress_expiring_notification(now - 10800, now) is False
     assert should_suppress_expiring_notification(0.0, now) is False
 
 
@@ -321,7 +323,7 @@ async def test_autopay_failure_final_card_has_no_renew_button(monkeypatch):
     bot = await _send_autopay_failed(monkeypatch, merge=False, is_final=True)
 
     text = bot.send_message.await_args.kwargs['text']
-    assert 'Подписка отключится через 3 часа' in text
+    assert 'Подписка скоро отключится' in text
     buttons = _buttons(bot)
     assert buttons['balance_topup'].style == 'primary'
     assert 'subscription_extend' not in buttons
@@ -588,22 +590,53 @@ async def test_autopay_success_uses_new_text(monkeypatch):
 async def test_trial_ending_uses_new_text_and_button_icons(monkeypatch):
     _set_sender_settings(monkeypatch)
     monkeypatch.setattr(settings, 'PRICE_30_DAYS', 15000)
+    from app.services import pricing_engine as pricing_engine_module
+
+    calculate_renewal_price = AsyncMock(return_value=SimpleNamespace(final_total=20000))
+    monkeypatch.setattr(pricing_engine_module.pricing_engine, 'calculate_renewal_price', calculate_renewal_price)
     bot = _sender_bot()
     service = MonitoringService(bot=bot)
 
     result = await service._send_trial_ending_notification(
+        SimpleNamespace(),
+        _sender_user(),
+        _sender_subscription(hours=2),
+    )
+
+    assert result is True
+    calculate_renewal_price.assert_awaited_once()
+    assert calculate_renewal_price.await_args.args[2] == 30
+    text = bot.send_message.await_args.kwargs['text']
+    assert 'Тестовый период закончится через 2 часа' in text
+    assert '200 ₽ за 30 дней' in text, 'цена — из pricing engine, а не константа PRICE_30_DAYS'
+    buttons = _buttons(bot)
+    assert buttons['menu_buy'].style == 'primary'
+    assert buttons['menu_buy'].icon_custom_emoji_id == '5334552404736104314'
+    assert buttons['balance_topup'].icon_custom_emoji_id == '5258500422393415126'
+
+
+async def test_trial_ending_falls_back_to_price_30_days_when_pricing_fails(monkeypatch):
+    _set_sender_settings(monkeypatch)
+    monkeypatch.setattr(settings, 'PRICE_30_DAYS', 15000)
+    from app.services import pricing_engine as pricing_engine_module
+
+    monkeypatch.setattr(
+        pricing_engine_module.pricing_engine,
+        'calculate_renewal_price',
+        AsyncMock(side_effect=RuntimeError('pricing down')),
+    )
+    bot = _sender_bot()
+    service = MonitoringService(bot=bot)
+
+    result = await service._send_trial_ending_notification(
+        SimpleNamespace(),
         _sender_user(),
         _sender_subscription(hours=2),
     )
 
     assert result is True
     text = bot.send_message.await_args.kwargs['text']
-    assert 'Тестовый период закончится через 2 часа' in text
     assert '150 ₽ за 30 дней' in text
-    buttons = _buttons(bot)
-    assert buttons['menu_buy'].style == 'primary'
-    assert buttons['menu_buy'].icon_custom_emoji_id == '5334552404736104314'
-    assert buttons['balance_topup'].icon_custom_emoji_id == '5258500422393415126'
 
 
 def test_traffic_warning_keyboard_has_icons():
@@ -677,7 +710,7 @@ async def test_maybe_notify_does_not_merge_outside_user_window(monkeypatch):
 
 
 async def test_maybe_notify_failed_send_does_not_mark_merged_expiring(monkeypatch):
-    """Если отправка упала, плановое предупреждение нельзя глушить на час."""
+    """Если отправка упала, плановое предупреждение нельзя глушить на три часа."""
     from app.services import monitoring_service as ms
 
     service = MonitoringService(bot=object())

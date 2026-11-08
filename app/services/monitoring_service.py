@@ -182,7 +182,10 @@ EXPIRING_TEMPLATE_KEYS = {
 }
 
 # Окно, в котором объединённая карточка заменяет плановое предупреждение.
-MERGED_EXPIRING_SUPPRESS_SECONDS = 3600
+# По умолчанию MONITORING_INTERVAL=60 минут: часовое окно истекает ровно к
+# следующему циклу, и плановое предупреждение уходит повторно сразу после
+# объединённой карточки. Три часа держат дедуп между проходами с запасом.
+MERGED_EXPIRING_SUPPRESS_SECONDS = 10800
 
 
 def decide_expiring_notification_state(*, autopay_enabled: bool, balance_kopeks: int, required_kopeks: int) -> str:
@@ -1204,7 +1207,7 @@ class MonitoringService:
                     continue
 
                 if self.bot:
-                    success = await self._send_trial_ending_notification(user, subscription)
+                    success = await self._send_trial_ending_notification(db, user, subscription)
                     if success:
                         await record_notification(db, user.id, subscription.id, 'trial_2h')
                         logger.info(
@@ -2361,7 +2364,7 @@ class MonitoringService:
             )
             return False
 
-    async def _send_trial_ending_notification(self, user: User, subscription: Subscription) -> bool:
+    async def _send_trial_ending_notification(self, db: AsyncSession, user: User, subscription: Subscription) -> bool:
         try:
             if not user.telegram_id:
                 return await notification_delivery_service.send_notification(
@@ -2369,6 +2372,21 @@ class MonitoringService:
                     notification_type=NotificationType.WINBACK_TRIAL_ENDING,
                     context={},
                 )
+            # Текст обещает цену «за 30 дней», поэтому и считаем ровно 30 дней,
+            # а не период автоплатежа подписки.
+            try:
+                from app.services.pricing_engine import pricing_engine
+
+                pricing = await pricing_engine.calculate_renewal_price(db, subscription, 30, user=user)
+                price_kopeks = max(0, int(pricing.final_total))
+            except Exception as error:
+                logger.warning(
+                    'Не удалось рассчитать цену для trial-ending, используем PRICE_30_DAYS',
+                    subscription_id=getattr(subscription, 'id', None),
+                    user_id=getattr(user, 'id', None),
+                    error=str(error),
+                )
+                price_kopeks = max(0, int(getattr(settings, 'PRICE_30_DAYS', 0) or 0))
             texts = get_texts(getattr(user, 'language', 'ru'))
             tariff_label = _tariff_label_for(subscription)
             message = texts.t(
@@ -2377,7 +2395,7 @@ class MonitoringService:
                 'Тариф <b>{price} за 30 дней</b> · баланс <b>{balance}</b>\n\n'
                 'Оформите подписку, чтобы доступ не отключился.\n',
             ).format(
-                price=settings.format_price(int(getattr(settings, 'PRICE_30_DAYS', 0) or 0)),
+                price=settings.format_price(price_kopeks),
                 balance=settings.format_price(int(getattr(user, 'balance_kopeks', 0) or 0)),
                 tariff_label=tariff_label,
             )
@@ -2763,7 +2781,7 @@ class MonitoringService:
             if is_final:
                 template_key = 'AUTOPAY_FAILED_FINAL'
                 default = (
-                    '\n⏰ <b>Подписка отключится через 3 часа</b>\n\n'
+                    '\n⏰ <b>Подписка скоро отключится</b>\n\n'
                     'Баланс <b>{balance}</b> · нужно <b>{required}</b>\n\n'
                     'Пополните баланс сейчас, чтобы не потерять доступ.\n'
                 )

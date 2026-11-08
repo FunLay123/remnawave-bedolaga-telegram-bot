@@ -46,8 +46,26 @@ def _strip_cross(text: str) -> str:
     return _strip_prefixes(_strip_arrow(text), _CROSSES)
 
 
+def strip_back_arrow(text: str) -> str:
+    """Убирает ведущую стрелку из подписи кнопки.
+
+    Нужен там, где иконка задаётся явно: middleware пропускает кнопки
+    с уже установленной иконкой, поэтому стрелку из текста убирает само место.
+    """
+    return _strip_arrow(text)
+
+
+def _is_back_label(label: str) -> bool:
+    """«Назад» и многословные подписи вроде «Назад в админку», «Back to list»."""
+    normalized = label.casefold()
+    if normalized in _BACK_LABELS:
+        return True
+    head, separator, _rest = normalized.partition(' ')
+    return bool(separator) and head in _BACK_LABELS
+
+
 def is_back_button(button: InlineKeyboardButton) -> bool:
-    return _strip_arrow(button.text).casefold() in _BACK_LABELS
+    return _is_back_label(_strip_arrow(button.text))
 
 
 def is_cancel_button(button: InlineKeyboardButton) -> bool:

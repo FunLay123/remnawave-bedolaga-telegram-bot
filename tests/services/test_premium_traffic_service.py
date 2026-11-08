@@ -1103,10 +1103,26 @@ class TestOrphanedLimits:
 
     async def test_entitlement_is_not_restored_when_the_tariff_no_longer_gives_it(self, monkeypatch):
         """Сквад убрали из тарифа — возвращать право нельзя, это не сбой синхронизации."""
-        subscription = self._subscription(premium_on_squad=True, connected=(), allowed=())
+        subscription = self._subscription(premium_on_squad=True, connected=(), allowed=(OTHER_SQUAD,))
         await self._release(monkeypatch, subscription)
 
         assert subscription.connected_squads == []
+
+    async def test_entitlement_is_restored_when_tariff_allows_all_squads(self, monkeypatch):
+        """Пустой `allowed_squads` — «все серверы», как в `get_effective_tariff_squad_uuids`.
+
+        Старое условие читало пустой список как «сквад тарифом не разрешён» и
+        после синхронизации с панелью право на снятый премиум-сквад уже не
+        возвращалось никогда.
+        """
+        subscription = self._subscription(premium_on_squad=True, connected=(), allowed=())
+        restored, state, pushed, api_service = await self._release(monkeypatch, subscription)
+
+        assert subscription.connected_squads == [SQUAD]
+        assert restored == 1
+        assert state.is_limited is True
+        assert pushed == []
+        assert api_service.opened == 0
 
     async def test_entitlement_in_place_is_left_alone(self, monkeypatch):
         """Ничего не потеряно — список не трогаем и дублей не заводим."""
@@ -1443,6 +1459,76 @@ def _run_worker_against(monkeypatch, db, *, push=None, panel_squads=None, usage_
         push or _default_push,
     )
     return pushed
+
+
+async def test_failed_target_rolls_back_and_pass_continues(monkeypatch):
+    """Сбой одной цели не валит проход и не оставляет сессию в failed-транзакции.
+
+    Сбой здесь настоящий, на уровне БД: вторая строка на ту же пару
+    подписка+сквад нарушает UniqueConstraint уже на `flush()`. Такой отказ
+    переводит сессию в pending-rollback, и без `db.rollback()` следующая цель
+    упирается в PendingRollbackError. Python-исключение (`RuntimeError`) этой
+    ветки не проверяет: оно не портит транзакцию, и прежняя реализация без
+    отката проходила тест.
+
+    После `db.rollback()` объекты сессии истекают: без снимка скаляров до
+    `try` и без `db.refresh` следующая цель падала бы с MissingGreenlet (на
+    `target.subscription.id` в логгере или в `_apply_usage`).
+    """
+    async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+        # Две цели одной подписки: сбой на первой не должен съесть вторую.
+        await _seed_subscription(
+            db,
+            premium_limits={SQUAD: {'traffic_limit_gb': 5}, OTHER_SQUAD: {'traffic_limit_gb': 5}},
+            connected=(SQUAD, OTHER_SQUAD),
+        )
+        _run_worker_against(monkeypatch, db)
+        service = PremiumTrafficService()
+        calls: list[str] = []
+        rollback_spy = AsyncMock(wraps=db.rollback)
+        monkeypatch.setattr(db, 'rollback', rollback_spy)
+
+        async def _apply(_db, _api, target, **_kwargs):
+            # Живой `_apply_usage` сначала читает состояние (транзакция уже
+            # начата — именно её откат и истекает объекты), а затем обращается
+            # к полям подписки. Порядок важен: откат пустой транзакции объектов
+            # не истекает и регрессию бы не поймал.
+            state = await get_state(_db, 1, target.config.squad_uuid)
+            assert state is not None
+            calls.append(target.config.squad_uuid)
+            if len(calls) == 1:
+                # Настоящий сбой БД, а не Python-исключение: дубль пары
+                # подписка+сквад нарушает UniqueConstraint на flush и оставляет
+                # сессию в pending-rollback до явного отката.
+                _db.add(
+                    SubscriptionPremiumTraffic(
+                        subscription_id=1,
+                        squad_uuid=target.config.squad_uuid,
+                        period_start_at=NOW,
+                    )
+                )
+                await _db.flush()
+                raise AssertionError('flush обязан упасть на дубле пары подписка+сквад')
+            # Вторая цель после отката: без `db.refresh` это MissingGreenlet.
+            assert target.subscription.id == 1
+
+        monkeypatch.setattr(service, '_apply_usage', _apply)
+
+        from structlog.testing import capture_logs
+
+        with capture_logs() as logs:
+            stats = await service.process_once()
+
+        assert len(calls) == 2, 'после отката вторая цель обязана обработаться'
+        assert stats['checked'] == 2
+        assert stats['errors'] == 1
+        rollback_spy.assert_awaited()
+        assert any(
+            entry['event'] == 'Ошибка обработки премиум-лимита'
+            and entry.get('subscription_id') == 1
+            and entry.get('squad_uuid') == calls[0]
+            for entry in logs
+        ), 'логгер обязан получить снимок id, а не истёкший ORM-объект'
 
 
 class TestOrphanStates:

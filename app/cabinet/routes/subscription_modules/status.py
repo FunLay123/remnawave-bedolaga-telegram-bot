@@ -148,7 +148,9 @@ async def get_connection_link(
             detail='No subscription found',
         )
 
-    subscription_url = str(subscription.subscription_url)
+    # NULL (ссылка ещё не сгенерирована панелью) не должен превращаться в
+    # строку "None" и обходить проверку ниже.
+    subscription_url = str(subscription.subscription_url or '')
 
     if not subscription_url:
         raise HTTPException(

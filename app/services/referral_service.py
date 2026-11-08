@@ -695,7 +695,15 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                 logger.debug('Не удалось записать конкурсную регистрацию', exc=exc)
 
             if bot:
+                from app.services.referral_purchase_service import has_paid_subscription_before_attach
                 from app.utils.pricing_utils import _pluralize_days_ru
+
+                # Привязка может быть поздней (retroactive): человек мог уже
+                # потратить триал или купить подписку до появления пригласившего.
+                # Обещания в этом случае невыполнимы — маркер первой покупки
+                # запишется сразу после отправки сообщений, и бонус не придёт.
+                trial_already_used = new_user.is_trial_already_used()
+                already_paid = await has_paid_subscription_before_attach(db, new_user.id)
 
                 trial_bonus_days = settings.REFERRAL_TRIAL_BONUS_DAYS
                 welcome_message = (
@@ -705,11 +713,12 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                 )
                 # Обещать бонус к пробному периоду можно, только если триал
                 # этому человеку действительно доступен. Выключенная программа,
-                # нулевая длительность или запрет триала для его способа входа
-                # делают обещание невыполнимым — тогда шлём нейтральное
-                # приветствие без строки о бонусе.
+                # нулевая длительность, запрет триала для его способа входа или
+                # уже использованный триал делают обещание невыполнимым — тогда
+                # шлём нейтральное приветствие без строки о бонусе.
                 if (
                     trial_bonus_days > 0
+                    and not trial_already_used
                     and settings.is_referral_program_enabled()
                     and settings.TRIAL_DURATION_DAYS > 0
                     and not settings.is_trial_disabled_for_user(getattr(new_user, 'auth_type', None))
@@ -728,12 +737,17 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                 inviter_message = (
                     f'<tg-emoji emoji-id="5235695112419303615">👥</tg-emoji> <b>Новый реферал!</b>\n\n'
                     f'По вашей ссылке зарегистрировался '
-                    f'<b>{html.escape(new_user.full_name)}</b>!\n\n'
-                    f'Когда он впервые купит подписку от '
-                    f'{settings.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS} дней, '
-                    f'вы получите +{first_purchase_bonus_days} '
-                    f'{_pluralize_days_ru(first_purchase_bonus_days)}.'
+                    f'<b>{html.escape(new_user.full_name)}</b>!'
                 )
+                # Маркер уже оплаченной покупки делает обещанный бонус
+                # невозможным — пригласившему уходит нейтральное уведомление.
+                if not already_paid:
+                    inviter_message += (
+                        f'\n\nКогда он впервые купит подписку от '
+                        f'{settings.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS} дней, '
+                        f'вы получите +{first_purchase_bonus_days} '
+                        f'{_pluralize_days_ru(first_purchase_bonus_days)}.'
+                    )
                 await send_referral_notification(
                     bot,
                     referrer.telegram_id,

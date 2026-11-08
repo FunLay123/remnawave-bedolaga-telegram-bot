@@ -71,6 +71,32 @@ def test_arrow_prefixed_cancel_is_recognized():
     assert button.icon_custom_emoji_id == CANCEL_ICON_CUSTOM_EMOJI_ID
 
 
+@pytest.mark.parametrize(
+    'label',
+    ['◀️ Назад в админку', '◀️ Назад к мониторингу', '◀️ Назад к редактированию', '◀️ Back to list'],
+)
+def test_multi_word_back_labels_get_icon(label):
+    """Многословные подписи «Назад ...» / «Back to ...» — те же кнопки «Назад»."""
+    markup = _markup(label)
+
+    apply_button_icons(markup)
+
+    button = markup.inline_keyboard[0][0]
+    assert button.icon_custom_emoji_id == BACK_ICON_CUSTOM_EMOJI_ID
+    assert '◀️' not in button.text
+
+
+def test_back_prefix_does_not_hijack_non_back_labels():
+    """«К списку» не начинается со слова «назад»: иконку ставит само место."""
+    markup = _markup('◀️ К списку')
+
+    apply_button_icons(markup)
+
+    button = markup.inline_keyboard[0][0]
+    assert button.icon_custom_emoji_id is None
+    assert button.text == '◀️ К списку'
+
+
 def test_existing_icon_is_not_overridden():
     markup = InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text='❌ Отмена', callback_data='x', icon_custom_emoji_id='999')]]

@@ -543,6 +543,15 @@ async def confirm_reset_traffic(
     if subscription is None:
         return
 
+    # Сброс трафика оплачивает текущий период — на истёкшей/отключённой
+    # подписке платить не за что.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     reset_price = _calculate_traffic_reset_price(subscription)
 
     if reset_price > 0 and db_user.balance_kopeks < reset_price:
@@ -768,6 +777,16 @@ async def show_add_traffic_confirmation(
         )
         return
 
+    # Подтверждение могло быть создано до истечения/отключения подписки.
+    # Докупка трафика — это доплата к периоду, которого уже нет; блокируем
+    # здесь, а не только на экране выбора пакета.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     if is_legacy_subscription(subscription):
         await callback.answer(
             texts.t(
@@ -891,6 +910,16 @@ async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSes
     if subscription is None:
         return
 
+    # Подписку могли истечь/отключить между экраном подтверждения и нажатием
+    # «Подтвердить» — проверка после блокировки закрывает эту гонку до цены и
+    # списания.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     period_hint_days = _get_period_hint_from_subscription(subscription)
     discounted_per_month, _, traffic_discount_pct = PricingEngine.calculate_traffic_discount(
         base_price,
@@ -994,8 +1023,12 @@ async def add_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSes
             # add_subscription_traffic уже создаёт TrafficPurchase и обновляет все необходимые поля
             await add_subscription_traffic(db, subscription, traffic_gb)
 
-        # Реактивируем подписку если она была DISABLED/EXPIRED (например, после LIMITED/EXPIRED в RemnaWave)
-        await reactivate_subscription(db, subscription)
+        # Реактивируем только LIMITED: докупка снимает исчерпание лимита.
+        # DISABLED/EXPIRED трогать нельзя — подписка оплачена на период, которого
+        # уже нет, и реактивация «оживила» бы её в обход продления. Гейт выше
+        # отсекает такие подписки до списания; это вторая линия защиты.
+        if str(getattr(subscription, 'status', '') or '').lower() == 'limited':
+            await reactivate_subscription(db, subscription)
 
         subscription_service = SubscriptionService()
         await subscription_service.update_remnawave_user(db, subscription)
@@ -1305,6 +1338,14 @@ async def show_premium_traffic_confirmation(
         )
         return
 
+    # Экран подтверждения мог пережить истечение/отключение подписки.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     rows = await _get_purchasable_premium_squads(db, subscription)
     if idx < 0 or idx >= len(rows):
         await callback.answer('⚠️ Список серверов изменился, откройте меню заново', show_alert=True)
@@ -1423,6 +1464,15 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
     if subscription is None:
         return
 
+    # Подписку могли истечь/отключить между подтверждением и нажатием —
+    # проверяем после блокировки, до расчёта цены и списания.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
+        await callback.answer(
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
+            show_alert=True,
+        )
+        return
+
     # Захвачен здесь, а не прочитан из `db_user.language` после возможного
     # отката savepoint'а ниже: `ROLLBACK TO SAVEPOINT` полностью экспайрит
     # объект, побывавший в этой вложенной транзакции (не только списанное
@@ -1492,7 +1542,6 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
         return
 
     description = f'Докупка {gb} ГБ премиум-трафика ({squad_name})'
-    success_toast: str | None = None
 
     try:
         # Списание, начисление и запись транзакции — одна точка сохранения:
@@ -1535,9 +1584,30 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
             )
 
         await db.commit()
+    except PremiumTopupError as error:
+        # `async with db.begin_nested()` уже откатил savepoint целиком —
+        # списание и (несостоявшееся) начисление отменены одним действием.
+        await callback.answer(f'⚠️ {error.message}', show_alert=True)
+        return
+    except Exception as e:
+        # То же самое для любого другого сбоя внутри savepoint (например,
+        # `create_transaction`, упавшая до `await db.commit()`): выход из
+        # `async with` исключением уже откатил списание, здесь только
+        # сообщаем пользователю честный итог — списания не произошло.
+        logger.error('Ошибка докупки премиум-трафика', error=e)
+        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(user_language))
+        # Закрываем callback, чтобы на кнопке не висел индикатор загрузки
+        # (раньше это делал общий `callback.answer` в конце функции).
+        await callback.answer()
+        return
 
-        # С `commit=False` события, промогруппу, конкурс и Метрику
-        # `create_transaction` не запускает — их запускают после коммита.
+    # ---- Всё ниже — после коммита: деньги списаны, трафик начислен.
+    # Сбой на любом из этих шагов не должен сообщать пользователю, что покупка
+    # не состоялась, и не должен отменять уже зафиксированный результат.
+
+    # С `commit=False` события, промогруппу, конкурс и Метрику
+    # `create_transaction` не запускает — их запускают после коммита.
+    try:
         await emit_transaction_side_effects(
             db,
             transaction,
@@ -1547,21 +1617,28 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
             payment_method=PaymentMethod.BALANCE,
             description=description,
         )
+    except Exception as e:
+        logger.error(
+            'Докупка премиум-трафика закоммичена, но побочные действия транзакции не выполнены',
+            squad_uuid=squad_uuid,
+            error=e,
+        )
 
-        # Сквад возвращаем в панель только если он был снят: в остальных
-        # случаях набор сквадов не менялся, и лишний PATCH панели ни к чему.
-        if restored:
-            try:
-                subscription_service = SubscriptionService()
-                await subscription_service.update_remnawave_user(db, subscription, sync_squads=True)
-            except Exception as e:
-                logger.error(
-                    'Не удалось вернуть премиум-сквад сразу после докупки',
-                    subscription_id=subscription.id,
-                    squad_uuid=squad_uuid,
-                    error=e,
-                )
+    # Сквад возвращаем в панель только если он был снят: в остальных
+    # случаях набор сквадов не менялся, и лишний PATCH панели ни к чему.
+    if restored:
+        try:
+            subscription_service = SubscriptionService()
+            await subscription_service.update_remnawave_user(db, subscription, sync_squads=True)
+        except Exception as e:
+            logger.error(
+                'Не удалось вернуть премиум-сквад сразу после докупки',
+                subscription_id=subscription.id,
+                squad_uuid=squad_uuid,
+                error=e,
+            )
 
+    try:
         await db.refresh(db_user)
         # Subscription может быть не ORM-объектом в тестах — refresh только для mapped.
         if hasattr(subscription, '__mapper__'):
@@ -1583,7 +1660,6 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
                 discount_percent=discount_percent,
                 answer_callback=False,
             )
-        success_toast = 'Трафик добавлен'
 
         logger.info(
             '✅ Пользователь докупил премиум-трафик',
@@ -1592,19 +1668,16 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
             gb=gb,
             restored=restored,
         )
-
-    except PremiumTopupError as error:
-        # `async with db.begin_nested()` уже откатил savepoint целиком —
-        # списание и (несостоявшееся) начисление отменены одним действием.
-        await callback.answer(f'⚠️ {error.message}', show_alert=True)
-        return
     except Exception as e:
-        # То же самое для любого другого сбоя внутри savepoint (например,
-        # `create_transaction`, упавшая до `await db.commit()`): выход из
-        # `async with` исключением уже откатил списание, здесь только
-        # сообщаем пользователю честный итог — списания не произошло.
-        logger.error('Ошибка докупки премиум-трафика', error=e)
-        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(user_language))
+        # Покупка уже закоммичена — сбой обновления экрана её не отменяет.
+        # Пользователь получит тост об успехе ниже.
+        logger.error(
+            'Докупка премиум-трафика прошла, но обновлённый экран не отрисован',
+            squad_uuid=squad_uuid,
+            error=e,
+        )
+
+    success_toast = 'Трафик добавлен'
 
     await callback.answer(success_toast)
 

@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from sqlalchemy import select
 
 import app.handlers.subscription.traffic as traffic_mod
@@ -912,3 +913,132 @@ class TestCeilingIsDisplayOnly:
             subtract.assert_not_awaited()
             _refused_with_alert(callback)
             assert 'докупить нельзя' in callback.answer.await_args.args[0]
+
+
+# ============================= Покупка: неактивная подписка =============================
+
+
+@pytest.mark.parametrize('actual_status', ['expired', 'disabled'])
+async def test_inactive_subscription_refuses_after_lock_without_charging(monkeypatch, actual_status):
+    """Подписка истекла/отключилась, пока пользователь смотрел на подтверждение.
+
+    Проверка стоит после `lock_user_for_pricing` — ровно там, где раньше
+    начинался расчёт цены и списание.
+    """
+    subscription = _subscription()
+    subscription.actual_status = actual_status
+    _patch_resolve(monkeypatch, subscription)
+
+    subtract = AsyncMock()
+    monkeypatch.setattr(traffic_mod, 'subtract_user_balance', subtract)
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        user = await _seed_user(db, balance_kopeks=100_000)
+
+        async def _fake_lock(db, user_id):
+            return user
+
+        monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
+
+        callback = _callback('premium_traffic_buy_0_5')
+
+        await traffic_mod.buy_premium_traffic(callback, user, db)
+
+        subtract.assert_not_awaited()
+        assert user.balance_kopeks == 100_000
+        _refused_with_alert(callback)
+        assert callback.answer.await_args.args[0] == 'Сначала продлите подписку'
+
+
+# ============================= Покупка: сбои после коммита =============================
+
+
+class TestPostCommitFailuresDoNotReportFailure:
+    """После `db.commit()` списание и начисление уже зафиксированы.
+
+    Сбой поздних шагов (побочные действия транзакции, обновление экрана) не
+    должен показывать пользователю `texts.ERROR` — покупка состоялась, и тост
+    об успехе обязан дойти.
+    """
+
+    async def test_side_effect_failure_keeps_success_toast_and_charge(self, monkeypatch):
+        subscription = _subscription()
+        _patch_resolve(monkeypatch, subscription)
+
+        async def _fake_subtract(db, user, amount, description, **kwargs):
+            user.balance_kopeks -= amount
+            return True
+
+        monkeypatch.setattr(traffic_mod, 'subtract_user_balance', _fake_subtract)
+
+        side_effects = AsyncMock(side_effect=RuntimeError('side effects down'))
+        monkeypatch.setattr(traffic_mod, 'emit_transaction_side_effects', side_effects)
+
+        async with memory_session(monkeypatch, (*TABLES, Transaction.__table__)) as db:
+            user = await _seed_user(db, balance_kopeks=100_000)
+            user_id = user.id
+
+            async def _fake_lock(db, user_id):
+                return user
+
+            monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
+
+            callback = _callback('premium_traffic_buy_0_5')
+
+            await traffic_mod.buy_premium_traffic(callback, user, db)
+
+            # Побочные действия транзакции действительно дошли до вызова.
+            side_effects.assert_awaited()
+
+            # Списание осталось в БД, начисление не откатилось.
+            balance = (await db.execute(select(User.balance_kopeks).where(User.id == user_id))).scalar_one()
+            assert balance == 98_000
+            state = await get_state(db, subscription.id, SQUAD)
+            assert state is not None
+            assert state.extra_bytes == 5 * BYTES_IN_GB
+
+            # Пользователь видит успех, а не общий текст ошибки.
+            callback.message.edit_text.assert_awaited_once()
+            (shown_text,) = callback.message.edit_text.await_args.args[:1]
+            assert 'Произошла ошибка' not in shown_text
+            assert 'Белые списки' in shown_text
+            callback.answer.assert_awaited_once()
+            assert callback.answer.await_args.args[0] == 'Трафик добавлен'
+
+    async def test_render_failure_keeps_success_toast_and_charge(self, monkeypatch):
+        subscription = _subscription()
+        _patch_resolve(monkeypatch, subscription)
+
+        async def _fake_subtract(db, user, amount, description, **kwargs):
+            user.balance_kopeks -= amount
+            return True
+
+        monkeypatch.setattr(traffic_mod, 'subtract_user_balance', _fake_subtract)
+        monkeypatch.setattr(traffic_mod, 'emit_transaction_side_effects', AsyncMock())
+
+        render_packages = AsyncMock(side_effect=RuntimeError('render down'))
+        monkeypatch.setattr(traffic_mod, '_render_premium_traffic_packages', render_packages)
+
+        async with memory_session(monkeypatch, (*TABLES, Transaction.__table__)) as db:
+            user = await _seed_user(db, balance_kopeks=100_000)
+            user_id = user.id
+
+            async def _fake_lock(db, user_id):
+                return user
+
+            monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
+
+            callback = _callback('premium_traffic_buy_0_5')
+
+            await traffic_mod.buy_premium_traffic(callback, user, db)
+
+            balance = (await db.execute(select(User.balance_kopeks).where(User.id == user_id))).scalar_one()
+            assert balance == 98_000
+
+            # Отрисовка экрана действительно дошла до вызова и упала внутри.
+            render_packages.assert_awaited()
+
+            # Экран не обновился, но и текста ошибки нет — только тост успеха.
+            callback.message.edit_text.assert_not_awaited()
+            callback.answer.assert_awaited_once()
+            assert callback.answer.await_args.args[0] == 'Трафик добавлен'

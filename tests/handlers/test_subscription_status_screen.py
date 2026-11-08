@@ -4,7 +4,8 @@ Approved behaviour:
 - one tariff: "Продлить" is the single purchase action; "Купить тариф" is
   hidden completely in single-tariff mode (the multi-tariff branch is kept);
 - inactive keyboards don't offer Happ, autopay, revoke or traffic top-up;
-  device management stays only when the device limit is exceeded.
+  device management stays only on paid subscriptions when the device limit is
+  exceeded — trials never get it (the handler rejects every trial).
 """
 
 from __future__ import annotations
@@ -208,7 +209,8 @@ def test_inactive_trial_hides_devices_without_overrun(monkeypatch):
     assert 'subscription_manage_devices' not in callbacks
 
 
-def test_inactive_trial_keeps_devices_when_limit_exceeded(monkeypatch):
+def test_inactive_trial_hides_devices_even_when_limit_exceeded(monkeypatch):
+    """Триалу управление устройствами недоступно: handler отклоняет любой trial."""
     _single_tariff_settings(monkeypatch, reset_on_payment=False)
     callbacks = _callback_data(
         get_subscription_keyboard(
@@ -220,4 +222,4 @@ def test_inactive_trial_keeps_devices_when_limit_exceeded(monkeypatch):
         )
     )
 
-    assert 'subscription_manage_devices' in callbacks
+    assert 'subscription_manage_devices' not in callbacks

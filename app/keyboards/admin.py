@@ -3,6 +3,7 @@ from typing import Any
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.localization.texts import get_texts
+from app.middlewares.back_button_icon import BACK_ICON_CUSTOM_EMOJI_ID, strip_back_arrow
 
 
 def _t(texts, key: str, default: str) -> str:
@@ -698,8 +699,9 @@ def get_referral_contest_manage_keyboard(
     rows.append(
         [
             InlineKeyboardButton(
-                text=_t(texts, 'ADMIN_BACK_TO_LIST', '⬅️ К списку'),
+                text=strip_back_arrow(_t(texts, 'ADMIN_BACK_TO_LIST', '⬅️ К списку')),
                 callback_data='admin_contests_list',
+                icon_custom_emoji_id=BACK_ICON_CUSTOM_EMOJI_ID,
             )
         ]
     )
@@ -741,7 +743,9 @@ def get_campaign_management_keyboard(campaign_id: int, is_active: bool, language
             ],
             [
                 InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_BACK_TO_LIST', '⬅️ К списку'), callback_data='admin_campaigns_list'
+                    text=strip_back_arrow(_t(texts, 'ADMIN_BACK_TO_LIST', '⬅️ К списку')),
+                    callback_data='admin_campaigns_list',
+                    icon_custom_emoji_id=BACK_ICON_CUSTOM_EMOJI_ID,
                 )
             ],
         ]
@@ -881,7 +885,9 @@ def get_promocode_management_keyboard(promo_id: int, language: str = 'ru') -> In
             ],
             [
                 InlineKeyboardButton(
-                    text=_t(texts, 'ADMIN_BACK_TO_LIST', '⬅️ К списку'), callback_data='admin_promo_list'
+                    text=strip_back_arrow(_t(texts, 'ADMIN_BACK_TO_LIST', '⬅️ К списку')),
+                    callback_data='admin_promo_list',
+                    icon_custom_emoji_id=BACK_ICON_CUSTOM_EMOJI_ID,
                 )
             ],
         ]

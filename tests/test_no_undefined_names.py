@@ -34,7 +34,6 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 # вызова. Комментарий утверждал, что функции нет нигде в проекте; это было
 # неверно, и запись в базе мешала вернуть строку обратно.
 KNOWN: dict[str, set[str]] = {
-    'app/handlers/start.py': {'User'},
     'app/services/payment/heleket.py': {'HeleketPayment'},
     'app/services/payment_method_config_service.py': {'User'},
     'app/services/pricing_engine.py': {'PromoGroup'},
@@ -54,7 +53,7 @@ def _undefined_names() -> dict[str, set[str]]:
 
     found: dict[str, set[str]] = {}
     for item in json.loads(result.stdout or '[]'):
-        path = str(pathlib.Path(item['filename']).relative_to(ROOT))
+        path = pathlib.Path(item['filename']).resolve().relative_to(ROOT).as_posix()
         name = item['message'].removeprefix('Undefined name ').strip('`')
         found.setdefault(path, set()).add(name)
     return found

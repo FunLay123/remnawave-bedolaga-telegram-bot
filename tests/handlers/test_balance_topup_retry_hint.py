@@ -184,15 +184,61 @@ async def test_minimum_above_global_input_ceiling_reports_unavailable(payment_en
 
 
 @pytest.mark.asyncio
-async def test_finite_but_huge_amount_is_rejected_instead_of_crashing(payment_environment, state, user):
-    """Конечное число, у которого *100 переполняет float, не должно ронять хендлер."""
+@pytest.mark.parametrize(
+    ('text', 'expected_kopeks'),
+    [
+        ('261.03', 26103),
+        ('1.15', 115),
+        ('261,03', 26103),
+    ],
+)
+async def test_decimal_amount_is_converted_without_float_truncation(
+    payment_environment, state, user, text, expected_kopeks
+):
+    """261.03 ₽ — ровно 26103 копейки: float(261.03) * 100 теряет копейку."""
+    payment_environment.settings.YOOKASSA_MIN_AMOUNT_KOPEKS = 100
+    payment_environment.settings.YOOKASSA_MAX_AMOUNT_KOPEKS = 100_000
     await state.set_state(BalanceStates.waiting_for_amount)
     await state.set_data({'payment_method': 'yookassa'})
-    message = _message('1' + '0' * 307)
+    message = _message(text)
+
+    await balance_main.process_topup_amount(message, user, state)
+
+    payment_environment.service.create_yookassa_payment.assert_awaited_once()
+    assert payment_environment.service.create_yookassa_payment.await_args.kwargs['amount_kopeks'] == expected_kopeks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text', ['abc', '1..2', '1e', '   '])
+async def test_non_numeric_amount_keeps_the_existing_error(payment_environment, state, user, text):
+    await state.set_state(BalanceStates.waiting_for_amount)
+    await state.set_data({'payment_method': 'yookassa'})
+    message = _message(text)
 
     await balance_main.process_topup_amount(message, user, state)
 
     hint = message.answer.await_args.args[0]
     assert 'Введите сумму числом' in hint
+    payment_environment.factory.assert_not_called()
+    assert await state.get_state() == BalanceStates.waiting_for_amount.state
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('text', ['1' + '0' * 307, '1e999999999', '-1e999999999'])
+async def test_finite_but_huge_amount_is_rejected_instead_of_crashing(payment_environment, state, user, text):
+    """Конечное число с огромным порядком не должно ронять хендлер.
+
+    Decimal с экспонентой вроде 1e999999999 при умножении на 100 поднимает
+    Overflow, а int() построил бы число гигантского размера — поэтому границы
+    проверяются в рублях до преобразования.
+    """
+    await state.set_state(BalanceStates.waiting_for_amount)
+    await state.set_data({'payment_method': 'yookassa'})
+    message = _message(text)
+
+    await balance_main.process_topup_amount(message, user, state)
+
+    hint = message.answer.await_args.args[0]
+    assert 'Максимальная сумма' in hint or 'Минимальная сумма' in hint
     payment_environment.factory.assert_not_called()
     assert await state.get_state() == BalanceStates.waiting_for_amount.state

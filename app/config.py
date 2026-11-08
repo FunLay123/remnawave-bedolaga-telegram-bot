@@ -3755,7 +3755,10 @@ class Settings(BaseSettings):
         return self.CONNECT_BUTTON_MODE == 'happ_cryptolink'
 
     def is_happ_download_button_enabled(self) -> bool:
-        return self.is_happ_cryptolink_mode() and self.CONNECT_BUTTON_HAPP_DOWNLOAD_ENABLED
+        return (
+            self.CONNECT_BUTTON_MODE in ('happ_cryptolink', 'happ_incy_cryptolink')
+            and self.CONNECT_BUTTON_HAPP_DOWNLOAD_ENABLED
+        )
 
     def should_hide_subscription_link(self) -> bool:
         """Returns True when subscription links must be hidden from the interface."""

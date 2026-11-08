@@ -17,7 +17,26 @@ from urllib.parse import quote, unquote
 import pytest
 
 import app.handlers.subscription.links as links_mod
+from app.config import settings
 from app.utils.incy_crypt1 import _KEY_B64, INCY_CRYPT1_DEEP_LINK_PREFIX
+
+
+@pytest.mark.parametrize(
+    ('mode', 'download_enabled', 'expected'),
+    [
+        ('happ_cryptolink', True, True),
+        ('happ_cryptolink', False, False),
+        ('happ_incy_cryptolink', True, True),
+        ('happ_incy_cryptolink', False, False),
+        ('incy_cryptolink', True, False),
+    ],
+)
+def test_happ_download_button_is_enabled_in_both_happ_modes(monkeypatch, mode, download_enabled, expected):
+    """Кнопка скачивания Happ нужна и в комбинированном режиме happ+INCY."""
+    monkeypatch.setattr(settings, 'CONNECT_BUTTON_MODE', mode)
+    monkeypatch.setattr(settings, 'CONNECT_BUTTON_HAPP_DOWNLOAD_ENABLED', download_enabled)
+
+    assert settings.is_happ_download_button_enabled() is expected
 
 
 def _make_callback() -> SimpleNamespace:

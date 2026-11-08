@@ -74,3 +74,28 @@ def test_missing_dir_is_created(tmp_path, monkeypatch):
     loader.ensure_locale_templates()
 
     assert (target_dir / 'ru.json').exists()
+
+
+# Подписи, которые уходят в `InlineKeyboardButton.text`: Telegram показывает
+# `<tg-emoji>` на кнопках буквально, иконку должен задавать middleware.
+_BUTTON_LOCALE_KEYS = (
+    'ADMIN_BACK_TO_ADMIN',
+    'ADMIN_BACK_TO_LIST',
+    'ADMIN_BACK_TO_MONITORING',
+    'ADMIN_BACK_TO_SQUADS',
+    'ADMIN_PRIVACY_POLICY_RETURN_TO_EDIT',
+    'ADMIN_PROMO_OFFER_SELECT_SQUAD_BACK',
+    'ADMIN_PUBLIC_OFFER_RETURN_TO_EDIT',
+    'REFERRAL_LIST_PREV_PAGE',
+    'SERVER_STATUS_PREV_PAGE',
+    'GIFT_MY_BACK_TO_CATALOG_BUTTON',
+)
+
+
+def test_button_labels_have_no_custom_emoji_markup():
+    """В кнопочных подписях ru.json не должно быть `<tg-emoji>`."""
+    ru = _repo_locale('ru.json')
+
+    tagged = {key: ru[key] for key in _BUTTON_LOCALE_KEYS if '<tg-emoji' in ru[key]}
+
+    assert tagged == {}

@@ -204,8 +204,9 @@ async def _reset_regular(db: AsyncSession, subscription, scope: str, now: dateti
         )
 
     async with service.get_api_client() as api:
-        await api.reset_user_traffic(panel_user_id)
-        panel_user = await api.get_user_by_id(panel_user_id)
+        # reset-traffic уже возвращает обновлённого пользователя панели — второй
+        # GET не нужен и был бы лишним запросом, способным упасть после сброса.
+        panel_user = await api.reset_user_traffic(panel_user_id)
 
     if scope == 'both':
         # Премиум и так сбрасывается ниже — отмечать нечего.

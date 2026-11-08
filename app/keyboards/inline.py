@@ -1341,16 +1341,8 @@ def get_subscription_keyboard(
                     ]
                 )
 
-    if has_subscription and is_trial and (not hide_dead_actions or devices_over_limit):
-        keyboard.append(
-            [
-                InlineKeyboardButton(
-                    text='Устройства',
-                    callback_data='subscription_manage_devices',
-                    icon_custom_emoji_id=DEVICES_BUTTON_ICON_ID,
-                )
-            ]
-        )
+    # Триалу управление устройствами недоступно: хендлер отклоняет любой trial,
+    # поэтому кнопку не показываем даже при превышении лимита.
 
     # [Перевыпустить] [Промокод]
     revoke_promo_row: list[InlineKeyboardButton] = []

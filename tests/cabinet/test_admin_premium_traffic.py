@@ -45,11 +45,16 @@ def _subscription(limits=None, subscription_id=1):
 class _FakeApi:
     def __init__(self):
         self.reset_calls: list[int] = []
+        self.get_user_calls: list[int] = []
 
     async def reset_user_traffic(self, user_id):
+        # Прод-метод возвращает уже обновлённого пользователя панели — вместе
+        # с ``last_traffic_reset_at``. Второй GET после сброса не нужен.
         self.reset_calls.append(user_id)
+        return SimpleNamespace(last_traffic_reset_at=PANEL_RESET_AT)
 
     async def get_user_by_id(self, user_id):
+        self.get_user_calls.append(user_id)
         return SimpleNamespace(last_traffic_reset_at=PANEL_RESET_AT)
 
 
@@ -340,7 +345,11 @@ class TestRegularReset:
         assert api.reset_calls == []
 
     async def test_panel_reset_is_acknowledged_so_the_worker_ignores_it(self, monkeypatch):
-        """Иначе воркер примет его за досрочный сброс и обнулит премиум следом."""
+        """Иначе воркер примет его за досрочный сброс и обнулит премиум следом.
+
+        Пользователь для отметки берётся из ответа ``reset-traffic``: отдельный
+        GET мог бы упасть уже после сброса и оставить ack незаписанным.
+        """
         api = _FakeApi()
         monkeypatch.setattr('app.cabinet.routes.admin_premium_traffic.RemnaWaveService', lambda: _FakeService(api))
         async with memory_session(monkeypatch, TABLES) as db:
@@ -349,6 +358,8 @@ class TestRegularReset:
             await _reset_regular(db, _subscription(), 'regular', NOW)
 
             assert state.panel_reset_ack_at == PANEL_RESET_AT
+            assert api.reset_calls == [42]
+            assert api.get_user_calls == []
 
     async def test_both_scope_does_not_acknowledge(self, monkeypatch):
         """При 'both' премиум сбрасывается явно — отмечать нечего."""
