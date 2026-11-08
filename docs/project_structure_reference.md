@@ -4830,6 +4830,9 @@
 - `tests/services/test_monitoring_grace_race.py` — Python-модуль
   Классы: нет
   Функции: `test_grace_opened_while_monitoring_walked_its_list_is_not_imported`, `test_renewal_that_landed_while_monitoring_walked_its_list_is_not_expired` — Тот же устаревший список: подписку уже продлили — гасить её нельзя., `test_expiry_does_not_overwrite_a_renewal_committed_right_before_it` — Последнее окно: продление записано уже после перечитывания, но до гашения., `test_expiry_still_expires_a_subscription_that_is_due`, `test_grace_closed_early_between_snapshot_and_reread_is_not_imported` — Ревью 2026-09-15: снимок панели — ещё оверлей, а к перечитыванию грейс уже закрыт досрочно., `test_one_broken_subscription_does_not_stop_the_whole_pass` — Ревью: сбой на одной подписке (удалили во время прохода) прерывал гашение всех остальных.
+- `tests/services/test_monitoring_notification_fixes.py` — Python-модуль
+  Классы: нет
+  Функции: `test_expiring_query_eager_loads_promo_groups_and_prices_renewal` — ``_get_expiring_paid_subscriptions`` -> ``_resolve_renewal_cost_kopeks``., `test_expired_followups_query_eager_loads_promo_groups` — ``_check_expired_subscription_followups`` отдаёт в скидочное уведомление, `test_reload_subscription_eager_loads_promo_groups` — Перечитывание после отката не должно терять промогруппы., `test_handle_unreachable_user_logs_error_as_string` — Штатный «chat not found» — предупреждение со строкой, не объект исключения:, `test_discount_notification_treats_unreachable_user_as_handled` — Недоступный пользователь в скидочном уведомлении — handled, не исключение., `test_logo_fallback_logs_exception_as_string` — Fallback с send_photo на send_message логирует строку, а не исключение.
 - `tests/services/test_monitoring_notification_switches.py` — Python-модуль
   Классы: нет
   Функции: `test_global_switch_stops_monitoring_notification_queries`, `test_expiration_state_updates_even_when_notifications_are_disabled`

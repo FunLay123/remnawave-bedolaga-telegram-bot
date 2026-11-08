@@ -26,14 +26,36 @@ import pytest
 from sqlalchemy import update
 
 from app.config import settings
-from app.database.models import Subscription, SubscriptionStatus, User, UserStatus
+from app.database.models import (
+    PromoGroup,
+    ServerSquad,
+    Subscription,
+    SubscriptionStatus,
+    Tariff,
+    User,
+    UserPromoGroup,
+    UserStatus,
+    server_squad_promo_groups,
+    tariff_promo_groups,
+)
 from app.services import monitoring_service as monitoring_module
 from app.services.monitoring_service import MonitoringService
 from app.services.notification_settings_service import NotificationSettingsService
 from tests.fixtures.sqlite_memory import memory_session
 
 
-TABLES = [User.__table__, Subscription.__table__]
+# Схема полная для связей, которые тянет _reload_subscription: reload после
+# отката грузит промогруппы пользователя, а их selectin-связи — сквады и тарифы.
+TABLES = [
+    User.__table__,
+    PromoGroup.__table__,
+    UserPromoGroup.__table__,
+    Tariff.__table__,
+    tariff_promo_groups,
+    ServerSquad.__table__,
+    server_squad_promo_groups,
+    Subscription.__table__,
+]
 GIB = 1024**3
 PANEL_ID = 9001
 TARIFF_SQUAD = '11111111-1111-1111-1111-111111111111'

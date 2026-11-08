@@ -280,7 +280,13 @@ LOGO_PATH = Path(settings.LOGO_FILE)
 async def _reload_subscription(db: AsyncSession, subscription_id: int) -> Subscription | None:
     result = await db.execute(
         select(Subscription)
-        .options(selectinload(Subscription.user), selectinload(Subscription.tariff))
+        .options(
+            selectinload(Subscription.user).options(
+                selectinload(User.promo_group),
+                selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
+            ),
+            selectinload(Subscription.tariff),
+        )
         .execution_options(populate_existing=True)
         .where(Subscription.id == subscription_id)
     )
@@ -396,7 +402,7 @@ class MonitoringService:
                 logger.warning(
                     'Не удалось отправить сообщение с логотипом, отправляем текстовое сообщение',
                     chat_id=chat_id,
-                    exc=exc,
+                    exc=str(exc),
                 )
 
         try:
@@ -437,7 +443,12 @@ class MonitoringService:
             return True
 
         if isinstance(error, TelegramBadRequest) and self._is_unreachable_error(error):
-            logger.warning('⚠️ Пользователь недоступен', telegram_id=user.telegram_id, context=context, error=error)
+            logger.warning(
+                '⚠️ Пользователь недоступен',
+                telegram_id=user.telegram_id,
+                context=context,
+                error=str(error),
+            )
             return True
 
         return False
@@ -1546,7 +1557,10 @@ class MonitoringService:
                 select(Subscription)
                 .join(User, Subscription.user_id == User.id)
                 .options(
-                    selectinload(Subscription.user),
+                    selectinload(Subscription.user).options(
+                        selectinload(User.promo_group),
+                        selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
+                    ),
                     selectinload(Subscription.tariff),
                 )
                 .where(
@@ -1695,7 +1709,10 @@ class MonitoringService:
             select(Subscription)
             .join(User, Subscription.user_id == User.id)
             .options(
-                selectinload(Subscription.user),
+                selectinload(Subscription.user).options(
+                    selectinload(User.promo_group),
+                    selectinload(User.user_promo_groups).selectinload(UserPromoGroup.promo_group),
+                ),
                 selectinload(Subscription.tariff),
             )
             .where(
