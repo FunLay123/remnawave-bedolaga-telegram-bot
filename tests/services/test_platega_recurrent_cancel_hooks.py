@@ -7,6 +7,7 @@
 
 import contextlib
 import sys
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
 from app.database.crud import platega_subscription as sub_crud
-from app.database.models import Base, PlategaSubscription
+from app.database.models import Base, PlategaSubscription, Subscription, SubscriptionStatus
 from app.services.platega_service import PlategaService
 
 
@@ -65,6 +66,27 @@ async def _create_recurring_record(db, *, platega_subscription_id, status='ACTIV
         platega_subscription_id=platega_subscription_id,
         status=status,
     )
+
+
+def _make_subscription(**overrides) -> Subscription:
+    """Подписка для wiring-тестов на реальной ORM-модели.
+
+    ``SimpleNamespace`` приходилось дополнять вручную при каждом новом поле,
+    которое начинал читать продакшен-код (так упали два теста из-за ``is_trial``).
+    У реальной модели все колонки уже есть, поэтому новые чтения не ломают
+    тесты; значимые для сценария значения задаются через ``overrides``.
+    """
+    defaults = {
+        'id': 1,
+        'user_id': 1,
+        'status': SubscriptionStatus.EXPIRED.value,
+        'end_date': datetime(2020, 1, 1, tzinfo=UTC),
+        'is_trial': False,
+        'remnawave_id': None,
+        'tariff_id': None,
+    }
+    defaults.update(overrides)
+    return Subscription(**defaults)
 
 
 async def test_cancel_by_subscription_calls_platega_and_marks_cancelled(monkeypatch):
@@ -322,7 +344,6 @@ async def test_cancel_safe_wiring_proof_multi_tariff_delete_subscription(monkeyp
     ``app.services.payment.platega`` на момент вызова).
     """
     from app.cabinet.routes.subscription_modules import multi_tariff
-    from app.database.models import SubscriptionStatus
 
     recorded: list[tuple[object, int]] = []
 
@@ -334,19 +355,9 @@ async def test_cancel_safe_wiring_proof_multi_tariff_delete_subscription(monkeyp
 
     monkeypatch.setattr('app.services.payment.platega.cancel_platega_recurring_for_subscription_safe', fake_cancel)
 
-    class FakeSubscription(SimpleNamespace):
-        pass
-
-    subscription = FakeSubscription(
-        id=42,
-        status=SubscriptionStatus.EXPIRED.value,
-        actual_status=SubscriptionStatus.EXPIRED.value,
-        # 3.0.0: панельный юзер адресуется числовым remnawave_id, колонка
-        # remnawave_uuid историческая и роутом не читается.
-        remnawave_id=None,
-        tariff_id=None,
-        user_id=1,
-    )
+    # 3.0.0: панельный юзер адресуется числовым remnawave_id, колонка
+    # remnawave_uuid историческая и роутом не читается.
+    subscription = _make_subscription(id=42)
     user = SimpleNamespace(id=1)
 
     async def fake_get_subscription(db, subscription_id, user_id):
@@ -396,7 +407,6 @@ async def test_cancel_safe_wiring_proof_my_subscriptions_delete_execute(monkeypa
     and the user keeps getting charged for a subscription that no longer
     exists.
     """
-    from app.database.models import SubscriptionStatus
     from app.handlers.subscription import my_subscriptions
 
     recorded: list[tuple[object, int]] = []
@@ -408,14 +418,7 @@ async def test_cancel_safe_wiring_proof_my_subscriptions_delete_execute(monkeypa
 
     monkeypatch.setattr('app.services.payment.platega.cancel_platega_recurring_for_subscription_safe', fake_cancel)
 
-    subscription = SimpleNamespace(
-        id=99,
-        user_id=1,
-        tariff_id=None,
-        status=SubscriptionStatus.EXPIRED.value,
-        actual_status=SubscriptionStatus.EXPIRED.value,
-        remnawave_id=None,
-    )
+    subscription = _make_subscription(id=99)
 
     async def fake_get_subscription(db, sub_id, user_id):
         return subscription

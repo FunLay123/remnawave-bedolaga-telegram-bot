@@ -3210,6 +3210,9 @@
 - `tests/handlers/`
 - `tests/integration/`
 - `tests/live/`
+- `tests/locale_policy.py` — Python-модуль
+  Классы: нет
+  Функции: нет
 - `tests/middlewares/`
 - `tests/migrations/`
 - `tests/services/`
@@ -3251,7 +3254,7 @@
   Функции: `test_offer_renders_operator_details_from_settings`, `test_privacy_and_refund_use_the_same_contacts`, `test_unconfigured_operator_gets_neutral_fallbacks`, `test_contacts_text_contains_details_and_escapes_html`, `test_whitelist_term_is_defined_as_an_option_not_a_bypass_tool`, `test_legal_keyboards_expose_contacts_button`, `test_show_contacts_renders_contacts_and_back_button`
 - `tests/test_locale_integrity.py` — Python-модуль
   Классы: нет
-  Функции: `locales`, `test_all_locales_have_identical_keys`, `test_placeholders_consistent_across_locales` — Every {placeholder} must be identical across languages — the code calls, `test_t_calls_without_default_exist_in_ru` — texts.t('KEY') with NO fallback raises KeyError if the key is absent from ru., `test_t_calls_with_static_default_exist_in_ru` — texts.t('KEY', 'статический дефолт') с ключом вне ru.json отдаёт русский, `test_invite_only_keys_exist_in_every_locale`
+  Функции: `locales`, `test_supported_locales_have_identical_keys`, `test_placeholders_consistent_across_supported_locales` — Every {placeholder} must be identical across supported languages — the, `test_t_calls_without_default_exist_in_ru` — texts.t('KEY') with NO fallback raises KeyError if the key is absent from ru., `test_t_calls_with_static_default_exist_in_ru` — texts.t('KEY', 'статический дефолт') с ключом вне ru.json отдаёт русский, `test_invite_only_keys_exist_in_every_supported_locale`
 - `tests/test_log_messages_have_no_empty_placeholders.py` — Python-модуль
   Классы: нет
   Функции: `test_scanner_sees_the_codebase` — Страховка от «тест зеленеет, потому что ничего не нашёл»., `test_no_message_carries_an_empty_placeholder`, `test_scanner_catches_known_shapes` — Образцы из issue #3276 — проверка, что сторож ловит именно их.
@@ -3284,7 +3287,7 @@
   Функции: `sandbox`, `test_y_with_crlf_enter_is_accepted`, `test_russian_da_is_accepted`, `test_no_cancels_without_touching_anything`, `test_without_terminal_requires_yes`
 - `tests/test_premium_traffic_locales.py` — Python-модуль
   Классы: нет
-  Функции: `test_all_languages_are_present` — Пять языков заявлены в проекте — значит переводы нужны на все пять., `test_premium_keys_exist_in_every_language`, `test_placeholders_match_across_languages` — Разошедшиеся подстановки уронят отправку KeyError только на одном языке., `test_translations_are_not_copies_of_russian` — Забытый перевод легко пропустить — он «работает», но не на том языке., `test_key_sets_are_identical_in_all_languages` — Общий инвариант файлов локализации, а не только премиум-ключей.
+  Функции: `test_all_locale_files_are_present` — Пять файлов заявлены в проекте; остальные языки не поддерживаются, но не удалены., `test_premium_keys_exist_in_supported_languages`, `test_placeholders_match_across_supported_languages` — Разошедшиеся подстановки уронят отправку KeyError только на одном языке., `test_translations_are_not_copies_of_russian` — Забытый перевод легко пропустить — он «работает», но не на том языке., `test_key_sets_are_identical_in_supported_languages` — Общий инвариант файлов локализации, а не только премиум-ключей.
 - `tests/test_pricing_engine.py` — Python-модуль
   Классы: `TestApplyDiscount` (6 методов), `TestStackedDiscounts` (5 методов), `TestPeriodDaysValidation` (3 методов), `TestCalculateServersPrice` (8 методов), `TestCalculateTrafficPrice` (5 методов), `TestCalculateRenewalPriceTariffMode` (7 методов), `TestCalculateRenewalPriceClassicMode` (10 методов), `TestServerPromoGroupFiltering` (2 методов), `TestFromPayloadRoundTrip` (1 методов), `TestFromPayloadLegacyRoundTrip` (1 методов), `TestOriginalPriceIdentity` (3 методов)
   Функции: `test_renewal_pricing_is_frozen`

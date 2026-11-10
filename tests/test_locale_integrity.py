@@ -1,12 +1,13 @@
 """Rock-solid guards for localization integrity.
 
-These catch the failure modes that caused real bugs:
-  * keys present in ru but missing from another language  -> silent ru fallback
-  * a {placeholder} that differs between languages         -> .format() KeyError /
-                                                              missing data at runtime
+The bot supports Russian only; locale files for other languages are kept in the
+repo but are not a contract. What still matters:
   * texts.t('KEY') with no fallback for a key absent in ru -> runtime KeyError
+  * a {placeholder} that differs between *supported* languages -> .format()
+    KeyError / missing data at runtime
 
-If any of these fail, a localization change drifted — fix the locale, not the test.
+Parity checks are skipped while only one language is supported and re-enable
+automatically when a language is added to the policy in ``locale_policy``.
 """
 
 import ast
@@ -15,24 +16,29 @@ import re
 from pathlib import Path
 
 import pytest
+from locale_policy import LOCALE_FILES, SUPPORTED_LANGUAGES
 
 
 LOCALE_DIR = Path(__file__).resolve().parents[1] / 'app' / 'localization' / 'locales'
 APP_DIR = Path(__file__).resolve().parents[1] / 'app'
-LANGS = ['ru', 'en', 'ua', 'fa', 'zh']
 PLACEHOLDER_RE = re.compile(r'\{[^}]*\}')
 # Keys resolved dynamically in Texts._get_value (not stored in the JSON files).
 DYNAMIC_KEYS = {'RULES_TEXT'}
+_ONLY_ONE_LANGUAGE = pytest.mark.skipif(
+    len(SUPPORTED_LANGUAGES) < 2,
+    reason='Поддерживается только ru: остальные файлы локалей сохранены, но не являются контрактом',
+)
 
 
 @pytest.fixture(scope='module')
 def locales():
-    return {lang: json.loads((LOCALE_DIR / f'{lang}.json').read_text(encoding='utf-8')) for lang in LANGS}
+    return {lang: json.loads((LOCALE_DIR / f'{lang}.json').read_text(encoding='utf-8')) for lang in LOCALE_FILES}
 
 
-def test_all_locales_have_identical_keys(locales):
+@_ONLY_ONE_LANGUAGE
+def test_supported_locales_have_identical_keys(locales):
     ru_keys = set(locales['ru'])
-    for lang in LANGS:
+    for lang in SUPPORTED_LANGUAGES:
         if lang == 'ru':
             continue
         keys = set(locales[lang])
@@ -42,16 +48,18 @@ def test_all_locales_have_identical_keys(locales):
         assert not extra, f'{lang}.json has {len(extra)} keys not in ru: {extra[:15]}'
 
 
-def test_placeholders_consistent_across_locales(locales):
-    """Every {placeholder} must be identical across languages — the code calls
-    .format() on the result, so a drifted placeholder breaks at runtime."""
+@_ONLY_ONE_LANGUAGE
+def test_placeholders_consistent_across_supported_locales(locales):
+    """Every {placeholder} must be identical across supported languages — the
+    code calls .format() on the result, so a drifted placeholder breaks at
+    runtime for users of that language."""
     ru = locales['ru']
     problems = []
     for key, ru_val in ru.items():
         if not isinstance(ru_val, str):
             continue
         ru_ph = sorted(PLACEHOLDER_RE.findall(ru_val))
-        for lang in LANGS:
+        for lang in SUPPORTED_LANGUAGES:
             if lang == 'ru':
                 continue
             val = locales[lang].get(key)
@@ -126,5 +134,5 @@ def test_t_calls_with_static_default_exist_in_ru(locales):
         'registration_contact_support',
     ],
 )
-def test_invite_only_keys_exist_in_every_locale(locales, key):
-    assert all(key in locales[lang] for lang in LANGS)
+def test_invite_only_keys_exist_in_every_supported_locale(locales, key):
+    assert all(key in locales[lang] for lang in SUPPORTED_LANGUAGES)

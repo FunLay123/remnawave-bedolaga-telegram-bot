@@ -1175,7 +1175,11 @@ async def test_far_future_end_date_in_single_block_renders_without_tg_time(monke
     html_out = await rich_menu.build_main_menu_rich_html(_make_user(eternal), DummyTexts(), AsyncMock())
 
     assert '<tg-time' not in html_out
-    assert '26725 дн.' in html_out
+    # Точное число дней зависит от сегодняшней даты, поэтому сверяем смысл, а не
+    # захардкоженное значение: дата далёкая — счётчик большой, а не «0 дн.».
+    days_match = re.search(r'(\d+)\s+дн\.', html_out)
+    assert days_match, 'в статусной строке должен остаться счётчик дней'
+    assert int(days_match.group(1)) > 365
 
 
 async def test_try_send_decode_error_falls_back_to_classic(monkeypatch):
