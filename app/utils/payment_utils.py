@@ -74,11 +74,21 @@ def payment_methods_unavailable_text(reason: str) -> str:
 
 
 def payment_amount_text(provider_name: str, min_amount_kopeks: int, max_amount_kopeks: int) -> str:
+    # Экран показывает пересечение лимитов провайдера с глобальным диапазоном
+    # ручного ввода: иначе он может обещать суммы, которые бот отвергнет.
+    lower = max(int(min_amount_kopeks), DEFAULT_TOPUP_MIN_KOPEKS)
+    upper = min(int(max_amount_kopeks), DEFAULT_TOPUP_MAX_KOPEKS)
+
+    if lower > upper:
+        return payment_amount_error_text(
+            'Пополнение этим способом сейчас недоступно: лимиты провайдера не пересекаются с допустимым диапазоном'
+        )
+
     return (
         f'{PAYMENT_SCREEN_HEADER} <b>Сумма пополнения</b>\n\n'
         f'{PAYMENT_BULLET} Способ: {html.escape(provider_name)}\n'
         f'{PAYMENT_SUB_BULLET} Выберите сумму или отправьте число в чат '
-        f'(от {format_min_rubles(min_amount_kopeks)} до {format_max_rubles(max_amount_kopeks)}):'
+        f'(от {format_min_rubles(lower)} до {format_max_rubles(upper)}):'
     )
 
 

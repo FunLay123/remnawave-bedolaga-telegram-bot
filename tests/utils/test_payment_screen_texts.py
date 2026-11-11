@@ -81,6 +81,32 @@ def test_amount_screen_uses_provider_and_whole_ruble_range() -> None:
     assert 'от 50 ₽ до 50000 ₽' in text
 
 
+def test_amount_screen_clamps_provider_min_to_global_minimum() -> None:
+    # Stars разрешает от 1 ₽, но ручной ввод начинается с 50 ₽: экран не должен
+    # обещать сумму, которую process_topup_amount отвергнет.
+    text = payment_amount_text('Telegram Stars', 100, 1_000_000)
+
+    assert 'от 50 ₽ до 10000 ₽' in text
+    assert 'от 1 ₽' not in text
+
+
+def test_amount_screen_clamps_provider_max_to_global_maximum() -> None:
+    # CryptoBot разрешает до 100 000 ₽, глобальный потолок ручного ввода — 50 000 ₽.
+    text = payment_amount_text('CryptoBot', 10_000, 10_000_000)
+
+    assert 'от 100 ₽ до 50000 ₽' in text
+    assert '100000 ₽' not in text
+
+
+def test_amount_screen_without_intersecting_limits_is_unavailable() -> None:
+    text = payment_amount_text('X', 5_000_001, 6_000_000)
+
+    assert 'недоступно' in text.lower()
+    assert 'Выберите сумму' not in text
+    assert 'от 50001 ₽' not in text
+    assert '60000 ₽' not in text
+
+
 def test_range_rounds_min_up_and_max_down() -> None:
     assert format_min_rubles(5_055) == '51 ₽'
     assert format_max_rubles(5_099) == '50 ₽'
