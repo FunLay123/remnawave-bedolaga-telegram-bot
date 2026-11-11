@@ -14,6 +14,7 @@ import pytest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.database import database
@@ -222,3 +223,67 @@ async def test_typed_amount_without_available_methods_explains_and_keeps_state(m
     assert message.answer.await_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data == 'balance_topup'
     assert await state.get_state() == BalanceStates.waiting_for_amount.state
     assert (await state.get_data())['awaiting_topup_amount'] is True
+
+
+def _support_only_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text='Через поддержку', callback_data='topup_support')],
+            [InlineKeyboardButton(text='Назад', callback_data='back_to_menu')],
+        ]
+    )
+
+
+@pytest.mark.asyncio
+async def test_support_only_deployment_shows_support_screen(monkeypatch, state):
+    """Только поддержка: balance_topup не должен вести в тупик экрана суммы."""
+    monkeypatch.setattr(settings, 'SUPPORT_TOPUP_ENABLED', True)
+    monkeypatch.setattr(
+        balance_main,
+        'get_payment_methods_keyboard',
+        MagicMock(return_value=_support_only_keyboard()),
+    )
+    await state.set_state(BalanceStates.waiting_for_amount)
+    await state.update_data(awaiting_topup_amount=True)
+    callback = _callback('balance_topup')
+
+    await balance_main.show_topup_amount_select(callback, _user(balance_kopeks=12_300), AsyncMock(), state)
+
+    text = callback.message.edit_text.await_args.args[0]
+    assert 'Автоматические способы оплаты недоступны' in text
+    assert 'Напишите в поддержку' in text
+    assert 'Пополнение от' not in text
+    callbacks = _callbacks(callback.message.edit_text.await_args.kwargs['reply_markup'])
+    assert 'topup_support' in callbacks
+    assert not [value for value in callbacks if value.startswith('topup_sum|')]
+    assert await state.get_state() is None
+    assert await state.get_data() == {}
+    callback.answer.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_methods_and_support_disabled_shows_unavailable_screen(monkeypatch, state):
+    monkeypatch.setattr(settings, 'SUPPORT_TOPUP_ENABLED', False)
+    monkeypatch.setattr(
+        balance_main,
+        'get_payment_methods_keyboard',
+        MagicMock(
+            return_value=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text='Назад', callback_data='back_to_menu')]]
+            )
+        ),
+    )
+    await state.set_state(BalanceStates.waiting_for_amount)
+    await state.update_data(awaiting_topup_amount=True)
+    callback = _callback('balance_topup')
+
+    await balance_main.show_topup_amount_select(callback, _user(), AsyncMock(), state)
+
+    text = callback.message.edit_text.await_args.args[0]
+    assert 'Способы оплаты временно недоступны' in text
+    assert 'Пополнение от' not in text
+    callbacks = _callbacks(callback.message.edit_text.await_args.kwargs['reply_markup'])
+    assert 'topup_support' not in callbacks
+    assert await state.get_state() is None
+    assert await state.get_data() == {}
+    callback.answer.assert_awaited_once()

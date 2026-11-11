@@ -498,6 +498,21 @@ async def show_topup_amount_select(
         for button in row
         if (callback_data := button.callback_data or '').startswith('topup_') and callback_data != 'topup_support'
     ]
+
+    # Без автоматических способов экран суммы — тупик: показать старый экран
+    # поддержки/недоступности, где кнопка topup_support ещё работает.
+    if not method_ids:
+        full_text = get_payment_methods_text(
+            db_user.language,
+            db_user.balance_kopeks,
+            has_direct_methods=False,
+        )
+        keyboard = get_payment_methods_keyboard(0, db_user.language, back_callback='back_to_menu')
+        await _edit_payment_screen(callback.message, full_text, keyboard)
+        await state.clear()
+        await callback.answer()
+        return
+
     limits = await _get_method_limits_map(db, method_ids)
 
     if limits:
