@@ -1,4 +1,5 @@
 import html
+from collections.abc import Iterable
 from decimal import Decimal, InvalidOperation
 
 import structlog
@@ -18,7 +19,9 @@ from app.keyboards.inline import (
     get_pagination_keyboard,
     get_payment_methods_keyboard,
 )
+from app.keyboards.topup_amounts import get_topup_sum_keyboard, resolve_config_method_id
 from app.localization.texts import get_texts
+from app.services.payment_method_config_service import DEFAULT_QUICK_AMOUNTS, get_methods_amount_limits
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
 from app.utils.payment_button_styles import styled_button
@@ -33,6 +36,7 @@ from app.utils.payment_utils import (
     payment_methods_unavailable_text,
     payment_support_keyboard,
     payment_support_text,
+    topup_amount_select_text,
 )
 from app.utils.timezone import format_local_datetime
 
@@ -372,8 +376,103 @@ async def handle_balance_history_pagination(callback: types.CallbackQuery, db_us
     await show_balance_history(callback, db_user, db, page)
 
 
+def _extract_topup_method(callback_data: str | None) -> str | None:
+    """Метод оплаты из callback кнопки способа; навигация и поддержка — None."""
+    if not callback_data:
+        return None
+    if callback_data.startswith('topup_amount|'):
+        parts = callback_data.split('|')
+        return parts[1] if len(parts) > 1 and parts[1] else None
+    if callback_data.startswith('topup_') and callback_data != 'topup_support':
+        return callback_data[len('topup_') :]
+    return None
+
+
+async def _get_method_limits_map(db: AsyncSession, method_ids: Iterable[str]) -> dict[str, tuple[int, int]]:
+    """Лимиты способов, приведённые к id конфигов кабинета."""
+    config_ids = {resolve_config_method_id(method_id) for method_id in method_ids}
+    return await get_methods_amount_limits(db, config_ids)
+
+
+async def _edit_payment_screen(target: types.Message, text: str, keyboard: types.InlineKeyboardMarkup) -> None:
+    """Правит сообщение, учитывая фото-меню и недоступные сообщения."""
+    if isinstance(target, InaccessibleMessage):
+        await target.answer(text, reply_markup=keyboard, parse_mode='HTML')
+        return
+
+    try:
+        await target.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+    except TelegramBadRequest:
+        try:
+            await target.edit_caption(caption=text, reply_markup=keyboard, parse_mode='HTML')
+        except TelegramBadRequest:
+            try:
+                await target.delete()
+            except TelegramBadRequest:
+                pass
+            await target.answer(text, reply_markup=keyboard, parse_mode='HTML')
+
+
+async def _render_payment_methods(
+    target: types.Message,
+    db_user: User,
+    db: AsyncSession,
+    amount_kopeks: int,
+    *,
+    edit: bool,
+) -> bool:
+    """Список способов, доступных для суммы. False — автоматических способов нет."""
+    keyboard = get_payment_methods_keyboard(amount_kopeks, db_user.language, back_callback='balance_topup')
+    method_ids = [
+        method
+        for row in keyboard.inline_keyboard
+        for button in row
+        if (method := _extract_topup_method(button.callback_data)) is not None
+    ]
+    limits = await _get_method_limits_map(db, method_ids)
+
+    rows: list[list[types.InlineKeyboardButton]] = []
+    has_direct_methods = False
+    for row in keyboard.inline_keyboard:
+        kept: list[types.InlineKeyboardButton] = []
+        for button in row:
+            method = _extract_topup_method(button.callback_data)
+            if method is not None:
+                method_limits = limits.get(resolve_config_method_id(method))
+                if method_limits is not None:
+                    min_amount, max_amount = method_limits
+                    if not min_amount <= amount_kopeks <= max_amount:
+                        continue
+                has_direct_methods = True
+            kept.append(button)
+        if kept:
+            rows.append(kept)
+
+    if not has_direct_methods:
+        return False
+
+    full_text = get_payment_methods_text(
+        db_user.language,
+        db_user.balance_kopeks,
+        has_direct_methods=True,
+        amount_kopeks=amount_kopeks,
+    )
+    markup = types.InlineKeyboardMarkup(inline_keyboard=rows)
+
+    if edit:
+        await _edit_payment_screen(target, full_text, markup)
+    else:
+        await target.answer(full_text, reply_markup=markup, parse_mode='HTML')
+    return True
+
+
 @error_handler
-async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext):
+async def show_topup_amount_select(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
     texts = get_texts(db_user.language)
 
     # Проверка ограничения на пополнение
@@ -393,52 +492,65 @@ async def show_payment_methods(callback: types.CallbackQuery, db_user: User, db:
         await callback.answer()
         return
 
-    # Проверяем сохранённую корзину для автоподстановки суммы пополнения
-    amount_kopeks = 0
-    try:
-        from app.services.user_cart_service import user_cart_service
-
-        cart_data = await user_cart_service.get_user_cart(db_user.id)
-        if cart_data and cart_data.get('saved_cart'):
-            missing = cart_data.get('missing_amount', 0)
-            if missing > 0:
-                amount_kopeks = missing
-    except Exception:
-        pass
-
-    keyboard = get_payment_methods_keyboard(amount_kopeks, db_user.language)
-
-    # Автоматические способы — любые кнопки пополнения, кроме поддержки.
-    has_direct_methods = any(
-        (button.callback_data or '').startswith('topup_') and button.callback_data != 'topup_support'
-        for row in keyboard.inline_keyboard
+    method_ids = [
+        callback_data[len('topup_') :]
+        for row in get_payment_methods_keyboard(0, db_user.language).inline_keyboard
         for button in row
-    )
+        if (callback_data := button.callback_data or '').startswith('topup_') and callback_data != 'topup_support'
+    ]
+    limits = await _get_method_limits_map(db, method_ids)
 
-    full_text = get_payment_methods_text(
-        db_user.language,
-        db_user.balance_kopeks,
-        has_direct_methods=has_direct_methods,
-    )
+    if limits:
+        min_bound = max(DEFAULT_TOPUP_MIN_KOPEKS, min(low for low, _ in limits.values()))
+        max_bound = min(DEFAULT_TOPUP_MAX_KOPEKS, max(high for _, high in limits.values()))
+        if min_bound > max_bound:
+            min_bound = DEFAULT_TOPUP_MIN_KOPEKS
+            max_bound = DEFAULT_TOPUP_MAX_KOPEKS
+    else:
+        min_bound = DEFAULT_TOPUP_MIN_KOPEKS
+        max_bound = DEFAULT_TOPUP_MAX_KOPEKS
 
-    # Если сообщение недоступно, отправляем новое
-    if isinstance(callback.message, InaccessibleMessage):
-        await callback.message.answer(full_text, reply_markup=keyboard, parse_mode='HTML')
-        await callback.answer()
+    amounts = [amount for amount in DEFAULT_QUICK_AMOUNTS if min_bound <= amount <= max_bound]
+    text = topup_amount_select_text(db_user.balance_kopeks, min_bound, max_bound)
+    keyboard = get_topup_sum_keyboard(db_user.language, amounts, back_callback='back_to_menu')
+
+    await _edit_payment_screen(callback.message, text, keyboard)
+    await state.set_state(BalanceStates.waiting_for_amount)
+    await state.update_data(awaiting_topup_amount=True, payment_method=None)
+    await callback.answer()
+
+
+@error_handler
+async def handle_topup_sum_choice(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    state: FSMContext,
+):
+    try:
+        _, amount_str = callback.data.split('|', 1)
+        amount_kopeks = int(amount_str)
+    except (AttributeError, TypeError, ValueError):
+        await callback.answer('❌ Некорректный запрос', show_alert=True)
         return
 
-    try:
-        await callback.message.edit_text(full_text, reply_markup=keyboard, parse_mode='HTML')
-    except TelegramBadRequest:
-        try:
-            await callback.message.edit_caption(full_text, reply_markup=keyboard, parse_mode='HTML')
-        except TelegramBadRequest:
-            try:
-                await callback.message.delete()
-            except TelegramBadRequest:
-                pass
-            await callback.message.answer(full_text, reply_markup=keyboard, parse_mode='HTML')
+    if amount_kopeks <= 0:
+        await callback.answer('❌ Некорректная сумма', show_alert=True)
+        return
 
+    if amount_kopeks < DEFAULT_TOPUP_MIN_KOPEKS or amount_kopeks > DEFAULT_TOPUP_MAX_KOPEKS:
+        await callback.answer(
+            f'Допустимая сумма: от {format_min_rubles(DEFAULT_TOPUP_MIN_KOPEKS)} '
+            f'до {format_max_rubles(DEFAULT_TOPUP_MAX_KOPEKS)}',
+            show_alert=True,
+        )
+        return
+
+    if not await _render_payment_methods(callback.message, db_user, db, amount_kopeks, edit=True):
+        await callback.answer('Для этой суммы нет доступных способов оплаты', show_alert=True)
+        return
+
+    await state.clear()
     await callback.answer()
 
 
@@ -605,6 +717,23 @@ async def process_topup_amount(message: types.Message, db_user: User, state: FSM
 
         amount_kopeks = int(amount_rubles * 100)
         data = await state.get_data()
+
+        # Пользователь ещё не выбрал способ: показать список для введённой суммы.
+        if data.get('awaiting_topup_amount') and not data.get('payment_method'):
+            from app.database.database import AsyncSessionLocal
+
+            async with AsyncSessionLocal() as db:
+                rendered = await _render_payment_methods(message, db_user, db, amount_kopeks, edit=False)
+            if rendered:
+                await state.clear()
+            else:
+                await message.answer(
+                    payment_amount_error_text('Для этой суммы нет доступных способов оплаты'),
+                    reply_markup=get_back_keyboard(db_user.language, callback_data='balance_topup'),
+                    parse_mode='HTML',
+                )
+            return
+
         payment_method = data.get('payment_method', 'stars')
 
         if payment_method in ['yookassa', 'yookassa_sbp'] and (
@@ -771,7 +900,8 @@ def register_balance_handlers(dp: Dispatcher):
 
     dp.callback_query.register(handle_balance_history_pagination, F.data.startswith('balance_history_page_'))
 
-    dp.callback_query.register(show_payment_methods, F.data == 'balance_topup')
+    dp.callback_query.register(show_topup_amount_select, F.data == 'balance_topup')
+    dp.callback_query.register(handle_topup_sum_choice, F.data.startswith('topup_sum|'))
 
     from .stars import confirm_stars_test_payment, start_stars_payment
 

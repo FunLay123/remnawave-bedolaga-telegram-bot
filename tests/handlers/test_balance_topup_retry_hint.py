@@ -137,7 +137,7 @@ async def test_amount_error_is_compact_and_shows_whole_ruble_limits(
     payment_environment.settings.YOOKASSA_MAX_AMOUNT_KOPEKS = maximum
     await state.set_state(BalanceStates.waiting_for_amount)
     await state.set_data({'payment_method': 'yookassa'})
-    message = _message('40')
+    message = _message('50')
 
     if entry == 'manual':
         await balance_main.process_topup_amount(message, user, state)
@@ -166,7 +166,7 @@ async def test_minimum_above_global_input_ceiling_reports_unavailable(payment_en
     payment_environment.settings.YOOKASSA_MAX_AMOUNT_KOPEKS = 6_000_000
     await state.set_state(BalanceStates.waiting_for_amount)
     await state.set_data({'payment_method': 'yookassa'})
-    message = _message('40')
+    message = _message('50')
 
     if entry == 'manual':
         await balance_main.process_topup_amount(message, user, state)
@@ -188,7 +188,7 @@ async def test_minimum_above_global_input_ceiling_reports_unavailable(payment_en
     ('text', 'expected_kopeks'),
     [
         ('261.03', 26103),
-        ('1.15', 115),
+        ('51.15', 5115),
         ('261,03', 26103),
     ],
 )

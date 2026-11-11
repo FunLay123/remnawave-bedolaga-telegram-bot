@@ -1752,7 +1752,12 @@ def _apply_payment_method_button_styles(keyboard: list[list[InlineKeyboardButton
                 row[idx] = apply_button_style(button, f'method:{method}')
 
 
-def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LANGUAGE) -> InlineKeyboardMarkup:
+def get_payment_methods_keyboard(
+    amount_kopeks: int,
+    language: str = DEFAULT_LANGUAGE,
+    *,
+    back_callback: str = 'back_to_menu',
+) -> InlineKeyboardMarkup:
     texts = get_texts(language)
     keyboard = []
 
@@ -2392,7 +2397,7 @@ def get_payment_methods_keyboard(amount_kopeks: int, language: str = DEFAULT_LAN
             ]
         )
 
-    keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data='back_to_menu')])
+    keyboard.append([InlineKeyboardButton(text=texts.BACK, callback_data=back_callback)])
 
     _apply_payment_name_overrides(keyboard)
     _apply_payment_method_button_styles(keyboard)

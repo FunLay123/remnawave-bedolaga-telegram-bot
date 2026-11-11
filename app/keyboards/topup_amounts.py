@@ -76,6 +76,33 @@ async def _load_quick_amounts(db: AsyncSession, method: str, min_amount_kopeks: 
     return get_effective_quick_amounts(config.quick_amounts, min_amount, max_amount)
 
 
+def get_topup_sum_keyboard(
+    language: str,
+    amounts: list[int],
+    back_callback: str = 'back_to_menu',
+) -> InlineKeyboardMarkup:
+    """Быстрые суммы до выбора способа оплаты: callback несёт выбранную сумму."""
+    texts = get_texts(language)
+    keyboard: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for amount in amounts:
+        row.append(
+            styled_button(
+                f'amount:{amount}',
+                format_quick_amount(amount),
+                callback_data=f'topup_sum|{amount}',
+                fallback_action='amount:*',
+            )
+        )
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([styled_button('nav:back', texts.BACK, callback_data=back_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
 async def get_topup_amount_keyboard(
     method: str,
     language: str = DEFAULT_LANGUAGE,

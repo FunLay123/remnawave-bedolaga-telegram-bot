@@ -14,8 +14,10 @@ from app.utils.payment_utils import (
     payment_amount_text,
     payment_invoice_keyboard,
     payment_invoice_text,
+    payment_methods_text,
     payment_success_text,
     payment_support_text,
+    topup_amount_select_text,
 )
 
 
@@ -34,6 +36,27 @@ def test_methods_screen_has_balance_and_no_method_descriptions() -> None:
     assert f'{PAYMENT_SUB_BULLET} Выберите способ оплаты:' in text
     assert 'быстро и удобно' not in text
     assert 'Выберите способ пополнения' not in text
+
+
+def test_amount_select_screen_shows_balance_and_whole_ruble_range() -> None:
+    text = topup_amount_select_text(12_300, 5_000, 1_000_000)
+
+    assert text.startswith(PAYMENT_SCREEN_HEADER)
+    assert '<b>Пополнение баланса</b>' in text
+    assert f'{PAYMENT_BULLET} Баланс: <b>123 ₽</b>' in text
+    assert f'{PAYMENT_SUB_BULLET} Пополнение от 50 ₽ до 10000 ₽' in text
+    assert f'{PAYMENT_SUB_BULLET} Выберите сумму или отправьте число в чат:' in text
+
+
+def test_methods_screen_shows_chosen_amount_before_method_prompt() -> None:
+    text = payment_methods_text(15_000, 5_000)
+
+    amount_line = f'{PAYMENT_SUB_BULLET} К пополнению: <b>50 ₽</b>'
+    assert amount_line in text
+    assert text.index(amount_line) < text.index('Выберите способ оплаты:')
+
+    assert 'К пополнению' not in payment_methods_text(15_000)
+    assert 'К пополнению' not in payment_methods_text(15_000, 0)
 
 
 def test_only_support_and_no_methods_use_a_short_blockquote(monkeypatch) -> None:

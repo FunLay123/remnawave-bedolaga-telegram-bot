@@ -1196,7 +1196,7 @@
   Функции: `process_lava_payment_amount` — Обрабатывает сумму для Lava., `start_lava_topup`, `start_lava_card_topup`, `start_lava_sbp_topup`
 - `app/handlers/balance/main.py` — Python-модуль
   Классы: нет
-  Функции: `route_payment_by_method` — Роутер платежей по методу оплаты., `show_balance_menu`, `show_balance_history`, `handle_balance_history_pagination`, `show_payment_methods`, `handle_payment_methods_unavailable`, `handle_successful_topup_with_cart`, `request_support_topup`, `process_topup_amount`, `handle_sbp_payment`, `handle_topup_amount_callback`, `register_balance_handlers`
+  Функции: `route_payment_by_method` — Роутер платежей по методу оплаты., `show_balance_menu`, `show_balance_history`, `handle_balance_history_pagination`, `show_topup_amount_select`, `handle_topup_sum_choice`, `handle_payment_methods_unavailable`, `handle_successful_topup_with_cart`, `request_support_topup`, `process_topup_amount`, `handle_sbp_payment`, `handle_topup_amount_callback`, `register_balance_handlers`
 - `app/handlers/balance/mulenpay.py` — Python-модуль
   Классы: нет
   Функции: `start_mulenpay_payment`, `process_mulenpay_payment_amount`, `check_mulenpay_payment_status`
@@ -1316,7 +1316,7 @@
   Функции: `get_main_reply_keyboard`, `get_admin_reply_keyboard`, `get_cancel_keyboard`, `get_confirmation_reply_keyboard`, `get_skip_keyboard`, `remove_keyboard`, `get_contact_keyboard`, `get_location_keyboard`
 - `app/keyboards/topup_amounts.py` — Python-модуль
   Классы: нет
-  Функции: `resolve_config_method_id`, `format_quick_amount`, `get_topup_amount_keyboard`
+  Функции: `resolve_config_method_id`, `format_quick_amount`, `get_topup_sum_keyboard` — Быстрые суммы до выбора способа оплаты: callback несёт выбранную сумму., `get_topup_amount_keyboard`
 - `app/keyboards/withdrawal.py` — Python-модуль
   Классы: нет
   Функции: `get_withdrawal_request_keyboard` — Клавиатура заявки по её статусу и роли получателя; ``None`` — кнопок нет.
@@ -1693,7 +1693,7 @@
 - `app/services/payment/`
 - `app/services/payment_method_config_service.py` — Python-модуль
   Классы: нет
-  Функции: `refresh_display_name_overrides` — Reload the method_id -> display_name override cache from the DB., `get_display_name_override` — Sync read of a cabinet-set display name for a method, or None if not set., `normalize_quick_amounts`, `get_effective_quick_amounts`, `get_method_amount_limits` — Эффективные min/max метода: настройка кабинета, иначе дефолт из env., `ensure_payment_method_configs` — Initialize payment method configs if they don't exist yet., `get_all_configs` — Get all payment method configs ordered by sort_order., `get_config_by_method_id` — Get a single config by method_id., `update_config` — Update a payment method config., `update_sort_order` — Batch update sort order for all methods., `get_all_promo_groups` — Get all promo groups for the filter selector., `get_enabled_methods_for_user` — Get payment methods available for a specific user.
+  Функции: `refresh_display_name_overrides` — Reload the method_id -> display_name override cache from the DB., `get_display_name_override` — Sync read of a cabinet-set display name for a method, or None if not set., `normalize_quick_amounts`, `get_effective_quick_amounts`, `get_method_amount_limits` — Эффективные min/max метода: настройка кабинета, иначе дефолт из env., `get_methods_amount_limits` — Эффективные min/max для набора конфигов одним запросом., `ensure_payment_method_configs` — Initialize payment method configs if they don't exist yet., `get_all_configs` — Get all payment method configs ordered by sort_order., `get_config_by_method_id` — Get a single config by method_id., `update_config` — Update a payment method config., `update_sort_order` — Batch update sort order for all methods., `get_all_promo_groups` — Get all promo groups for the filter selector., `get_enabled_methods_for_user` — Get payment methods available for a specific user.
 - `app/services/payment_search_service.py` — Python-модуль
   Классы: `StatusFilter`, `PeriodPreset`, `SearchParams` (2 методов), `SearchStats`
   Функции: `search_payments` — Search payments across all (or filtered) providers., `search_payments_stats` — Compute aggregated statistics for the given search filters.
@@ -2352,7 +2352,7 @@
   Функции: `configure_payment_logger` — Configure the payment logger with the given handler., `get_payment_logger` — Return the payment logger instance.
 - `app/utils/payment_utils.py` — Python-модуль
   Классы: нет
-  Функции: `format_whole_rubles` — Сумма строго в целых рублях: 18 699 копеек → «186 ₽»., `format_min_rubles` — Минимум округляется вверх: показанная граница должна проходить валидацию., `format_max_rubles` — Максимум округляется вниз по той же причине., `payment_methods_text`, `payment_methods_unavailable_text`, `payment_amount_text`, `payment_invoice_text`, `payment_success_text`, `payment_support_text`, `payment_amount_error_text`, `payment_amount_range_error` — Компактная ошибка с границами, которые действительно пройдут валидацию., `payment_submethod_text`, `payment_invoice_keyboard`, `payment_support_keyboard`, `verify_payment_amount` — Check that the received amount matches the expected amount within tolerance., `get_available_payment_methods` — Возвращает список доступных способов оплаты с их настройками, `get_payment_methods_text` — Текст экрана «Пополнение баланса»., `is_payment_method_available` — Проверяет, доступен ли конкретный способ оплаты, `get_payment_method_status` — Возвращает статус всех способов оплаты, `get_enabled_payment_methods_count` — Возвращает количество включенных способов оплаты (не считая поддержку)
+  Функции: `format_whole_rubles` — Сумма строго в целых рублях: 18 699 копеек → «186 ₽»., `format_min_rubles` — Минимум округляется вверх: показанная граница должна проходить валидацию., `format_max_rubles` — Максимум округляется вниз по той же причине., `topup_amount_select_text`, `payment_methods_text`, `payment_methods_unavailable_text`, `payment_amount_text`, `payment_invoice_text`, `payment_success_text`, `payment_support_text`, `payment_amount_error_text`, `payment_amount_range_error` — Компактная ошибка с границами, которые действительно пройдут валидацию., `payment_submethod_text`, `payment_invoice_keyboard`, `payment_support_keyboard`, `verify_payment_amount` — Check that the received amount matches the expected amount within tolerance., `get_available_payment_methods` — Возвращает список доступных способов оплаты с их настройками, `get_payment_methods_text` — Текст экрана «Пополнение баланса»., `is_payment_method_available` — Проверяет, доступен ли конкретный способ оплаты, `get_payment_method_status` — Возвращает статус всех способов оплаты, `get_enabled_payment_methods_count` — Возвращает количество включенных способов оплаты (не считая поддержку)
 - `app/utils/photo_message.py` — Python-модуль
   Классы: нет
   Функции: `safe_edit_or_resend` — Безопасно отредактировать текст сообщения или отправить новое при ошибке., `edit_or_answer_photo`
@@ -2756,6 +2756,7 @@
 - `docs/superpowers/plans/2026-10-29-referral-days-only-backend.md` — файл
 - `docs/superpowers/plans/2026-10-29-referral-days-only-ui.md` — файл
 - `docs/superpowers/plans/2026-10-30-legal-documents-support-menu.md` — файл
+- `docs/superpowers/plans/2026-11-11-topup-amount-first.md` — файл
 
 #### docs/superpowers/specs
 
@@ -4302,6 +4303,9 @@
 - `tests/handlers/test_balance_quick_topup.py` — Python-модуль
   Классы: нет
   Функции: `test_answers_the_tap_before_calling_the_provider`, `test_stale_query_is_not_reported_as_topup_error` — Устаревший запрос по дороге — предупреждение декоратора, а не отчёт об ошибке., `test_provider_failure_is_reported_once_without_second_answer`, `test_unknown_method_is_reported_with_a_message`, `test_tribute_flow_owns_the_answer` — Сценарии, которым передаётся сам callback, отвечают на нажатие сами — родитель не лезет., `test_invalid_amount_alerts_immediately`
+- `tests/handlers/test_balance_topup_amount_step.py` — Python-модуль
+  Классы: нет
+  Функции: `state`, `test_balance_topup_renders_amount_screen`, `test_quick_sum_renders_methods_with_amount`, `test_typed_amount_below_global_min_shows_minimum`, `test_typed_amount_renders_methods_for_chosen_sum`, `test_methods_are_filtered_by_amount_limits`, `test_quick_sum_without_available_methods_keeps_state`, `test_typed_amount_without_available_methods_explains_and_keeps_state`
 - `tests/handlers/test_balance_topup_retry_hint.py` — Python-модуль
   Классы: нет
   Функции: `payment_environment`, `state`, `user`, `test_rejected_purchase_topup_keeps_input_open_until_user_retries`, `test_amount_error_is_compact_and_shows_whole_ruble_limits`, `test_minimum_above_global_input_ceiling_reports_unavailable`, `test_decimal_amount_is_converted_without_float_truncation` — 261.03 ₽ — ровно 26103 копейки: float(261.03) * 100 теряет копейку., `test_non_numeric_amount_keeps_the_existing_error`, `test_finite_but_huge_amount_is_rejected_instead_of_crashing` — Конечное число с огромным порядком не должно ронять хендлер.
@@ -5538,7 +5542,7 @@
   Функции: `test_unconfigured_action_is_a_noop`, `test_icon_is_applied_and_leading_emoji_is_stripped`, `test_invalid_icon_id_is_ignored_but_style_still_applies`, `test_invalid_style_is_ignored`, `test_amount_and_submethod_fallbacks`, `test_invoice_provider_fallback`, `test_exact_key_beats_fallback`, `test_nav_keys_are_supported_but_empty_by_default`, `test_styled_button_preserves_url_and_callback`, `test_methods_keyboard_uses_registry`, `test_invoice_and_support_keyboards_use_registry`
 - `tests/utils/test_payment_screen_texts.py` — Python-модуль
   Классы: нет
-  Функции: `test_whole_rubles_drops_kopecks_without_rounding_up`, `test_methods_screen_has_balance_and_no_method_descriptions`, `test_only_support_and_no_methods_use_a_short_blockquote`, `test_amount_screen_uses_provider_and_whole_ruble_range`, `test_range_rounds_min_up_and_max_down`, `test_range_without_whole_ruble_values_shows_exact_bounds`, `test_range_clamped_to_global_manual_input_limits`, `test_invoice_screen_has_amount_and_optional_stars`, `test_invoice_screen_can_show_secondary_currency`, `test_invoice_screen_without_known_amount_points_to_provider_page`, `test_success_screen_shows_credit_and_balance_transition`, `test_success_screen_without_old_balance_shows_only_new_balance`, `test_success_screen_without_any_balance_omits_balance_line`, `test_support_screen_is_compact_and_escapes_user_id`, `test_amount_error_is_a_compact_blockquote`, `test_invoice_keyboard_can_use_callback_pay_button`, `test_invoice_keyboard_has_primary_pay_button_and_cancel`
+  Функции: `test_whole_rubles_drops_kopecks_without_rounding_up`, `test_methods_screen_has_balance_and_no_method_descriptions`, `test_amount_select_screen_shows_balance_and_whole_ruble_range`, `test_methods_screen_shows_chosen_amount_before_method_prompt`, `test_only_support_and_no_methods_use_a_short_blockquote`, `test_amount_screen_uses_provider_and_whole_ruble_range`, `test_range_rounds_min_up_and_max_down`, `test_range_without_whole_ruble_values_shows_exact_bounds`, `test_range_clamped_to_global_manual_input_limits`, `test_invoice_screen_has_amount_and_optional_stars`, `test_invoice_screen_can_show_secondary_currency`, `test_invoice_screen_without_known_amount_points_to_provider_page`, `test_success_screen_shows_credit_and_balance_transition`, `test_success_screen_without_old_balance_shows_only_new_balance`, `test_success_screen_without_any_balance_omits_balance_line`, `test_support_screen_is_compact_and_escapes_user_id`, `test_amount_error_is_a_compact_blockquote`, `test_invoice_keyboard_can_use_callback_pay_button`, `test_invoice_keyboard_has_primary_pay_button_and_cancel`
 - `tests/utils/test_premium_squad_lines.py` — Python-модуль
   Классы: нет
   Функции: `test_general_limit_is_exhausted_by_numbers`, `test_exhausted_line_uses_custom_emoji`, `test_rich_block_shows_only_the_reason_when_general_limit_is_exhausted`

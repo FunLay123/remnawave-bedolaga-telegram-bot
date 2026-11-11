@@ -16,7 +16,7 @@ PAYMENT_SUB_BULLET = '<tg-emoji emoji-id="5276288708054624909">▫️</tg-emoji>
 PAYMENT_PAY_ICON_ID = '5334552404736104314'
 PAYMENT_SUPPORT_ICON_ID = '5988023995125993550'
 
-DEFAULT_TOPUP_MIN_KOPEKS = 1_00
+DEFAULT_TOPUP_MIN_KOPEKS = 50_00
 DEFAULT_TOPUP_MAX_KOPEKS = 50_000_00
 
 
@@ -43,12 +43,30 @@ def _format_exact_rubles(amount_kopeks: int) -> str:
     return f'{rubles}.{kopeks:02d}'.rstrip('0').rstrip('.') + ' ₽'
 
 
-def payment_methods_text(balance_kopeks: int) -> str:
+def topup_amount_select_text(
+    balance_kopeks: int,
+    min_amount_kopeks: int,
+    max_amount_kopeks: int,
+) -> str:
     return (
         f'{PAYMENT_SCREEN_HEADER} <b>Пополнение баланса</b>\n\n'
         f'{PAYMENT_BULLET} Баланс: <b>{format_whole_rubles(balance_kopeks)}</b>\n'
-        f'{PAYMENT_SUB_BULLET} Выберите способ оплаты:'
+        f'{PAYMENT_SUB_BULLET} Пополнение от {format_min_rubles(min_amount_kopeks)} '
+        f'до {format_max_rubles(max_amount_kopeks)}\n'
+        f'{PAYMENT_SUB_BULLET} Выберите сумму или отправьте число в чат:'
     )
+
+
+def payment_methods_text(balance_kopeks: int, amount_kopeks: int | None = None) -> str:
+    lines = [
+        f'{PAYMENT_SCREEN_HEADER} <b>Пополнение баланса</b>',
+        '',
+        f'{PAYMENT_BULLET} Баланс: <b>{format_whole_rubles(balance_kopeks)}</b>',
+    ]
+    if amount_kopeks is not None and amount_kopeks > 0:
+        lines.append(f'{PAYMENT_SUB_BULLET} К пополнению: <b>{format_whole_rubles(amount_kopeks)}</b>')
+    lines.append(f'{PAYMENT_SUB_BULLET} Выберите способ оплаты:')
+    return '\n'.join(lines)
 
 
 def payment_methods_unavailable_text(reason: str) -> str:
@@ -774,6 +792,7 @@ def get_payment_methods_text(
     balance_kopeks: int = 0,
     *,
     has_direct_methods: bool = True,
+    amount_kopeks: int | None = None,
 ) -> str:
     """Текст экрана «Пополнение баланса».
 
@@ -782,7 +801,7 @@ def get_payment_methods_text(
     методов зависит только короткая подсказка.
     """
     if has_direct_methods:
-        return payment_methods_text(balance_kopeks)
+        return payment_methods_text(balance_kopeks, amount_kopeks)
 
     if settings.is_support_topup_enabled():
         reason = 'Автоматические способы оплаты недоступны. Напишите в поддержку.'

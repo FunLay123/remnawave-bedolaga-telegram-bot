@@ -62,7 +62,8 @@ async def test_amount_above_method_max_is_rejected(monkeypatch):
     await stars_handler.process_stars_payment_amount(message, _user(), 1_000_001, _state())
 
     hint = message.answer.await_args.args[0]
-    assert 'от 1 ₽ до 10000 ₽' in hint
+    # Глобальный минимум 50 ₽: диапазон в ошибке не обещает меньшую сумму.
+    assert 'от 50 ₽ до 10000 ₽' in hint
     payment_service_factory.assert_not_called()
 
 

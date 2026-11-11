@@ -1,5 +1,7 @@
 """Service for managing payment method display configurations in cabinet."""
 
+from collections.abc import Iterable
+
 import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -7,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database.models import PaymentMethodConfig, PromoGroup
+from app.utils.payment_utils import DEFAULT_TOPUP_MAX_KOPEKS, DEFAULT_TOPUP_MIN_KOPEKS
 
 
 logger = structlog.get_logger(__name__)
@@ -426,6 +429,44 @@ async def get_method_amount_limits(db: AsyncSession, method_id: str) -> tuple[in
     min_amount = config.min_amount_kopeks if config and config.min_amount_kopeks is not None else default_min
     max_amount = config.max_amount_kopeks if config and config.max_amount_kopeks is not None else default_max
     return int(min_amount), int(max_amount)
+
+
+async def get_methods_amount_limits(
+    db: AsyncSession,
+    config_ids: Iterable[str],
+) -> dict[str, tuple[int, int]]:
+    """Эффективные min/max для набора конфигов одним запросом.
+
+    Ключи — те же ``config_ids``, что передал вызывающий. Для конфига без
+    собственных лимитов берутся дефолты метода; методы без конфига и без
+    дефолтов в результат не попадают.
+    """
+    method_ids = list(dict.fromkeys(config_ids))
+    if not method_ids:
+        return {}
+
+    result = await db.execute(select(PaymentMethodConfig).where(PaymentMethodConfig.method_id.in_(method_ids)))
+    configs = {config.method_id: config for config in result.scalars().all()}
+    defaults = _get_method_defaults()
+
+    limits: dict[str, tuple[int, int]] = {}
+    for method_id in method_ids:
+        config = configs.get(method_id)
+        method_def = defaults.get(method_id)
+        if config is None and method_def is None:
+            continue
+
+        if method_def is None:
+            default_min = DEFAULT_TOPUP_MIN_KOPEKS
+            default_max = DEFAULT_TOPUP_MAX_KOPEKS
+        else:
+            default_min = int(method_def.get('default_min', DEFAULT_TOPUP_MIN_KOPEKS))
+            default_max = int(method_def.get('default_max', DEFAULT_TOPUP_MAX_KOPEKS))
+        min_amount = config.min_amount_kopeks if config and config.min_amount_kopeks is not None else default_min
+        max_amount = config.max_amount_kopeks if config and config.max_amount_kopeks is not None else default_max
+        limits[method_id] = (int(min_amount), int(max_amount))
+
+    return limits
 
 
 # ============ Initialization ============
