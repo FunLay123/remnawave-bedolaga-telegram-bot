@@ -18,9 +18,10 @@ def test_purchase_offers_single_topup_button(monkeypatch):
 
     keyboard = get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000)
     callbacks = _callbacks(keyboard)
-    topup = next(button for button in _buttons(keyboard) if button.callback_data == 'balance_topup')
+    topup = next(button for button in _buttons(keyboard) if button.text.startswith('Пополнить на '))
 
     assert topup.text == f'Пополнить на {settings.format_price(50000)}'
+    assert topup.callback_data == 'topup_sum|50000'
     assert topup.icon_custom_emoji_id == '5332588449335628124'
     assert topup.style == 'primary'
     assert not any((c or '').startswith('topup_amount|') for c in callbacks)
@@ -34,8 +35,23 @@ def test_purchase_topup_does_not_depend_on_autopurchase_flag(monkeypatch):
     keyboard = get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000)
     callbacks = _callbacks(keyboard)
 
-    assert 'balance_topup' in callbacks
+    assert 'topup_sum|50000' in callbacks
     assert not any((c or '').startswith('topup_amount|') for c in callbacks)
+
+
+def test_non_positive_missing_amount_keeps_plain_balance_topup(monkeypatch):
+    """Нехватка <= 0: явной суммы нет, кнопка открывает экран выбора суммы."""
+    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', False)
+
+    for missing in (0, -100):
+        keyboards = [
+            get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=missing),
+            get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=missing),
+        ]
+        for keyboard in keyboards:
+            callbacks = _callbacks(keyboard)
+            assert 'balance_topup' in callbacks
+            assert not any((c or '').startswith('topup_sum|') for c in callbacks)
 
 
 def test_purchase_message_is_compact_and_has_no_cart_hint():
@@ -71,7 +87,7 @@ def test_sbp_purchase_offered_on_insufficient_balance(monkeypatch):
         callbacks = _callbacks(get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=50000))
 
         assert 'tariff_sbp:7' in callbacks
-        assert 'balance_topup' in callbacks
+        assert 'topup_sum|50000' in callbacks
 
 
 def test_no_sbp_purchase_when_recurrent_disabled(monkeypatch):
@@ -99,9 +115,11 @@ def test_extend_offers_single_topup_button_when_autopurchase_enabled(monkeypatch
 
     keyboard = get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=50000)
     callbacks = _callbacks(keyboard)
+    topup = next(button for button in _buttons(keyboard) if button.callback_data == 'topup_sum|50000')
 
-    # отдельные topup_amount|… больше не нужны: сумма недостачи лежит в корзине
-    assert 'balance_topup' in callbacks
+    # отдельные topup_amount|… больше не нужны: сумма недостачи идёт в topup_sum|…
+    assert topup.text == f'Пополнить на {settings.format_price(50000)}'
+    assert 'topup_sum|50000' in callbacks
     assert not any((c or '').startswith('topup_amount|') for c in callbacks)
     assert 'subscription_extend' in callbacks
     assert not any((c or '').startswith('tariff_select:') for c in callbacks)
@@ -115,7 +133,7 @@ def test_extend_classic_topup_when_autopurchase_disabled(monkeypatch):
     keyboard = get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=50000)
     callbacks = _callbacks(keyboard)
 
-    assert 'balance_topup' in callbacks
+    assert 'topup_sum|50000' in callbacks
     assert 'subscription_extend' in callbacks
     assert not any((c or '').startswith('topup_amount|') for c in callbacks)
 
@@ -194,6 +212,6 @@ def test_extend_falls_back_to_topup_without_direct_payment_methods(monkeypatch):
 
     callbacks = _callbacks(get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=50000))
 
-    assert 'balance_topup' in callbacks, 'без прямых способов должен остаться классический переход'
+    assert 'topup_sum|50000' in callbacks, 'кнопка пополнения должна передавать сумму явно'
     assert 'menu_balance' not in callbacks, 'чужая навигация не должна попадать на экран продления'
     assert 'topup_support' not in callbacks

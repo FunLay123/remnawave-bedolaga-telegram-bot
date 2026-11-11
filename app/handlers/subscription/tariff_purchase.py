@@ -428,10 +428,11 @@ def get_tariff_insufficient_balance_keyboard(
 ) -> InlineKeyboardMarkup:
     """Клавиатура «Недостаточно средств» при покупке тарифа.
 
-    Как на экране продления: одна primary-кнопка «Пополнить на N ₽» ведёт на
-    ``balance_topup``, сумма подставляется из сохранённой корзины
-    (``missing_amount``). Автопокупка после пополнения здесь не используется —
-    пользователь возвращается в выбор периода сам.
+    Как на экране продления: одна primary-кнопка «Пополнить на N ₽» передаёт
+    сумму недостачи явно в callback ``topup_sum|<missing_kopeks>`` — корзина
+    больше не используется. При ``missing_kopeks <= 0`` остаётся обычный
+    ``balance_topup`` (экран выбора суммы). Автопокупка после пополнения здесь
+    не используется — пользователь возвращается в выбор периода сам.
 
     СБП-оформление оставляем: привязке баланс не нужен (первое списание
     Platega = подтверждение в банке). Если оно выключено, клавиатура выглядит
@@ -441,6 +442,7 @@ def get_tariff_insufficient_balance_keyboard(
     topup_text = texts.t('TARIFF_PURCHASE_TOPUP_BUTTON', 'Пополнить на {amount}').format(
         amount=format_price_kopeks(missing_kopeks),
     )
+    topup_callback = f'topup_sum|{missing_kopeks}' if missing_kopeks > 0 else 'balance_topup'
     back_button = InlineKeyboardButton(text=texts.BACK, callback_data=f'tariff_select:{tariff_id}')
 
     return InlineKeyboardMarkup(
@@ -448,7 +450,7 @@ def get_tariff_insufficient_balance_keyboard(
             [
                 InlineKeyboardButton(
                     text=topup_text,
-                    callback_data='balance_topup',
+                    callback_data=topup_callback,
                     style='primary',
                     icon_custom_emoji_id='5332588449335628124',
                 )
@@ -468,9 +470,11 @@ def get_tariff_extend_insufficient_balance_keyboard(
 ) -> InlineKeyboardMarkup:
     """Клавиатура «Недостаточно средств» при продлении тарифа.
 
-    Одна primary-кнопка «Пополнить на N ₽» ведёт на ``balance_topup``: сумма
-    подставляется из сохранённой корзины (``missing_amount``), поэтому отдельные
-    ``topup_amount|метод|сумма`` здесь больше не нужны.
+    Одна primary-кнопка «Пополнить на N ₽» передаёт сумму недостачи явно в
+    callback ``topup_sum|<missing_kopeks>``: корзина больше не используется, а
+    отдельные ``topup_amount|метод|сумма`` здесь не нужны. При
+    ``missing_kopeks <= 0`` остаётся обычный ``balance_topup`` (экран выбора
+    суммы).
 
     ``subscription_id`` определяет адрес «Назад»: в мультитарифе — ``se:{id}``,
     потому что голый ``subscription_extend`` на экране возврата после пополнения
@@ -484,13 +488,14 @@ def get_tariff_extend_insufficient_balance_keyboard(
     topup_text = texts.t('TARIFF_RENEW_TOPUP_BUTTON', 'Пополнить на {amount}').format(
         amount=format_price_kopeks(missing_kopeks),
     )
+    topup_callback = f'topup_sum|{missing_kopeks}' if missing_kopeks > 0 else 'balance_topup'
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(
                     text=topup_text,
-                    callback_data='balance_topup',
+                    callback_data=topup_callback,
                     style='primary',
                     icon_custom_emoji_id='5332588449335628124',
                 )
