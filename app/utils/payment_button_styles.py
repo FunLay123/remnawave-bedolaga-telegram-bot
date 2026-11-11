@@ -76,6 +76,8 @@ BUTTON_STYLES: dict[str, ButtonStyle] = {
     'nav:main_menu': ButtonStyle(icon_custom_emoji_id='5314310000531766389'),
     'nav:my_subscription': ButtonStyle(icon_custom_emoji_id='5431374840332302296'),
     'method:heleket': ButtonStyle(icon_custom_emoji_id='5318972874726339331'),
+    'method:yookassa': ButtonStyle(icon_custom_emoji_id='5372874186010158207'),
+    'method:yookassa_sbp': ButtonStyle(icon_custom_emoji_id='5372874186010158207'),
     # Примеры:
     # 'method:stars': ButtonStyle(icon_custom_emoji_id='1234567890', style='primary'),
     # 'method:yookassa': ButtonStyle(icon_custom_emoji_id='1234567890'),
