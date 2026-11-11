@@ -183,7 +183,8 @@ async def test_methods_are_filtered_by_amount_limits(monkeypatch, state):
 
 
 @pytest.mark.asyncio
-async def test_quick_sum_without_available_methods_keeps_state(monkeypatch, state):
+async def test_quick_sum_without_available_methods_shows_amount_screen(monkeypatch, state):
+    """Способ не принимает выбранную сумму — показываем экран суммы, не алерт."""
     monkeypatch.setattr(
         balance_main,
         'get_methods_amount_limits',
@@ -195,10 +196,51 @@ async def test_quick_sum_without_available_methods_keeps_state(monkeypatch, stat
 
     await balance_main.handle_topup_sum_choice(callback, _user(), AsyncMock(), state)
 
-    callback.answer.assert_awaited_once_with('Для этой суммы нет доступных способов оплаты', show_alert=True)
-    callback.message.edit_text.assert_not_awaited()
+    text = callback.message.edit_text.await_args.args[0]
+    assert 'Пополнение от 100 ₽ до 10000 ₽' in text
+    callback.answer.assert_awaited_once_with('Выберите сумму пополнения')
     assert await state.get_state() == BalanceStates.waiting_for_amount.state
-    assert (await state.get_data())['awaiting_topup_amount'] is True
+    assert await state.get_data() == {'awaiting_topup_amount': True, 'payment_method': None}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('amount_kopeks', [3000, 5_000_001])
+async def test_quick_sum_outside_global_limits_shows_amount_screen(monkeypatch, state, amount_kopeks):
+    """Прямой topup_sum| вне лимитов не должен упираться в алерт без выхода."""
+    monkeypatch.setattr(
+        balance_main,
+        'get_methods_amount_limits',
+        AsyncMock(return_value={'yookassa': (5000, 1_000_000)}),
+    )
+    callback = _callback(f'topup_sum|{amount_kopeks}')
+
+    await balance_main.handle_topup_sum_choice(callback, _user(), AsyncMock(), state)
+
+    text = callback.message.edit_text.await_args.args[0]
+    assert 'Пополнение от 50 ₽ до 10000 ₽' in text
+    callback.answer.assert_awaited_once_with('Выберите сумму пополнения')
+    assert await state.get_state() == BalanceStates.waiting_for_amount.state
+    assert await state.get_data() == {'awaiting_topup_amount': True, 'payment_method': None}
+
+
+@pytest.mark.asyncio
+async def test_quick_sum_with_no_methods_for_amount_shows_amount_screen(monkeypatch, state):
+    """`_render_payment_methods` вернул False — возврат к выбору суммы, не алерт."""
+    monkeypatch.setattr(balance_main, '_render_payment_methods', AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        balance_main,
+        'get_methods_amount_limits',
+        AsyncMock(return_value={'yookassa': (5000, 1_000_000)}),
+    )
+    callback = _callback('topup_sum|5000')
+
+    await balance_main.handle_topup_sum_choice(callback, _user(), AsyncMock(), state)
+
+    text = callback.message.edit_text.await_args.args[0]
+    assert 'Пополнение от 50 ₽ до 10000 ₽' in text
+    callback.answer.assert_awaited_once_with('Выберите сумму пополнения')
+    assert await state.get_state() == BalanceStates.waiting_for_amount.state
+    assert await state.get_data() == {'awaiting_topup_amount': True, 'payment_method': None}
 
 
 @pytest.mark.asyncio

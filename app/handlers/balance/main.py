@@ -466,6 +466,51 @@ async def _render_payment_methods(
     return True
 
 
+async def _show_amount_select_screen(target: types.Message, db_user: User, db: AsyncSession) -> bool:
+    """Экран выбора суммы пополнения.
+
+    ``False`` — автоматических способов нет, показан экран поддержки/недоступности
+    (тупика с выбором суммы быть не должно).
+    """
+    method_ids = [
+        callback_data[len('topup_') :]
+        for row in get_payment_methods_keyboard(0, db_user.language).inline_keyboard
+        for button in row
+        if (callback_data := button.callback_data or '').startswith('topup_') and callback_data != 'topup_support'
+    ]
+
+    # Без автоматических способов экран суммы — тупик: показать старый экран
+    # поддержки/недоступности, где кнопка topup_support ещё работает.
+    if not method_ids:
+        full_text = get_payment_methods_text(
+            db_user.language,
+            db_user.balance_kopeks,
+            has_direct_methods=False,
+        )
+        keyboard = get_payment_methods_keyboard(0, db_user.language, back_callback='back_to_menu')
+        await _edit_payment_screen(target, full_text, keyboard)
+        return False
+
+    limits = await _get_method_limits_map(db, method_ids)
+
+    if limits:
+        min_bound = max(DEFAULT_TOPUP_MIN_KOPEKS, min(low for low, _ in limits.values()))
+        max_bound = min(DEFAULT_TOPUP_MAX_KOPEKS, max(high for _, high in limits.values()))
+        if min_bound > max_bound:
+            min_bound = DEFAULT_TOPUP_MIN_KOPEKS
+            max_bound = DEFAULT_TOPUP_MAX_KOPEKS
+    else:
+        min_bound = DEFAULT_TOPUP_MIN_KOPEKS
+        max_bound = DEFAULT_TOPUP_MAX_KOPEKS
+
+    amounts = [amount for amount in DEFAULT_QUICK_AMOUNTS if min_bound <= amount <= max_bound]
+    text = topup_amount_select_text(db_user.balance_kopeks, min_bound, max_bound)
+    keyboard = get_topup_sum_keyboard(db_user.language, amounts, back_callback='back_to_menu')
+
+    await _edit_payment_screen(target, text, keyboard)
+    return True
+
+
 @error_handler
 async def show_topup_amount_select(
     callback: types.CallbackQuery,
@@ -492,46 +537,11 @@ async def show_topup_amount_select(
         await callback.answer()
         return
 
-    method_ids = [
-        callback_data[len('topup_') :]
-        for row in get_payment_methods_keyboard(0, db_user.language).inline_keyboard
-        for button in row
-        if (callback_data := button.callback_data or '').startswith('topup_') and callback_data != 'topup_support'
-    ]
-
-    # Без автоматических способов экран суммы — тупик: показать старый экран
-    # поддержки/недоступности, где кнопка topup_support ещё работает.
-    if not method_ids:
-        full_text = get_payment_methods_text(
-            db_user.language,
-            db_user.balance_kopeks,
-            has_direct_methods=False,
-        )
-        keyboard = get_payment_methods_keyboard(0, db_user.language, back_callback='back_to_menu')
-        await _edit_payment_screen(callback.message, full_text, keyboard)
-        await state.clear()
-        await callback.answer()
-        return
-
-    limits = await _get_method_limits_map(db, method_ids)
-
-    if limits:
-        min_bound = max(DEFAULT_TOPUP_MIN_KOPEKS, min(low for low, _ in limits.values()))
-        max_bound = min(DEFAULT_TOPUP_MAX_KOPEKS, max(high for _, high in limits.values()))
-        if min_bound > max_bound:
-            min_bound = DEFAULT_TOPUP_MIN_KOPEKS
-            max_bound = DEFAULT_TOPUP_MAX_KOPEKS
+    if await _show_amount_select_screen(callback.message, db_user, db):
+        await state.set_state(BalanceStates.waiting_for_amount)
+        await state.update_data(awaiting_topup_amount=True, payment_method=None)
     else:
-        min_bound = DEFAULT_TOPUP_MIN_KOPEKS
-        max_bound = DEFAULT_TOPUP_MAX_KOPEKS
-
-    amounts = [amount for amount in DEFAULT_QUICK_AMOUNTS if min_bound <= amount <= max_bound]
-    text = topup_amount_select_text(db_user.balance_kopeks, min_bound, max_bound)
-    keyboard = get_topup_sum_keyboard(db_user.language, amounts, back_callback='back_to_menu')
-
-    await _edit_payment_screen(callback.message, text, keyboard)
-    await state.set_state(BalanceStates.waiting_for_amount)
-    await state.update_data(awaiting_topup_amount=True, payment_method=None)
+        await state.clear()
     await callback.answer()
 
 
@@ -553,16 +563,20 @@ async def handle_topup_sum_choice(
         await callback.answer('❌ Некорректная сумма', show_alert=True)
         return
 
-    if amount_kopeks < DEFAULT_TOPUP_MIN_KOPEKS or amount_kopeks > DEFAULT_TOPUP_MAX_KOPEKS:
-        await callback.answer(
-            f'Допустимая сумма: от {format_min_rubles(DEFAULT_TOPUP_MIN_KOPEKS)} '
-            f'до {format_max_rubles(DEFAULT_TOPUP_MAX_KOPEKS)}',
-            show_alert=True,
-        )
-        return
-
-    if not await _render_payment_methods(callback.message, db_user, db, amount_kopeks, edit=True):
-        await callback.answer('Для этой суммы нет доступных способов оплаты', show_alert=True)
+    if (
+        amount_kopeks < DEFAULT_TOPUP_MIN_KOPEKS
+        or amount_kopeks > DEFAULT_TOPUP_MAX_KOPEKS
+        or not await _render_payment_methods(callback.message, db_user, db, amount_kopeks, edit=True)
+    ):
+        # Сумма вне допустимого диапазона или для неё нет способов оплаты:
+        # прямой topup_sum| не должен упираться в алерт без выхода — возвращаем
+        # пользователя на экран выбора суммы.
+        if await _show_amount_select_screen(callback.message, db_user, db):
+            await state.set_state(BalanceStates.waiting_for_amount)
+            await state.update_data(awaiting_topup_amount=True, payment_method=None)
+        else:
+            await state.clear()
+        await callback.answer('Выберите сумму пополнения')
         return
 
     await state.clear()

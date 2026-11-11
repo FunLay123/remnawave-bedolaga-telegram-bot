@@ -3,6 +3,7 @@ from app.handlers.subscription.tariff_purchase import (
     get_tariff_extend_insufficient_balance_keyboard,
     get_tariff_insufficient_balance_keyboard,
 )
+from app.utils.payment_utils import DEFAULT_TOPUP_MAX_KOPEKS, DEFAULT_TOPUP_MIN_KOPEKS
 
 
 def _callbacks(keyboard):
@@ -39,11 +40,29 @@ def test_purchase_topup_does_not_depend_on_autopurchase_flag(monkeypatch):
     assert not any((c or '').startswith('topup_amount|') for c in callbacks)
 
 
-def test_non_positive_missing_amount_keeps_plain_balance_topup(monkeypatch):
-    """Нехватка <= 0: явной суммы нет, кнопка открывает экран выбора суммы."""
+def test_minimum_missing_amount_uses_explicit_topup_sum(monkeypatch):
+    """Нижняя граница допустимой суммы тоже передаётся явно."""
     monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', False)
 
-    for missing in (0, -100):
+    for missing in (DEFAULT_TOPUP_MIN_KOPEKS, 50000):
+        keyboards = [
+            get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=missing),
+            get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=missing),
+        ]
+        for keyboard in keyboards:
+            callbacks = _callbacks(keyboard)
+            topup = next(button for button in _buttons(keyboard) if button.text.startswith('Пополнить на '))
+
+            assert topup.callback_data == f'topup_sum|{missing}'
+            assert topup.text == f'Пополнить на {settings.format_price(missing)}'
+            assert not any((c or '').startswith('topup_amount|') for c in callbacks)
+
+
+def test_out_of_range_missing_amount_keeps_plain_balance_topup(monkeypatch):
+    """Сумма вне лимитов пополнения: явный callback дал бы отказ — открываем выбор суммы."""
+    monkeypatch.setattr(settings, 'AUTO_PURCHASE_AFTER_TOPUP_ENABLED', False)
+
+    for missing in (0, -100, 3000, DEFAULT_TOPUP_MAX_KOPEKS + 1):
         keyboards = [
             get_tariff_insufficient_balance_keyboard(7, 30, 'ru', missing_kopeks=missing),
             get_tariff_extend_insufficient_balance_keyboard(7, 42, 30, 'ru', missing_kopeks=missing),
