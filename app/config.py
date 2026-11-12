@@ -81,6 +81,19 @@ def transliterate_cyrillic(value: str) -> str:
 logger = structlog.get_logger(__name__)
 
 
+def _effective_referral_first_purchase_days(override: int | None, fallback: int) -> int:
+    """Эффективные дни бонуса за первую покупку для одной стороны.
+
+    Раздельный ключ стороны имеет приоритет; пустое значение падает в общий
+    ``REFERRAL_FIRST_PURCHASE_BONUS_DAYS``. Пустая строка из .env
+    (``REFERRAL_FIRST_PURCHASE_REFEREE_DAYS=``) нормализуется валидатором в
+    ``None`` ещё до парсинга числа. Отрицательное число — ошибка конфигурации,
+    а не «отнять дни»: нормализуем в 0 («не начислять»).
+    """
+    value = fallback if override is None else override
+    return max(0, int(value))
+
+
 class Settings(BaseSettings):
     BOT_TOKEN: str
     BOT_USERNAME: str | None = None
@@ -513,7 +526,26 @@ class Settings(BaseSettings):
     REFERRAL_REWARD_SCHEME: str = 'legacy'
     # Дни в схеме 'days_only'.
     REFERRAL_TRIAL_BONUS_DAYS: int = 3
+    # Общий ключ остаётся fallback: если раздельные ключи сторон не заданы,
+    # действует он. Так старые установки продолжают работать без правок .env.
     REFERRAL_FIRST_PURCHASE_BONUS_DAYS: int = 10
+    # Раздельные дни за первую покупку: приглашённому и пригласившему. None —
+    # значение не задано, берётся общий REFERRAL_FIRST_PURCHASE_BONUS_DAYS.
+    REFERRAL_FIRST_PURCHASE_REFEREE_DAYS: int | None = None
+    REFERRAL_FIRST_PURCHASE_REFERRER_DAYS: int | None = None
+
+    @field_validator(
+        'REFERRAL_FIRST_PURCHASE_REFEREE_DAYS',
+        'REFERRAL_FIRST_PURCHASE_REFERRER_DAYS',
+        mode='before',
+    )
+    @classmethod
+    def blank_side_days_to_none(cls, value: object) -> object:
+        """Пустое/пробельное значение в env — «не задано», а не ошибка парсинга."""
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
     REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS: int = 30
     # Насколько глубоко подниматься по цепочке пригласивших. Отдельный предохранитель
     # от обхода длинной цепочки на каждом пополнении, даже если уровней настроено больше.
@@ -4049,6 +4081,20 @@ class Settings(BaseSettings):
             return topic_id
         return self.BACKUP_SEND_TOPIC_ID
 
+    def get_referral_first_purchase_referee_days(self) -> int:
+        """Дни за первую покупку приглашённому (эффективное значение)."""
+        return _effective_referral_first_purchase_days(
+            self.REFERRAL_FIRST_PURCHASE_REFEREE_DAYS,
+            self.REFERRAL_FIRST_PURCHASE_BONUS_DAYS,
+        )
+
+    def get_referral_first_purchase_referrer_days(self) -> int:
+        """Дни за первую покупку пригласившему (эффективное значение)."""
+        return _effective_referral_first_purchase_days(
+            self.REFERRAL_FIRST_PURCHASE_REFERRER_DAYS,
+            self.REFERRAL_FIRST_PURCHASE_BONUS_DAYS,
+        )
+
     def get_referral_settings(self) -> dict:
         return {
             'program_enabled': self.is_referral_program_enabled(),
@@ -4062,6 +4108,8 @@ class Settings(BaseSettings):
             'reward_scheme': self.REFERRAL_REWARD_SCHEME,
             'trial_bonus_days': self.REFERRAL_TRIAL_BONUS_DAYS,
             'first_purchase_bonus_days': self.REFERRAL_FIRST_PURCHASE_BONUS_DAYS,
+            'first_purchase_referee_days': self.get_referral_first_purchase_referee_days(),
+            'first_purchase_referrer_days': self.get_referral_first_purchase_referrer_days(),
             'first_purchase_min_period_days': self.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS,
             'levels_mode': self.get_referral_levels_mode(),
             'allow_days_target_choice': self.is_referral_days_target_choice_enabled(),
@@ -4076,8 +4124,16 @@ class Settings(BaseSettings):
         }
 
     def is_referral_withdrawal_enabled(self) -> bool:
-        """Проверяет, включена ли функция вывода реферального баланса."""
-        return self.is_referral_program_enabled() and self.REFERRAL_WITHDRAWAL_ENABLED
+        """Проверяет, включена ли функция вывода реферального баланса.
+
+        В схеме «только дни» деньги рефералам не начисляются, поэтому выводить
+        нечего: даже включённый флаг не должен открывать вывод.
+        """
+        return (
+            self.is_referral_program_enabled()
+            and not self.is_referral_days_only_scheme()
+            and self.REFERRAL_WITHDRAWAL_ENABLED
+        )
 
     def is_referral_levels_scheme(self) -> bool:
         """Включена ли многоуровневая схема наград."""

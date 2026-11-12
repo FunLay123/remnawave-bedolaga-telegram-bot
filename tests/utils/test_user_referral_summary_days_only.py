@@ -7,7 +7,7 @@
 пригласившего.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -16,6 +16,7 @@ from app.database.models import Base, ReferralEarning, User
 from app.services.referral_reward_service import (
     REASON_FIRST_PURCHASE,
     REASON_FIRST_PURCHASE_REGISTERED,
+    REASON_REGISTRATION_DAYS_ONLY,
 )
 from app.utils.user_utils import get_detailed_referral_list, get_user_referral_summary
 from tests.fixtures.sqlite_memory import memory_session
@@ -52,12 +53,12 @@ async def test_summary_counts_markers_and_referrer_days(monkeypatch):
     monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     async with memory_session(monkeypatch, TABLES) as db:
         # У третьего реферала флаг пополнения True, но маркера нет: в days-only
-        # флаг не должен попасть в счётчик. Маркер второго продублирован —
-        # COUNT(DISTINCT user_id) обязан посчитать его один раз.
+        # флаг не должен попасть в счётчик. Маркер второго — единственный:
+        # уникальный индекс 0136 структурно не даёт продублировать его, поэтому
+        # запрос считает строки без COUNT(DISTINCT).
         db.add_all([_user(1), _user(2, referred_by_id=1), _user(3, referred_by_id=1, has_made_first_topup=True)])
         db.add_all(
             [
-                _marker(2, 1),
                 _marker(2, 1),
                 ReferralEarning(
                     user_id=1,
@@ -182,3 +183,49 @@ async def test_detailed_list_marks_first_purchase_per_referral(monkeypatch):
         assert by_id[2]['days_earned'] == 10
         # Старое поле остаётся: UI переводится на маркеры отдельной задачей.
         assert by_id[2]['has_made_first_topup'] is False
+
+
+@pytest.mark.asyncio
+async def test_summary_excludes_registration_anchor_from_recent_and_types(monkeypatch):
+    """Якорь регистрации — не награда: он не должен вытеснять recent и попадать в типы.
+
+    Фильтр стоит в SQL до LIMIT: иначе пять свежих якорей занимают всю пятёрку,
+    и реальная награда исчезает из ленты, хотя она и есть единственная выплата.
+    """
+    async with memory_session(monkeypatch, TABLES) as db:
+        now = datetime.now(UTC)
+        # Уникальный индекс 0135 разрешает только один якорь на пару, поэтому
+        # пять свежих якорей — это пять разных приглашённых.
+        db.add_all([_user(1)] + [_user(uid, referred_by_id=1) for uid in range(2, 7)])
+        db.add_all(
+            [
+                ReferralEarning(
+                    user_id=1,
+                    referral_id=2 + i,
+                    amount_kopeks=0,
+                    reason=REASON_REGISTRATION_DAYS_ONLY,
+                    reward_type='days',
+                    days_granted=0,
+                    created_at=now - timedelta(minutes=i),
+                )
+                for i in range(5)
+            ]
+            + [
+                ReferralEarning(
+                    user_id=1,
+                    referral_id=2,
+                    amount_kopeks=0,
+                    reason=REASON_FIRST_PURCHASE,
+                    reward_type='days',
+                    days_granted=10,
+                    created_at=now - timedelta(hours=5),
+                )
+            ]
+        )
+        await db.commit()
+
+        summary = await get_user_referral_summary(db, 1)
+
+        assert [row['reason'] for row in summary['recent_earnings']] == [REASON_FIRST_PURCHASE]
+        assert REASON_REGISTRATION_DAYS_ONLY not in summary['earnings_by_type']
+        assert summary['earnings_by_type'][REASON_FIRST_PURCHASE]['count'] == 1

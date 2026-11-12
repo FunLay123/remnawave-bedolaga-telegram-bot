@@ -25,6 +25,7 @@ from app.database.models import (
     TransactionType,
     User,
 )
+from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
 from app.services.remnawave_service import RemnaWaveService
 from app.services.version_service import version_service
 from app.utils.timezone import local_day_start, local_month_start
@@ -666,7 +667,7 @@ async def get_top_referrers(
                 func.sum(ReferralEarning.amount_kopeks).label('total'),
                 func.sum(ReferralEarning.days_granted).label('total_days'),
             )
-            .where(not_referee_directed())
+            .where(not_referee_directed(), ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY)
             .group_by(ReferralEarning.user_id)
         )
         for row in total_earnings_query:
@@ -677,7 +678,13 @@ async def get_top_referrers(
         # Today earnings
         today_earnings_query = await db.execute(
             select(ReferralEarning.user_id.label('referrer_id'), func.sum(ReferralEarning.amount_kopeks).label('total'))
-            .where(and_(not_referee_directed(), ReferralEarning.created_at >= today_start))
+            .where(
+                and_(
+                    not_referee_directed(),
+                    ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+                    ReferralEarning.created_at >= today_start,
+                )
+            )
             .group_by(ReferralEarning.user_id)
         )
         for row in today_earnings_query:
@@ -687,7 +694,13 @@ async def get_top_referrers(
         # Week earnings
         week_earnings_query = await db.execute(
             select(ReferralEarning.user_id.label('referrer_id'), func.sum(ReferralEarning.amount_kopeks).label('total'))
-            .where(and_(not_referee_directed(), ReferralEarning.created_at >= week_ago))
+            .where(
+                and_(
+                    not_referee_directed(),
+                    ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+                    ReferralEarning.created_at >= week_ago,
+                )
+            )
             .group_by(ReferralEarning.user_id)
         )
         for row in week_earnings_query:
@@ -697,7 +710,13 @@ async def get_top_referrers(
         # Month earnings
         month_earnings_query = await db.execute(
             select(ReferralEarning.user_id.label('referrer_id'), func.sum(ReferralEarning.amount_kopeks).label('total'))
-            .where(and_(not_referee_directed(), ReferralEarning.created_at >= month_ago))
+            .where(
+                and_(
+                    not_referee_directed(),
+                    ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+                    ReferralEarning.created_at >= month_ago,
+                )
+            )
             .group_by(ReferralEarning.user_id)
         )
         for row in month_earnings_query:

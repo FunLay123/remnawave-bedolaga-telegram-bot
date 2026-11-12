@@ -30,6 +30,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.config import settings
 from app.services.referral_service import attach_referrer_if_missing
 
 
@@ -163,6 +164,34 @@ async def test_attaches_referrer_from_explicit_code(db: AsyncMock) -> None:
     db.commit.assert_awaited_once()
     fire.assert_awaited_once(), 'registration event must fire exactly once on attach'
     gpr.assert_not_called(), 'Redis fallback should be skipped when explicit code resolves'
+
+
+@pytest.mark.asyncio
+async def test_marker_uses_new_session_helper_not_caller_session(db: AsyncMock) -> None:
+    """Маркер пишется в отдельной сессии, а не под локом caller'а.
+
+    ``ensure_marker_for_already_paid_referral`` берёт ``FOR UPDATE`` и коммитит
+    внутри; в общей сессии его ранние возвраты держали бы строку users до конца
+    запроса, а commit экспайрил бы объекты caller'а.
+    """
+    user = _user(user_id=100)
+    referrer = _referrer(user_id=200, telegram_id=888)
+    new_session_marker = AsyncMock(return_value=True)
+
+    with (
+        patch('app.database.crud.user.get_user_by_referral_code', AsyncMock(return_value=referrer)),
+        patch('app.services.referral_service.get_pending_referral', AsyncMock(return_value=None)),
+        patch('app.services.referral_service.clear_pending_referral', AsyncMock()),
+        patch('app.services.referral_service.process_referral_registration', AsyncMock()),
+        patch(
+            'app.services.referral_purchase_service.ensure_marker_for_already_paid_referral_in_new_session',
+            new=new_session_marker,
+        ),
+    ):
+        result = await attach_referrer_if_missing(db, user, referral_code='ABCD-EFGH', source='unit_test')
+
+    assert result == 200
+    new_session_marker.assert_awaited_once_with(100)
 
 
 @pytest.mark.asyncio
@@ -369,41 +398,52 @@ async def test_invalid_pending_referrer_id_type_is_handled(db: AsyncMock) -> Non
 
 
 @pytest.mark.asyncio
-async def test_process_referral_registration_skips_duplicate_pending_row() -> None:
+async def test_process_referral_registration_skips_duplicate_pending_row(monkeypatch) -> None:
     """REGRESSION: a second call for the same (referrer, referral) must NOT
     insert another `referral_registration_pending` row.
 
     This is the cross-session race guard. Two concurrent attaches both
     pass the in-memory idempotency check but only one can win at the
-    audit-row layer.
+    audit-row layer. Under days-only the existing anchor also triggers a
+    best-effort marker retry; it must not open a real session in the test.
     """
     from app.services.referral_service import process_referral_registration
 
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     db = AsyncMock()
 
     new_user = SimpleNamespace(id=10, telegram_id=1, referred_by_id=20, language='ru', first_name='', email=None)
     referrer = SimpleNamespace(id=20, telegram_id=2, language='ru', first_name='Inviter', email=None)
 
-    # SELECT existing pending row → returns a row (it already exists).
+    # SELECT existing anchor → returns a row (it already exists).
     existing_row = AsyncMock()
     existing_row.scalar_one_or_none = lambda: 999  # pretend earning #999 exists
     db.execute = AsyncMock(return_value=existing_row)
+    marker_retry = AsyncMock()
 
     with (
         patch('app.services.referral_service.get_user_by_id', AsyncMock(side_effect=[new_user, referrer])),
         patch('app.services.referral_service.create_referral_earning', AsyncMock()) as create_earning,
+        patch(
+            'app.services.referral_purchase_service.ensure_marker_for_already_paid_referral_in_new_session',
+            new=marker_retry,
+        ),
     ):
         result = await process_referral_registration(db, new_user_id=10, referrer_id=20, bot=None)
 
     assert result is True, 'second call must report success (idempotent), not failure'
     create_earning.assert_not_called(), 'must NOT insert a second pending row when one already exists'
+    marker_retry.assert_awaited_once()
+    assert marker_retry.await_args.args == (10,)
+    assert marker_retry.await_args.kwargs.get('lock_nowait') is True
 
 
 @pytest.mark.asyncio
-async def test_process_referral_registration_inserts_first_pending_row() -> None:
+async def test_process_referral_registration_inserts_first_pending_row(monkeypatch) -> None:
     """Negative-control: when no existing pending row, INSERT proceeds normally."""
     from app.services.referral_service import process_referral_registration
 
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     db = AsyncMock()
 
     new_user = SimpleNamespace(id=10, telegram_id=1, referred_by_id=20, language='ru', first_name='', email=None)
@@ -414,6 +454,7 @@ async def test_process_referral_registration_inserts_first_pending_row() -> None
     empty_row = AsyncMock()
     empty_row.scalar_one_or_none = lambda: None
     db.execute = AsyncMock(return_value=empty_row)
+    marker_retry = AsyncMock()
 
     # `referral_contest_service` is imported INSIDE the function body
     # (not at module scope), so we must patch the source module, not
@@ -422,6 +463,10 @@ async def test_process_referral_registration_inserts_first_pending_row() -> None
         patch('app.services.referral_service.get_user_by_id', AsyncMock(side_effect=[new_user, referrer])),
         patch('app.services.referral_service.get_user_campaign_id', AsyncMock(return_value=None)),
         patch('app.services.referral_service.create_referral_earning', AsyncMock()) as create_earning,
+        patch(
+            'app.services.referral_purchase_service.ensure_marker_for_already_paid_referral_in_new_session',
+            new=marker_retry,
+        ),
         patch(
             'app.services.referral_contest_service.referral_contest_service.on_referral_registration',
             AsyncMock(),
@@ -432,6 +477,7 @@ async def test_process_referral_registration_inserts_first_pending_row() -> None
     # The function returns implicitly after the insert branch; the
     # load-bearing assertion is the INSERT call itself.
     create_earning.assert_awaited_once()
+    marker_retry.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

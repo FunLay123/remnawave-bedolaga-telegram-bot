@@ -307,6 +307,10 @@ async def get_referral_statistics(db: AsyncSession) -> dict:
 
     # Разбивка по уровням: главная новая величина многоуровневой схемы. Без неё
     # админ видит общую сумму и не знает, какую её часть создаёт глубина цепочки.
+    # Якорь регистрации — не награда: он раздувал бы счётчик строк, поэтому
+    # исключается из группировки.
+    from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
     by_level_result = await db.execute(
         select(
             ReferralEarning.level,
@@ -314,6 +318,7 @@ async def get_referral_statistics(db: AsyncSession) -> dict:
             func.coalesce(func.sum(ReferralEarning.days_granted), 0).label('days'),
             func.count(ReferralEarning.id).label('rows'),
         )
+        .where(ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY)
         .group_by(ReferralEarning.level)
         .order_by(ReferralEarning.level.asc())
     )
@@ -368,6 +373,10 @@ async def get_top_referrers_by_period(
     else:  # month
         start_date = now - timedelta(days=30)
 
+    # Локальный импорт, как у not_referee_directed(): модуль констант тянет
+    # crud-слой, и импорт на уровне модуля замкнул бы цикл.
+    from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
     if sort_by == 'invited':
         # Топ по количеству приглашённых за период
         referrals_result = await db.execute(
@@ -390,6 +399,7 @@ async def get_top_referrers_by_period(
                         ReferralEarning.user_id == row.referrer_id,
                         ReferralEarning.created_at >= start_date,
                         not_referee_directed(),
+                        ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
                     )
                 )
             )
@@ -412,7 +422,11 @@ async def get_top_referrers_by_period(
                 func.sum(ReferralEarning.amount_kopeks).label('ref_earnings'),
                 func.sum(ReferralEarning.days_granted).label('ref_days'),
             )
-            .where(ReferralEarning.created_at >= start_date, not_referee_directed())
+            .where(
+                ReferralEarning.created_at >= start_date,
+                not_referee_directed(),
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+            )
             .group_by(ReferralEarning.user_id)
         )
         referral_earnings = {

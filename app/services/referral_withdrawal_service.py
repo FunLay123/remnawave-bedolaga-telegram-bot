@@ -58,9 +58,18 @@ class ReferralWithdrawalService:
     async def get_first_referral_earning_date(self, db: AsyncSession, user_id: int) -> datetime | None:
         """
         Получает дату первого реферального начисления.
+
+        Якорь регистрации в схеме «только дни» — не начисление: от этой даты
+        считаются траты «из реферального баланса», а нулевая отметка идемпотентности
+        сдвинула бы её к моменту регистрации и засчитала чужие покупки.
         """
+        from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
         result = await db.execute(
-            select(func.min(ReferralEarning.created_at)).where(ReferralEarning.user_id == user_id)
+            select(func.min(ReferralEarning.created_at)).where(
+                ReferralEarning.user_id == user_id,
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+            )
         )
         return result.scalar()
 
@@ -370,10 +379,16 @@ class ReferralWithdrawalService:
         analysis['details']['earnings_by_reason'] = earnings_by_reason
 
         # 5. Проверка: много начислений за последнюю неделю
+        from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
         week_ago = datetime.now(UTC) - timedelta(days=7)
         recent_earnings = await db.execute(
             select(func.count(), func.coalesce(func.sum(ReferralEarning.amount_kopeks), 0)).where(
-                ReferralEarning.user_id == user_id, ReferralEarning.created_at >= week_ago
+                ReferralEarning.user_id == user_id,
+                ReferralEarning.created_at >= week_ago,
+                # Якорь регистрации — не выплата: иначе массовые регистрации
+                # раздувают недельный счётчик и риск-скор вывода.
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
             )
         )
         recent_data = recent_earnings.fetchone()

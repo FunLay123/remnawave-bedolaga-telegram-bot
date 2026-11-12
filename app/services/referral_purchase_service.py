@@ -17,17 +17,20 @@ from typing import Literal
 
 import structlog
 from sqlalchemy import and_, exists, or_, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.database.crud.subscription import add_reward_days
+from app.database.crud.transaction import addon_description_clause, daily_charge_clause
 from app.database.models import (
     ReferralEarning,
     ReferralRewardType,
     Subscription,
     SubscriptionStatus,
+    Transaction,
+    TransactionType,
     User,
 )
 from app.services.referral_reward_service import (
@@ -35,34 +38,60 @@ from app.services.referral_reward_service import (
     REASON_FIRST_PURCHASE_REFEREE,
     REASON_FIRST_PURCHASE_REGISTERED,
 )
+from app.utils.referral_eligibility import is_daily_referral_tariff, is_referral_reward_target
 
 
 logger = structlog.get_logger(__name__)
 
 
-def _already_paid_subscription_condition():
-    """SQL-условие «эта подписка уже оплачена».
+def _real_subscription_payment_exists(user_id_column):
+    """SQL-условие: у пользователя есть завершённая реальная оплата подписки.
 
-    Одного ``is_trial IS FALSE`` мало: нетриальными бывают и неоплаченные
-    черновики оформления (``PENDING``), и СБП-заготовки. Заготовка создаётся
-    заранее с нулевым сроком (``end_date == start_date``) и до первого списания
-    доступа не даёт, поэтому оплатой не считается. Настоящая истёкшая подписка
-    отличается от заготовки непустым сроком: ``end_date > start_date``.
-
-    Свободные купоны, подарки и админские выдачи сюда по-прежнему попадают — они
-    нетриальны и с ненулевым сроком. Это осознанно консервативно: лучше не
-    выдать повторную награду, чем выдать её дважды.
+    ``create_transaction`` хранит списание отрицательным, но старые и
+    провайдерные строки могли сохранить сумму положительной — поэтому
+    проверяется ненулевая сумма, а не знак. Допы и daily-списания
+    переиспользуют ``SUBSCRIPTION_PAYMENT`` и отличаются только описанием,
+    их исключаем: daily-покупка повторяется каждый день и не является
+    «первой покупкой» реферала. NULL-описание отрицанием не отсекается: у
+    настоящих оплат его может не быть, а допы и daily всегда подписаны.
     """
-    return and_(
-        Subscription.is_trial.is_(False),
-        Subscription.status != SubscriptionStatus.PENDING.value,
-        or_(
-            Subscription.status != SubscriptionStatus.EXPIRED.value,
-            Subscription.end_date.is_(None),
-            Subscription.start_date.is_(None),
-            Subscription.end_date > Subscription.start_date,
-        ),
+    return exists(
+        select(Transaction.id).where(
+            Transaction.user_id == user_id_column,
+            Transaction.type == TransactionType.SUBSCRIPTION_PAYMENT.value,
+            Transaction.is_completed.is_(True),
+            Transaction.amount_kopeks != 0,
+            or_(
+                Transaction.description.is_(None),
+                and_(
+                    ~addon_description_clause(Transaction.description),
+                    ~daily_charge_clause(Transaction.description),
+                ),
+            ),
+        )
     )
+
+
+def has_paid_subscription_condition():
+    """SQL-условие «пользователь уже платил за подписку».
+
+    Признак оплаты — только завершённая транзакция ``SUBSCRIPTION_PAYMENT``
+    (не доп и не daily-списание). Daily-оплата переиспользует этот тип, но
+    повторяется каждый день и покупкой для маркера первой покупки не является:
+    иначе первый же день суточного тарифа сжёг бы бонус.
+    Флаг ``has_had_paid_subscription`` намеренно не используется:
+    его выставляют купон/промокод, админская конверсия trial→paid и удаление
+    любой нетриальной подписки, поэтому он не доказывает оплату. Сама
+    подписка оплатой тоже не считается: подарок и админская выдача
+    нетриальны, и маркер на них лишил бы человека награды за настоящую
+    первую покупку.
+
+    Legacy-оговорка: пользователи, оплатившие до появления транзакционной
+    истории (или через путь, не писавший ``SUBSCRIPTION_PAYMENT``), останутся
+    без маркера. Это принятое ограничение: ложный маркер отнимает награду
+    за реальную первую покупку, поэтому неоплаченный флаг оплатой не считаем.
+    """
+    return _real_subscription_payment_exists(User.id)
 
 
 async def has_first_purchase_marker(db: AsyncSession, referee_id: int) -> bool:
@@ -79,30 +108,38 @@ async def has_first_purchase_marker(db: AsyncSession, referee_id: int) -> bool:
 
 
 async def has_paid_subscription_before_attach(db: AsyncSession, user_id: int) -> bool:
-    """Есть ли у пользователя уже оплаченная подписка на момент поздней привязки.
+    """Платил ли пользователь за подписку к моменту поздней привязки.
 
     Единый предикат «оплата уже была»: им пользуется и запись маркера, и выбор
     текста уведомлений при регистрации реферала, чтобы обе стороны не
-    разошлись в том, считается ли покупка уже учтённой.
+    разошлись в том, считается ли покупка уже учтённой. Оплатой считается
+    только завершённая транзакция ``SUBSCRIPTION_PAYMENT`` без признаков допа
+    или daily-списания; флаг и сама подписка оплатой не считаются (флаг
+    выставляют купон, админская конверсия и удаление подписки).
     """
     paid_exists = await db.execute(
-        select(Subscription.id)
+        select(User.id)
         .where(
-            Subscription.user_id == user_id,
-            _already_paid_subscription_condition(),
+            User.id == user_id,
+            has_paid_subscription_condition(),
         )
         .limit(1)
     )
     return paid_exists.scalar_one_or_none() is not None
 
 
-async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int) -> bool:
+async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int, *, lock_nowait: bool = False) -> bool:
     """Записать маркер рефералу, который уже оплатил подписку до привязки.
 
     Вызывается после поздней привязки пригласившего: покупка к этому моменту
     могла состояться, и награда за неё уже не придёт, а маркер не даст выдать её
-    повторно. Черновик оформления и СБП-заготовка оплатой не считаются — иначе
+    повторно. Подарок, купон и админская выдача оплатой не считаются — иначе
     настоящая первая покупка осталась бы без награды.
+
+    ``lock_nowait`` берёт ``FOR UPDATE NOWAIT``: ретрай из отдельной сессии не
+    должен ждать строку, которую caller уже держит в своей незакоммиченной
+    транзакции. Занятый лок — не ошибка: возвращается ``False``, маркер
+    допишется позже. Обычные (блокирующие) вызовы ошибки БД не глотают.
 
     Возвращает ``True``, только если строка действительно создана.
     """
@@ -112,7 +149,46 @@ async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int
     if not settings.is_referral_days_only_scheme():
         return False
 
-    user = await db.get(User, user_id)
+    # populate_existing обязателен: админские привязки пишут referred_by_id
+    # массовым UPDATE, и в identity map сессии может лежать старое значение.
+    # Маркер должен видеть привязку, уже зафиксированную в БД.
+    #
+    # FOR UPDATE сериализует проверку и вставку между транзакциями: без него
+    # две сессии могли бы одновременно увидеть маркер отсутствующим. Лок —
+    # строка пользователя: его берут регистрация, админская привязка и
+    # диагностика, а бэкфилл — кандидатным запросом
+    # ``backfill_first_purchase_markers`` (тот же ряд ``users``, только
+    # пачкой). Остаточную гонку, если лок не взят (``nowait``), ловит
+    # уникальный индекс ниже.
+    try:
+        user_result = await db.execute(
+            select(User)
+            .where(User.id == user_id)
+            .with_for_update(nowait=lock_nowait)
+            .execution_options(populate_existing=True)
+        )
+    except DBAPIError as error:
+        if not lock_nowait:
+            raise
+        # Глотаем РОВНО lock_not_available (SQLSTATE 55P03): asyncpg отдаёт его
+        # и как OperationalError, и как общий DBAPIError. Любой другой код —
+        # deadlock 40P01, statement_timeout 57014, обрыв соединения или None —
+        # настоящий сбой БД и обязан дойти до вызывающего.
+        pgcode = getattr(error.orig, 'pgcode', None) or getattr(error.orig, 'sqlstate', None)
+        if pgcode != '55P03':
+            raise
+        # Строку держит caller (кампания/кабинет) в незакоммиченной
+        # транзакции. Ждать её из второй сессии нельзя, а маркер — не
+        # обязательство этого вызова: следующий ретрай допишет его.
+        await db.rollback()
+        # Стабильное имя события для подсчёта в логах: пропуск маркера из-за
+        # чужого незакоммиченного лока — не ошибка, маркер допишет ретрай.
+        logger.info(
+            'Referral first-purchase marker skipped: user row is locked',
+            user_id=user_id,
+        )
+        return False
+    user = user_result.scalar_one_or_none()
     if user is None or user.referred_by_id is None:
         return False
     # referred_by_id в БД — целое число. Всё иное (например, неполный объект)
@@ -125,53 +201,11 @@ async def ensure_marker_for_already_paid_referral(db: AsyncSession, user_id: int
     if not await has_paid_subscription_before_attach(db, user_id):
         return False
 
-    db.add(
-        ReferralEarning(
-            user_id=user_id,
-            referral_id=user.referred_by_id,
-            amount_kopeks=0,
-            reason=REASON_FIRST_PURCHASE_REGISTERED,
-            reward_type=ReferralRewardType.DAYS.value,
-            level=1,
-            days_granted=0,
-        )
-    )
-    await db.commit()
-    return True
-
-
-async def backfill_first_purchase_markers(db: AsyncSession) -> int:
-    """Проставить маркеры всем рефералам, которые уже покупали подписку.
-
-    Бэкфилл нужен при первом включении схемы: без него покупки, сделанные до
-    обновления, выглядели бы как первые и принесли бы награду повторно.
-    Черновики оформления и СБП-заготовки с нулевым сроком пропускаются: они
-    неоплаченные, и маркер на них лишил бы пользователя настоящей награды.
-    Идемпотентен — уже помеченные строки пропускаются. Возвращает число
-    созданных маркеров.
-    """
-    paid_referrals = await db.execute(
-        select(User.id, User.referred_by_id).where(
-            User.referred_by_id.isnot(None),
-            exists(
-                select(Subscription.id).where(
-                    Subscription.user_id == User.id,
-                    _already_paid_subscription_condition(),
-                )
-            ),
-        )
-    )
-
-    created = 0
-    for user_id, referrer_id in paid_referrals.all():
-        if referrer_id is None or referrer_id == user_id:
-            continue
-        if await has_first_purchase_marker(db, user_id):
-            continue
+    try:
         db.add(
             ReferralEarning(
                 user_id=user_id,
-                referral_id=referrer_id,
+                referral_id=user.referred_by_id,
                 amount_kopeks=0,
                 reason=REASON_FIRST_PURCHASE_REGISTERED,
                 reward_type=ReferralRewardType.DAYS.value,
@@ -179,6 +213,170 @@ async def backfill_first_purchase_markers(db: AsyncSession) -> int:
                 days_granted=0,
             )
         )
+        await db.commit()
+    except IntegrityError:
+        # Уникальный индекс — структурная защита от гонки: параллельная запись
+        # могла успеть вставить маркер между SELECT и INSERT. Для вызывающего
+        # это не ошибка, а «маркер уже есть»; rollback возвращает сессию в
+        # рабочее состояние. Стабильное имя события: по нему считают, как часто
+        # маркер проигрывает гонку.
+        logger.debug(
+            'Referral first-purchase marker insert raced, marker already exists',
+            user_id=user_id,
+        )
+        await db.rollback()
+        return False
+    return True
+
+
+async def ensure_marker_for_already_paid_referral_in_new_session(user_id: int, *, lock_nowait: bool = False) -> bool:
+    """Записать маркер в отдельной сессии, не трогая request-сессию caller'а.
+
+    Нужна админским поздним привязкам: ``ensure_marker_for_already_paid_referral``
+    внутри коммитит, а commit в общей сессии экспайрит объекты, которые caller
+    читает после вызова (``db_user.language``), что даёт MissingGreenlet.
+    Отдельная сессия изолирует и commit, и возможный сбой; ошибки здесь не
+    глотаются — caller логирует их сам.
+
+    Вне схемы ``days_only`` сессия не открывается вовсе: маркер там не пишется,
+    и лишнее подключение к БД на горячем пути привязки ни к чему.
+    """
+    if not settings.is_referral_days_only_scheme():
+        return False
+
+    from app.database.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as marker_db:
+        return await ensure_marker_for_already_paid_referral(marker_db, user_id, lock_nowait=lock_nowait)
+
+
+async def ensure_markers_for_already_paid_referrals_in_new_session(user_ids: list[int]) -> int:
+    """Проставить маркеры пачке рефералов в ОДНОЙ отдельной сессии.
+
+    Админская привязка на длинном списке открывала отдельное подключение на
+    каждого непомеченного реферала. Здесь одна сессия и коммит на каждого
+    пользователя: коммит заодно снимает ``FOR UPDATE``, который helper берёт
+    по строке users и не снимает на ранних возвратах (маркер уже есть / ещё не
+    платил). Ошибка одного id логируется и не мешает остальным — ретрай
+    допишет его позже.
+
+    Возвращает число реально созданных маркеров.
+    """
+    if not settings.is_referral_days_only_scheme():
+        return 0
+
+    unique_ids = list(dict.fromkeys(user_ids))
+    if not unique_ids:
+        return 0
+
+    from app.database.database import AsyncSessionLocal
+
+    created = 0
+    async with AsyncSessionLocal() as marker_db:
+        for user_id in unique_ids:
+            try:
+                if await ensure_marker_for_already_paid_referral(marker_db, user_id):
+                    created += 1
+                await marker_db.commit()
+            except Exception as error:
+                logger.error(
+                    'Failed to register first-purchase marker in batch',
+                    user_id=user_id,
+                    error=str(error),
+                )
+                try:
+                    await marker_db.rollback()
+                except Exception:
+                    pass
+    return created
+
+
+async def backfill_first_purchase_markers(db: AsyncSession) -> int:
+    """Проставить маркеры всем рефералам, которые уже покупали подписку.
+
+    Бэкфилл нужен при первом включении схемы: без него покупки, сделанные до
+    обновления, выглядели бы как первые и принесли бы награду повторно.
+    Кандидаты — те же, кого считает ``has_paid_subscription_condition``:
+    завершённая транзакция ``SUBSCRIPTION_PAYMENT`` без признаков допа.
+    Подарки и купоны без оплаты пропускаются — маркер на них лишил бы
+    пользователя настоящей награды. Legacy-оговорка: оплатившие до появления
+    транзакционной истории без такой транзакции не помечаются — флаг
+    ``has_had_paid_subscription`` оплатой не считается. Идемпотентен — уже
+    помеченные строки пропускаются. Возвращает число созданных маркеров.
+
+    Маркер принадлежит только схеме ``days_only``: на legacy/levels он не нужен
+    и исказил бы счётчик оплативших, поэтому вне неё функция не делает запросов
+    и возвращает 0.
+
+    Безопасность на живой базе: кандидаты читаются под ``FOR UPDATE`` на строке
+    пользователя — это тот же лок, что берут регистрация и
+    ``ensure_marker_for_already_paid_referral``, поэтому бэкфилл сериализуется
+    с живыми покупками. Каждая вставка идёт в собственном SAVEPOINT: маркер,
+    появившийся после bulk-проверки (живая покупка или второй бэкфилл),
+    ловится ``IntegrityError`` и не отменяет остальные строки. Отличить живую
+    первую покупку от исторической бэкфилл всё равно не может, поэтому
+    ``--apply`` следует запускать в окно, когда покупки не совершаются.
+    """
+    if not settings.is_referral_days_only_scheme():
+        logger.warning('Referral first-purchase backfill skipped: scheme is not days_only')
+        return 0
+
+    paid_referrals = (
+        await db.execute(
+            select(User.id, User.referred_by_id)
+            .where(
+                User.referred_by_id.isnot(None),
+                has_paid_subscription_condition(),
+            )
+            .with_for_update()
+        )
+    ).all()
+
+    candidate_ids = [
+        user_id for user_id, referrer_id in paid_referrals if referrer_id is not None and referrer_id != user_id
+    ]
+    marked_user_ids: set[int] = set()
+    if candidate_ids:
+        marked_user_ids = set(
+            (
+                await db.execute(
+                    select(ReferralEarning.user_id).where(
+                        ReferralEarning.user_id.in_(candidate_ids),
+                        ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    created = 0
+    for user_id, referrer_id in paid_referrals:
+        if referrer_id is None or referrer_id == user_id or user_id in marked_user_ids:
+            continue
+        try:
+            # SAVEPOINT на кандидата: конфликт уникального индекса откатывает
+            # только эту вставку, не снимая уже добавленные строки и не
+            # прерывая внешнюю транзакцию.
+            async with db.begin_nested():
+                db.add(
+                    ReferralEarning(
+                        user_id=user_id,
+                        referral_id=referrer_id,
+                        amount_kopeks=0,
+                        reason=REASON_FIRST_PURCHASE_REGISTERED,
+                        reward_type=ReferralRewardType.DAYS.value,
+                        level=1,
+                        days_granted=0,
+                    )
+                )
+        except IntegrityError:
+            logger.warning(
+                'Referral first-purchase marker backfill conflict, candidate skipped',
+                user_id=user_id,
+                referral_id=referrer_id,
+            )
+            continue
         created += 1
 
     await db.commit()
@@ -197,7 +395,15 @@ async def backfill_first_purchase_markers(db: AsyncSession) -> int:
 # принесла бы награду, которую программа обещает только за самую первую.
 # ---------------------------------------------------------------------------
 
-FirstPurchaseStatus = Literal['skipped', 'not_referred', 'already_registered', 'registered', 'rewarded', 'error']
+FirstPurchaseStatus = Literal[
+    'skipped',
+    'not_referred',
+    'already_registered',
+    'registered',
+    'rewarded',
+    'error',
+    'daily_not_counted',
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,11 +428,17 @@ async def _lock_user(db: AsyncSession, user_id: int) -> User | None:
 
 
 async def _lock_subscription(db: AsyncSession, subscription_id: int, user_id: int) -> Subscription | None:
-    """Прочитать подписку под блокировкой, только если она принадлежит пользователю."""
+    """Прочитать подписку под блокировкой, только если она принадлежит пользователю.
+
+    ``tariff`` загружается сразу: от ``is_daily`` зависит, можно ли класть в эту
+    подписку бонусные дни. Ленивая подгрузка в async-сессии упала бы
+    MissingGreenlet уже внутри проверки.
+    """
     result = await db.execute(
         select(Subscription)
         .where(Subscription.id == subscription_id, Subscription.user_id == user_id)
         .with_for_update()
+        .options(selectinload(Subscription.tariff))
         .execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
@@ -252,56 +464,22 @@ async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscript
     единственный разрешённый случай «пригласивший без подписки»: пропускается
     только его сторона, приглашённый свою награду получает.
     """
-    ids = (
+    # Один SELECT вместо «список id + FOR UPDATE на каждую подписку»: у
+    # пригласившего с несколькими подписками N+1 бил по горячему пути награды.
+    locked = (
         (
             await db.execute(
-                select(Subscription.id).where(Subscription.user_id == referrer_id).order_by(Subscription.id.asc())
+                select(Subscription)
+                .where(Subscription.user_id == referrer_id)
+                .order_by(Subscription.id.asc())
+                .with_for_update()
+                .options(selectinload(Subscription.tariff))
+                .execution_options(populate_existing=True)
             )
         )
         .scalars()
         .all()
     )
-
-    locked: list[Subscription] = []
-    for subscription_id in ids:
-        subscription = (
-            await db.execute(
-                select(Subscription)
-                .options(selectinload(Subscription.tariff))
-                .where(Subscription.id == subscription_id)
-                .with_for_update()
-                .execution_options(populate_existing=True)
-            )
-        ).scalar_one_or_none()
-        if subscription is not None:
-            locked.append(subscription)
-
-    allowed = {
-        SubscriptionStatus.ACTIVE.value,
-        SubscriptionStatus.TRIAL.value,
-        SubscriptionStatus.LIMITED.value,
-        SubscriptionStatus.EXPIRED.value,
-    }
-
-    def _is_abandoned_placeholder(sub: Subscription) -> bool:
-        """EXPIRED-заготовка СБП: нулевой срок, ни разу не оплачена.
-
-        ``create_sbp_pending_subscription`` заводит строку с
-        ``start_date == end_date`` и статусом ``pending``; брошенная заготовка
-        истекает в ``expired``, сохраняя нулевой срок. Поднимать её наградой
-        нельзя: пригласивший не заплатил, а получил бы доступ.
-        """
-        return (
-            (sub.status or '').lower() == SubscriptionStatus.EXPIRED.value
-            and sub.start_date is not None
-            and sub.end_date is not None
-            and sub.end_date <= sub.start_date
-        )
-
-    def _is_daily_tariff(sub: Subscription) -> bool:
-        """Суточный тариф: продление срока не отменяет ежедневное списание."""
-        tariff = sub.tariff
-        return bool(tariff is not None and getattr(tariff, 'is_daily', False))
 
     def _priority(sub: Subscription) -> int:
         """Класс подписки в порядке дизайна: живая платная → живой триал →
@@ -312,11 +490,10 @@ async def _lock_referrer_target(db: AsyncSession, referrer_id: int) -> Subscript
             return 3 if trial else 2
         return 1 if trial else 0
 
-    candidates = [
-        sub
-        for sub in locked
-        if (sub.status or '').lower() in allowed and not _is_abandoned_placeholder(sub) and not _is_daily_tariff(sub)
-    ]
+    # Тот же предикат, что и у экрана партнёрки: подходящий статус, не суточный
+    # тариф, EXPIRED-заготовка не считается подпиской. Один источник правды —
+    # UI обещает ровно то, что реально умеет начисление.
+    candidates = [sub for sub in locked if is_referral_reward_target(sub)]
     if not candidates:
         return None
     candidates.sort(
@@ -344,6 +521,11 @@ async def register_first_purchase(
     награда пригласившему пишутся в ОДНОЙ транзакции с единственным коммитом:
     половина записи опаснее отказа. Маркер без дней навсегда лишает человека
     награды, дни без маркера позволяют получить её повторно.
+
+    Суточный тариф — не покупка для маркера: первый день, ежедневное списание
+    и возобновление повторяются каждый день и не должны ни ставить маркер, ни
+    сжигать бонус. Право на награду остаётся у следующей не-daily покупки.
+    EXPIRED-заготовка и черновик покупкой не считаются и маркера не получают.
     """
     if paid_amount_kopeks <= 0:
         # Бесплатная выдача (промокод, подарок, админская подписка) покупкой не
@@ -351,6 +533,36 @@ async def register_first_purchase(
         return FirstPurchaseResult(status='skipped')
     if not settings.is_referral_program_enabled() or not settings.is_referral_days_only_scheme():
         return FirstPurchaseResult(status='skipped')
+
+    # Daily-проверка ДО блокировок: ежедневное списание повторяется каждый день,
+    # и держать FOR UPDATE на users/подписке до конца запроса ради немедленного
+    # ``daily_not_counted`` незачем. Читаем без блокировки; если тариф успеют
+    # сменить, ниже остаётся прежняя проверка под локом — решение не ухудшится.
+    early_sub_result = await db.execute(
+        select(Subscription)
+        .where(Subscription.id == subscription_id, Subscription.user_id == referee_id)
+        .options(selectinload(Subscription.tariff))
+        .execution_options(populate_existing=True)
+    )
+    early_sub = early_sub_result.scalar_one_or_none()
+    if early_sub is not None and is_daily_referral_tariff(early_sub):
+        early_referrer_id = (
+            await db.execute(select(User.referred_by_id).where(User.id == referee_id))
+        ).scalar_one_or_none()
+        # Нереферённого пользователя оставляем обычному пути: его статус —
+        # ``not_referred``, а не daily-пропуск.
+        if early_referrer_id is not None and early_referrer_id != referee_id:
+            logger.debug(
+                'Referral first purchase not counted: daily tariff',
+                referee_id=referee_id,
+                referrer_id=early_referrer_id,
+                source=source,
+            )
+            return FirstPurchaseResult(
+                status='daily_not_counted',
+                referee_id=referee_id,
+                referrer_id=early_referrer_id,
+            )
 
     referee = await _lock_user(db, referee_id)
     if referee is None or referee.referred_by_id is None:
@@ -375,18 +587,47 @@ async def register_first_purchase(
         )
 
     referee_sub = await _lock_subscription(db, subscription_id, referee_id)
-    if referee_sub is None or (referee_sub.status or '').lower() in {
-        SubscriptionStatus.PENDING.value,
-        SubscriptionStatus.DISABLED.value,
-    }:
-        # Черновик оформления или отключённая подписка: дни туда класть нельзя,
-        # а маркер на такую «покупку» лишил бы человека награды за настоящую.
+    if referee_sub is None:
         return FirstPurchaseResult(status='skipped')
 
-    bonus = settings.REFERRAL_FIRST_PURCHASE_BONUS_DAYS
+    referee_sub_status = str(referee_sub.status or '').strip().lower()
+    if referee_sub_status in {SubscriptionStatus.PENDING.value, SubscriptionStatus.DISABLED.value}:
+        # Черновик оформления или отключённая подписка: ни дней, ни маркера.
+        return FirstPurchaseResult(status='skipped')
+
+    if is_daily_referral_tariff(referee_sub):
+        # Daily-покупка (первый день, ежедневное списание, возобновление) не
+        # ставит маркер и не расходует бонус: она повторяется каждый день и
+        # сожгла бы награду за настоящую первую покупку. Решение не зависит от
+        # порядка событий: daily-платёж теперь не считается «уже платил» и в
+        # поздней привязке. Debug, а не info: daily-списания частые, и уровень
+        # info превратил бы штатный пропуск в шум. Событие стабильное —
+        # `Referral first purchase not counted: daily tariff`.
+        logger.debug(
+            'Referral first purchase not counted: daily tariff',
+            referee_id=referee_id,
+            referrer_id=referrer_id,
+            source=source,
+        )
+        return FirstPurchaseResult(
+            status='daily_not_counted',
+            referee_id=referee_id,
+            referrer_id=referrer_id,
+        )
+
+    # Прочие неподходящие цели (EXPIRED-заготовка и т.п.) покупкой не считаются.
+    if not is_referral_reward_target(referee_sub):
+        return FirstPurchaseResult(status='skipped')
+
+    # Бонусы сторон независимы: 0 у одной стороны не отменяет другую.
+    referee_bonus = settings.get_referral_first_purchase_referee_days()
+    referrer_bonus = settings.get_referral_first_purchase_referrer_days()
     extended_referee: Subscription | None = None
     extended_referrer: Subscription | None = None
+    referee_days = 0
     referrer_days = 0
+    referee_subscription_id: int | None = None
+    referrer_subscription_id: int | None = None
 
     try:
         db.add(
@@ -421,7 +662,7 @@ async def register_first_purchase(
                 referee_subscription_id=referee_subscription_id,
             )
 
-        if bonus <= 0:
+        if referee_bonus <= 0 and referrer_bonus <= 0:
             # Бонус выключен: дни никому не выдаются, но маркер всё равно
             # фиксирует первую покупку. Иначе каждая следующая покупка снова
             # считалась бы первой, и включение бонуса задним числом наградило
@@ -442,47 +683,50 @@ async def register_first_purchase(
                 referee_subscription_id=referee_subscription_id,
             )
 
-        extended_referee = await add_reward_days(db, referee_sub, bonus)
-        if extended_referee is None:
-            # Дни не легли никуда — откатываем и маркер: следующая покупка
-            # должна иметь возможность принести награду.
-            await db.rollback()
-            return FirstPurchaseResult(status='skipped')
+        if referee_bonus > 0:
+            extended_referee = await add_reward_days(db, referee_sub, referee_bonus)
+            if extended_referee is None:
+                # Дни не легли никуда — откатываем и маркер: следующая покупка
+                # должна иметь возможность принести награду.
+                await db.rollback()
+                return FirstPurchaseResult(status='skipped')
 
-        db.add(
-            ReferralEarning(
-                user_id=referee_id,
-                referral_id=referrer_id,
-                amount_kopeks=0,
-                reason=REASON_FIRST_PURCHASE_REFEREE,
-                reward_type=ReferralRewardType.DAYS.value,
-                level=1,
-                days_granted=bonus,
-                tariff_id=extended_referee.tariff_id,
-            )
-        )
-
-        referrer_sub = await _lock_referrer_target(db, referrer_id)
-        if referrer_sub is not None:
-            extended_referrer = await add_reward_days(db, referrer_sub, bonus)
-            if extended_referrer is not None:
-                referrer_days = bonus
-                db.add(
-                    ReferralEarning(
-                        user_id=referrer_id,
-                        referral_id=referee_id,
-                        amount_kopeks=0,
-                        reason=REASON_FIRST_PURCHASE,
-                        reward_type=ReferralRewardType.DAYS.value,
-                        level=1,
-                        days_granted=bonus,
-                        tariff_id=extended_referrer.tariff_id,
-                    )
+            referee_days = referee_bonus
+            db.add(
+                ReferralEarning(
+                    user_id=referee_id,
+                    referral_id=referrer_id,
+                    amount_kopeks=0,
+                    reason=REASON_FIRST_PURCHASE_REFEREE,
+                    reward_type=ReferralRewardType.DAYS.value,
+                    level=1,
+                    days_granted=referee_bonus,
+                    tariff_id=extended_referee.tariff_id,
                 )
+            )
+            referee_subscription_id = extended_referee.id
 
-        # Все id снимаются до коммита, пока объекты ещё не протухли.
-        referee_subscription_id = extended_referee.id
-        referrer_subscription_id = extended_referrer.id if extended_referrer is not None else None
+        if referrer_bonus > 0:
+            referrer_sub = await _lock_referrer_target(db, referrer_id)
+            if referrer_sub is not None:
+                extended_referrer = await add_reward_days(db, referrer_sub, referrer_bonus)
+                if extended_referrer is not None:
+                    referrer_days = referrer_bonus
+                    db.add(
+                        ReferralEarning(
+                            user_id=referrer_id,
+                            referral_id=referee_id,
+                            amount_kopeks=0,
+                            reason=REASON_FIRST_PURCHASE,
+                            reward_type=ReferralRewardType.DAYS.value,
+                            level=1,
+                            days_granted=referrer_bonus,
+                            tariff_id=extended_referrer.tariff_id,
+                        )
+                    )
+                    referrer_subscription_id = extended_referrer.id
+
+        # Все id сняты до коммита, пока объекты ещё не протухли.
         await db.commit()
     except SQLAlchemyError as error:
         # ``add_reward_days`` поднимает истёкшую подписку в ACTIVE. В тарифном
@@ -507,18 +751,19 @@ async def register_first_purchase(
             referrer_id=referrer_id,
         )
 
+    status: FirstPurchaseStatus = 'rewarded' if referee_days > 0 or referrer_days > 0 else 'registered'
     logger.info(
-        'Referral first purchase rewarded',
+        'Referral first purchase rewarded' if status == 'rewarded' else 'Referral first purchase registered',
         referee_id=referee_id,
         referrer_id=referrer_id,
         duration_days=duration_days,
-        referee_days=bonus,
+        referee_days=referee_days,
         referrer_days=referrer_days,
         source=source,
     )
     return FirstPurchaseResult(
-        status='rewarded',
-        referee_days=bonus,
+        status=status,
+        referee_days=referee_days,
         referrer_days=referrer_days,
         referee_id=referee_id,
         referrer_id=referrer_id,
@@ -602,22 +847,26 @@ async def _post_commit_effects(
     from app.services.remnawave_retry_queue import remnawave_retry_queue
     from app.services.subscription_service import SubscriptionService
 
-    subscription_ids = {
-        subscription_id
-        for subscription_id in (
-            result.referee_subscription_id,
-            result.referrer_subscription_id,
-        )
-        if subscription_id is not None
-    }
+    # Фактические дни каждой подписки: стороны настраиваются раздельно, и Lava
+    # нужно сдвигать ровно на выданное этой подписке количество, а не на общий
+    # бонус. Подписки без id в карту не попадают: начислять было некуда.
+    rewarded_days: dict[int, int] = {}
+    if result.referee_subscription_id is not None:
+        rewarded_days[result.referee_subscription_id] = result.referee_days
+    if result.referrer_subscription_id is not None:
+        rewarded_days[result.referrer_subscription_id] = result.referrer_days
 
-    for subscription_id in sorted(subscription_ids):
+    for subscription_id in sorted(rewarded_days):
         async with AsyncSessionLocal() as db:
             subscription = await db.get(Subscription, subscription_id)
             if subscription is None:
                 continue
+            # Снимок до sync: при ошибке панели sync откатывает транзакцию и
+            # экспайрит объект. Чтение subscription.user_id после этого в
+            # async-сессии даёт MissingGreenlet, и retry не встанет.
+            subscription_user_id = subscription.user_id
             try:
-                await SubscriptionService().sync_remnawave_user(db, subscription)
+                synced = await SubscriptionService().sync_remnawave_user(db, subscription)
             except Exception as error:
                 logger.error(
                     'Failed to sync referral reward subscription',
@@ -626,14 +875,25 @@ async def _post_commit_effects(
                 )
                 remnawave_retry_queue.enqueue(
                     subscription_id=subscription_id,
-                    user_id=subscription.user_id,
+                    user_id=subscription_user_id,
                     action='update',
                 )
+            else:
+                if synced is None:
+                    logger.warning(
+                        'Referral reward subscription sync returned no result',
+                        subscription_id=subscription_id,
+                    )
+                    remnawave_retry_queue.enqueue(
+                        subscription_id=subscription_id,
+                        user_id=subscription_user_id,
+                        action='update',
+                    )
             try:
                 await shift_lava_next_charge_after_manual_extension(
                     db,
                     subscription_id,
-                    settings.REFERRAL_FIRST_PURCHASE_BONUS_DAYS,
+                    rewarded_days[subscription_id],
                 )
             except Exception as error:
                 logger.warning(

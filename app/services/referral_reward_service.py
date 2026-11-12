@@ -965,6 +965,12 @@ REASON_DAYS_REFEREE = 'referral_days_bonus'
 REASON_FIRST_PURCHASE = 'referral_first_purchase'
 REASON_FIRST_PURCHASE_REFEREE = 'referral_first_purchase_referee'
 REASON_FIRST_PURCHASE_REGISTERED = 'referral_first_purchase_registered'
+# Якорь идемпотентности регистрации в схеме «только дни». Строка нулевая и НЕ
+# является наградой: она лишь фиксирует, что регистрация уже обработана, чтобы
+# повторный DELETED-restore не отправил сообщения заново и не задвоил
+# contest-событие. ``referral_id`` здесь — приглашённый, как у наград
+# пригласившему, поэтому в ``REFEREE_DIRECTED_REASONS`` её быть не должно.
+REASON_REGISTRATION_DAYS_ONLY = 'referral_registration_days_only'
 
 # Строки, где начисление ушло ПРИГЛАШЁННОМУ, а не пригласившему.
 #

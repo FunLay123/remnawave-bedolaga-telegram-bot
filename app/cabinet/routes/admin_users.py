@@ -65,6 +65,10 @@ from app.services.panel_sync import (
 )
 from app.services.panel_sync.fields import narrow_push_fields
 from app.services.permission_service import PermissionService
+from app.services.referral_reward_service import (
+    REASON_FIRST_PURCHASE_REGISTERED,
+    REASON_REGISTRATION_DAYS_ONLY,
+)
 from app.services.user_activity_service import UnknownActivityTypes, UserActivityResponse, collect_user_activity
 from app.utils.subscription_time import local_days_until
 from app.utils.subscription_utils import coerce_panel_device_limit
@@ -816,9 +820,14 @@ async def get_user_detail(
     referrals = await get_referrals(db, user.id)
     referrals_count = len(referrals)
 
-    # Calculate total referral earnings (canonical source: ReferralEarning)
+    # Calculate total referral earnings (canonical source: ReferralEarning).
+    # Якорь регистрации и маркер первой покупки — нулевые строки
+    # идемпотентности, а не заработок; остальные строки не трогаем, включая
+    # награды, выданные человеку как приглашённому (у них своя семантика).
     referral_earnings_q = select(func.coalesce(func.sum(ReferralEarning.amount_kopeks), 0)).where(
-        ReferralEarning.user_id == user.id
+        ReferralEarning.user_id == user.id,
+        ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+        ReferralEarning.reason != REASON_FIRST_PURCHASE_REGISTERED,
     )
     referral_earnings = (await db.execute(referral_earnings_q)).scalar() or 0
 
@@ -2488,6 +2497,26 @@ async def assign_user_referrer(
         details={'old_referrer_id': old_referrer_id, 'new_referrer_id': request.referrer_id},
     )
     await db.commit()
+
+    # Поздняя привязка: у пользователя могла уже быть оплата. Здесь
+    # ``process_referral_registration`` не вызывается, поэтому маркер первой
+    # покупки пишется явно — иначе следующая покупка получит награду за
+    # «первую». Отдельная сессия обязательна: commit этого маршрута экспайрит
+    # объекты, которые читает caller. Сбой маркера не отменяет привязку.
+    from app.services.referral_purchase_service import (
+        ensure_marker_for_already_paid_referral_in_new_session,
+    )
+
+    try:
+        await ensure_marker_for_already_paid_referral_in_new_session(user_id)
+    except Exception as error:
+        logger.error(
+            'Failed to register first-purchase marker after admin assign-referrer',
+            user_id=user_id,
+            referrer_id=request.referrer_id,
+            admin_id=admin.id,
+            error=str(error),
+        )
 
     logger.info(
         'Admin assigned referrer to user',

@@ -396,7 +396,23 @@ async def start_trial_from_referral(
 
     # Кнопка может пережить переключение схемы: в levels/legacy экран рисуется
     # по-старому, и перерисовывать его после активации в days-only не нужно.
-    await activate_trial(callback, db_user, db, from_referral=settings.is_referral_days_only_scheme())
+    try:
+        await activate_trial(callback, db_user, db, from_referral=settings.is_referral_days_only_scheme())
+    except Exception as error:
+        # Активация могла успеть пройти до сбоя отрисовки, поэтому не объявляем
+        # её неудачной. Главное — ответить на callback, иначе кнопка «крутится».
+        logger.error(
+            'Ошибка активации триала из партнёрки',
+            user_id=getattr(db_user, 'id', None),
+            error=error,
+        )
+        try:
+            await callback.answer(
+                'Проверьте «Мою подписку» — триал мог уже активироваться.',
+                show_alert=True,
+            )
+        except Exception as answer_error:
+            logger.warning('Не удалось ответить на callback после ошибки активации триала', error=answer_error)
 
 
 async def show_referral_qr(

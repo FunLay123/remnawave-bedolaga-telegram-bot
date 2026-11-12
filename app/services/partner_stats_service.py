@@ -22,6 +22,7 @@ from app.database.models import (
     TransactionType,
     User,
 )
+from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
 from app.utils.timezone import local_date, local_day_start
 
 
@@ -117,7 +118,11 @@ class PartnerStatsService:
                 func.coalesce(
                     func.sum(case((ReferralEarning.created_at >= month_ago, ReferralEarning.days_granted), else_=0)), 0
                 ).label('month_days'),
-            ).where(ReferralEarning.user_id == user_id, not_referee_directed())
+            ).where(
+                ReferralEarning.user_id == user_id,
+                not_referee_directed(),
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+            )
         )
         earnings_row = earnings_result.one()
         earnings_all_time = int(earnings_row.all_time)
@@ -136,7 +141,11 @@ class PartnerStatsService:
                 func.coalesce(func.sum(ReferralEarning.amount_kopeks), 0).label('money'),
                 func.coalesce(func.sum(ReferralEarning.days_granted), 0).label('days'),
             )
-            .where(ReferralEarning.user_id == user_id, not_referee_directed())
+            .where(
+                ReferralEarning.user_id == user_id,
+                not_referee_directed(),
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+            )
             .group_by(ReferralEarning.level)
             .order_by(ReferralEarning.level.asc())
         )
@@ -289,6 +298,7 @@ class PartnerStatsService:
                     ReferralEarning.referral_id == User.id,
                     ReferralEarning.user_id == user_id,
                     not_referee_directed(),
+                    ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
                 ),
             )
             .where(User.referred_by_id == user_id)
@@ -632,7 +642,7 @@ class PartnerStatsService:
                 func.sum(ReferralEarning.amount_kopeks).label('total_earnings'),
                 func.sum(ReferralEarning.days_granted).label('total_days'),
             )
-            .where(not_referee_directed())
+            .where(not_referee_directed(), ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY)
             .group_by(ReferralEarning.user_id)
         )
         if start_date:
@@ -755,6 +765,7 @@ class PartnerStatsService:
                     ReferralEarning.user_id == user_id,
                     ReferralEarning.campaign_id.in_(campaign_ids),
                     not_referee_directed(),
+                    ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
                 )
             )
             .group_by(ReferralEarning.campaign_id)
@@ -953,6 +964,7 @@ class PartnerStatsService:
                     ReferralEarning.user_id == user_id,
                     ReferralEarning.campaign_id == campaign_id,
                     not_referee_directed(),
+                    ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
                 ),
             )
             .where(

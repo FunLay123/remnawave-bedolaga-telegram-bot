@@ -21,8 +21,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 from app.config import settings
-from app.database.models import Base, ReferralEarning, Subscription, SubscriptionStatus, User
-from app.services.referral_purchase_service import register_first_purchase
+from app.database.models import (
+    Base,
+    ReferralEarning,
+    Subscription,
+    SubscriptionStatus,
+    Transaction,
+    TransactionType,
+    User,
+)
+from app.services.referral_purchase_service import (
+    ensure_marker_for_already_paid_referral,
+    register_first_purchase,
+)
 from app.services.referral_reward_service import (
     REASON_FIRST_PURCHASE,
     REASON_FIRST_PURCHASE_REFEREE,
@@ -71,6 +82,8 @@ async def test_concurrent_first_purchase_grants_once(monkeypatch):
     # и порог в 30 дней, от которых зависят утверждения теста.
     monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', True)
     monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_BONUS_DAYS', 10)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFEREE_DAYS', 10)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFERRER_DAYS', 10)
     monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS', 30)
     now = datetime.now(UTC)
 
@@ -166,3 +179,77 @@ async def test_concurrent_first_purchase_grants_once(monkeypatch):
         assert referrer_sub.end_date == now + timedelta(days=40)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_already_paid_marker_created_once(monkeypatch):
+    """Две сессии одновременно дописывают маркер уже платившему рефералу.
+
+    ``ensure_marker_for_already_paid_referral`` берёт ``FOR UPDATE`` на строке
+    пользователя и сериализует проверку маркера с вставкой. Гонка должна дать
+    ровно одну строку маркера: победитель возвращает ``True``, проигравший
+    после снятия блокировки видит маркер и возвращает ``False``. Уникальный
+    индекс — вторая линия защиты, поэтому падение теста означало бы и дубль.
+    """
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    with real_asyncpg():
+        engine = create_async_engine(_concurrency_dsn(), poolclass=NullPool)
+        # NullPool: две конкурентные сессии обязаны получить два разных
+        # соединения, иначе блокировка проверялась бы на соединении самой себя.
+        maker = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.drop_all)
+                await conn.run_sync(Base.metadata.create_all)
+
+            async with maker() as db:
+                db.add_all(
+                    [
+                        User(id=1, telegram_id=1001, first_name='R', language='ru', balance_kopeks=0),
+                        User(
+                            id=2,
+                            telegram_id=1002,
+                            first_name='F',
+                            language='ru',
+                            balance_kopeks=0,
+                            referred_by_id=1,
+                        ),
+                        # Настоящая не-daily оплата: только она делает пользователя
+                        # «уже оплатившим» для записи маркера.
+                        Transaction(
+                            id=100,
+                            user_id=2,
+                            type=TransactionType.SUBSCRIPTION_PAYMENT.value,
+                            amount_kopeks=-10_000,
+                            description='Оплата подписки',
+                            is_completed=True,
+                        ),
+                    ]
+                )
+                await db.commit()
+
+            async def call() -> bool:
+                async with maker() as db:
+                    return await ensure_marker_for_already_paid_referral(db, 2)
+
+            results = await asyncio.gather(call(), call())
+
+            async with maker() as db:
+                markers = (
+                    (
+                        await db.execute(
+                            select(ReferralEarning).where(
+                                ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+
+            assert sorted(results) == [False, True]
+            assert len(markers) == 1
+            assert markers[0].user_id == 2
+            assert markers[0].referral_id == 1
+        finally:
+            await engine.dispose()

@@ -1,0 +1,9 @@
+docs/project_structure_reference.md text eol=lf
+*.py text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.sql text eol=lf
+*.sh text eol=lf

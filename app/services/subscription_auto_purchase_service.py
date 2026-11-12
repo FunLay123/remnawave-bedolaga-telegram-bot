@@ -2473,6 +2473,44 @@ async def try_auto_extend_expired_after_topup(
             exc_info=True,
         )
 
+    # Первая оплаченная покупка реферала: продление с баланса — реальное
+    # списание. Повторные продления отсекает маркер. Сбой хука не должен
+    # отменять уже прошедшую покупку.
+    try:
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        first_purchase_result = await register_first_purchase_after_purchase(
+            referee_id=user.id,
+            subscription_id=updated_subscription.id,
+            duration_days=period_days,
+            paid_amount_kopeks=renewal_cost,
+            source='topup_auto_extend_expired',
+            bot=bot,
+        )
+    except Exception as hook_error:
+        logger.error(
+            '⚠️ Автопродление expired: ошибка учёта первой покупки реферала',
+            format_user_id=_format_user_id(user),
+            subscription_id=updated_subscription.id,
+            error=hook_error,
+            exc_info=True,
+        )
+        first_purchase_result = None
+
+    if first_purchase_result is not None and first_purchase_result.status == 'rewarded':
+        # Награда записана из другой сессии и уже закоммичена, а объект этой
+        # сессии помнит срок до неё. Перечитываем подписку, чтобы
+        # new_end_date и уведомления показали дату с бонусными днями.
+        try:
+            await db.refresh(updated_subscription)
+        except Exception as refresh_error:
+            logger.warning(
+                '⚠️ Автопродление expired: не удалось перечитать подписку после реферальной награды',
+                format_user_id=_format_user_id(user),
+                subscription_id=updated_subscription.id,
+                error=refresh_error,
+            )
+
     # Update RemnaWave
     try:
         await subscription_service.update_remnawave_user(
@@ -2816,6 +2854,44 @@ async def try_resume_disabled_daily_after_topup(
             format_user_id=_format_user_id(user),
             error=error,
         )
+
+    # Первая оплаченная покупка реферала: суточное списание с баланса первой
+    # покупкой не считается — хук вернёт ``daily_not_counted``, маркер не
+    # пишется, бонус остаётся за следующей не-daily покупкой. Сбой хука не
+    # должен отменять уже прошедшее возобновление.
+    try:
+        from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+        first_purchase_result = await register_first_purchase_after_purchase(
+            referee_id=user.id,
+            subscription_id=subscription.id,
+            duration_days=1,
+            paid_amount_kopeks=daily_price,
+            source='topup_daily_resume',
+            bot=bot,
+        )
+    except Exception as hook_error:
+        logger.error(
+            '⚠️ Авто-возобновление daily: ошибка учёта первой покупки реферала',
+            format_user_id=_format_user_id(user),
+            subscription_id=subscription.id,
+            error=hook_error,
+            exc_info=True,
+        )
+        first_purchase_result = None
+
+    if first_purchase_result is not None and first_purchase_result.status == 'rewarded':
+        # Награда записана из другой сессии; перечитываем подписку, чтобы
+        # уведомления и RemnaWave видели бонусные дни.
+        try:
+            await db.refresh(subscription)
+        except Exception as refresh_error:
+            logger.warning(
+                '⚠️ Авто-возобновление daily: не удалось перечитать подписку после реферальной награды',
+                format_user_id=_format_user_id(user),
+                subscription_id=subscription.id,
+                error=refresh_error,
+            )
 
     # Restore connected_squads from tariff if cleared by deactivation sync
     try:

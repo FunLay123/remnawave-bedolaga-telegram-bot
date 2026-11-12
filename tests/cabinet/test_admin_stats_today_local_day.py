@@ -13,16 +13,18 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import event
 
 from app.cabinet.routes import admin_stats
 from app.database.crud.transaction import REAL_PAYMENT_METHODS
-from app.database.models import Transaction, TransactionType, User
+from app.database.models import ReferralEarning, Transaction, TransactionType, User
+from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
 from tests.fixtures.local_day import reset_local_timezone_cache, use_timezone  # noqa: F401
 from tests.fixtures.sqlite_memory import memory_session
 
 
 ADMIN = SimpleNamespace(id=1, username='admin')
-TABLES = [User.__table__, Transaction.__table__]
+TABLES = [User.__table__, Transaction.__table__, ReferralEarning.__table__]
 GATEWAY = REAL_PAYMENT_METHODS[0]
 
 
@@ -87,3 +89,51 @@ async def test_dashboard_income_today_comes_from_statistics_not_from_chart(monke
     response = await admin_stats.get_dashboard_stats(admin=ADMIN, db=None)
 
     assert response.financial.income_today_kopeks == 777
+
+
+@pytest.mark.asyncio
+async def test_top_referrers_earnings_queries_exclude_registration_anchor(monkeypatch):
+    """Все четыре суммы лидерборда отсекают нулевой якорь регистрации.
+
+    Якорь нулевой, поэтому на итог не влияет, но остаётся в популяции
+    ReferralEarning. Проверка query-level: собранные WHERE-параметры каждой
+    агрегации обязаны содержать причину якоря.
+    """
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all(
+            [
+                User(id=1, telegram_id=1, first_name='Referrer', language='ru', balance_kopeks=0),
+                User(id=2, telegram_id=2, first_name='Friend', language='ru', balance_kopeks=0, referred_by_id=1),
+                ReferralEarning(
+                    user_id=1,
+                    referral_id=2,
+                    amount_kopeks=0,
+                    reason=REASON_REGISTRATION_DAYS_ONLY,
+                    reward_type='days',
+                    level=1,
+                    days_granted=0,
+                ),
+            ]
+        )
+        await db.commit()
+
+        captured: list[tuple[str, object]] = []
+
+        def _capture(_conn, _cursor, statement, parameters, _context, _executemany):
+            captured.append((statement, parameters))
+
+        event.listen(db.bind.sync_engine, 'before_cursor_execute', _capture)
+        try:
+            response = await admin_stats.get_top_referrers(limit=20, admin=ADMIN, db=db)
+        finally:
+            event.remove(db.bind.sync_engine, 'before_cursor_execute', _capture)
+
+    earning_sums = [
+        (statement, parameters)
+        for statement, parameters in captured
+        if 'FROM referral_earnings' in statement and 'sum(' in statement.lower()
+    ]
+    assert earning_sums, 'лидерборд обязан агрегировать ReferralEarning'
+    for _statement, parameters in earning_sums:
+        assert REASON_REGISTRATION_DAYS_ONLY in str(parameters)
+    assert response.total_earnings_kopeks == 0

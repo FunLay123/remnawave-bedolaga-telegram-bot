@@ -69,10 +69,16 @@ async def get_referral_info(
     # Дни считаются отдельной суммой и НЕ входят в расчёт доступного к выводу
     # баланса ниже: дни нельзя вывести деньгами, и подмешать их в entitlement
     # означало бы разрешить вывод сумм, которых пользователь не зарабатывал.
+    from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
     earnings_query = select(
         func.coalesce(func.sum(ReferralEarning.amount_kopeks), 0),
         func.coalesce(func.sum(ReferralEarning.days_granted), 0),
-    ).where(ReferralEarning.user_id == user.id, not_referee_directed())
+    ).where(
+        ReferralEarning.user_id == user.id,
+        not_referee_directed(),
+        ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+    )
     earnings_result = await db.execute(earnings_query)
     total_earnings, total_earning_days = earnings_result.one()
 
@@ -179,14 +185,20 @@ async def get_referral_earnings(
     db: AsyncSession = Depends(get_cabinet_db),
 ):
     """Get referral earnings history."""
+    from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
+    # Якорь регистрации не награда: исключаем его из списка и счётчиков, чтобы
+    # история не показывала нулевое «начисление» за сам факт регистрации.
+    not_anchor = ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY
+
     # Base query
-    query = select(ReferralEarning).where(ReferralEarning.user_id == user.id, not_referee_directed())
+    query = select(ReferralEarning).where(ReferralEarning.user_id == user.id, not_referee_directed(), not_anchor)
 
     # Get total count and sum
     count_query = (
         select(func.count())
         .select_from(ReferralEarning)
-        .where(ReferralEarning.user_id == user.id, not_referee_directed())
+        .where(ReferralEarning.user_id == user.id, not_referee_directed(), not_anchor)
     )
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
@@ -196,7 +208,7 @@ async def get_referral_earnings(
     sum_query = select(
         func.coalesce(func.sum(ReferralEarning.amount_kopeks), 0),
         func.coalesce(func.sum(ReferralEarning.days_granted), 0),
-    ).where(ReferralEarning.user_id == user.id, not_referee_directed())
+    ).where(ReferralEarning.user_id == user.id, not_referee_directed(), not_anchor)
     sum_result = await db.execute(sum_query)
     total_amount, total_days = sum_result.one()
 

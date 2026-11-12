@@ -10,6 +10,7 @@ EXPECTED_FILES = {
     'app/handlers/simple_subscription.py',
     'app/handlers/menu.py',
     'app/services/subscription_purchase_service.py',
+    'app/services/subscription_renewal_service.py',
     'app/services/payment/stars.py',
     'app/services/payment/yookassa.py',
     'app/services/payment/lava.py',
@@ -214,3 +215,171 @@ def test_tariff_purchase_function_body_registers_first_purchase(
     assert _keyword_expression(hook, 'duration_days') == duration_days
     assert _keyword_expression(hook, 'paid_amount_kopeks') == paid_amount_kopeks
     assert _keyword_expression(hook, 'source') == repr(source)
+
+
+def _enclosing_ifs(function: ast.AST, target: ast.AST) -> list[ast.If]:
+    """Все ``if`` в функции, внутри тела которых находится target."""
+    found: list[ast.If] = []
+    for node in ast.walk(function):
+        if isinstance(node, ast.If) and any(child is target for child in ast.walk(node)):
+            found.append(node)
+    return found
+
+
+def test_menu_quick_activation_finalize_skips_internal_hook() -> None:
+    """menu сам зовёт хук после обеих веток — finalize получает skip=True.
+
+    Иначе тот же no-op хук открывал бы вторую сессию сразу после первой.
+    """
+    function = _function_node('app/handlers/menu.py', 'handle_activate_button')
+
+    finalize_calls = _calls(function, ('finalize',))
+    assert len(finalize_calls) == 1, f'ожидается один finalize, найдено {len(finalize_calls)}'
+    assert _keyword_expression(finalize_calls[0], 'skip_first_purchase_hook') == 'True'
+
+    # Собственный хук menu остаётся: иначе оплата из меню не поставит маркер.
+    assert len(_calls(function, (FIRST_PURCHASE_HOOK,))) == 1
+
+
+def test_instant_switch_paid_upgrade_calls_first_purchase_hook() -> None:
+    """Платное мгновенное переключение — первая покупка; free/downgrade — нет.
+
+    Файловая проверка на подстроку здесь бесполезна: в ``tariff_purchase.py``
+    уже есть хуки других флоу. Ищем вызов в теле ``confirm_instant_switch`` и
+    требуем, чтобы он стоял внутри ветки ``is_upgrade and upgrade_cost > 0``.
+    """
+    function = _function_node(TARIFF_PURCHASE_FILE, 'confirm_instant_switch')
+
+    hooks = _calls(function, (FIRST_PURCHASE_HOOK,))
+    assert len(hooks) == 1, f'ожидается один вызов {FIRST_PURCHASE_HOOK}, найдено {len(hooks)}'
+    hook = hooks[0]
+
+    branch_tests = [ast.unparse(node.test) for node in _enclosing_ifs(function, hook)]
+    assert 'is_upgrade and upgrade_cost > 0' in branch_tests, (
+        f'хук обязан быть в платной upgrade-ветке, охватывающие if: {branch_tests}'
+    )
+
+    assert _keyword_expression(hook, 'referee_id') == 'db_user.id'
+    assert _keyword_expression(hook, 'subscription_id') == 'subscription.id'
+    assert _keyword_expression(hook, 'duration_days') == 'max(1, remaining_days)'
+    assert _keyword_expression(hook, 'paid_amount_kopeks') == 'upgrade_cost'
+    assert _keyword_expression(hook, 'source') == repr('bot_instant_switch')
+
+    commits = [call for call in _calls(function, ('create_transaction',)) if call.lineno < hook.lineno]
+    assert commits, 'хук обязан стоять после create_transaction платежа'
+    assert hook.lineno > max(call.lineno for call in commits)
+
+
+AUTO_PURCHASE_FILE = 'app/services/subscription_auto_purchase_service.py'
+DAILY_SUBSCRIPTION_FILE = 'app/services/daily_subscription_service.py'
+
+
+def test_auto_extend_expired_after_topup_registers_first_purchase() -> None:
+    """Продление истёкшей подписки с баланса после пополнения — живая оплата.
+
+    Для нетриальной подписки, созданной бесплатно (купон/подарок/админка),
+    первое реальное списание приходит именно сюда: продление, купленное
+    балансом. Хук стоит после ``create_transaction`` (деньги и транзакция уже
+    зафиксированы) и до синка RemnaWave. Награда пишется из другой сессии,
+    поэтому при ``rewarded`` подписку перечитывают — иначе ``new_end_date``
+    и уведомления покажут срок без бонусных дней.
+    """
+    function = _function_node(AUTO_PURCHASE_FILE, 'try_auto_extend_expired_after_topup')
+    source = _function_source(AUTO_PURCHASE_FILE, 'try_auto_extend_expired_after_topup')
+
+    hooks = _calls(function, (FIRST_PURCHASE_HOOK,))
+    assert len(hooks) == 1, f'ожидается один вызов {FIRST_PURCHASE_HOOK}, найдено {len(hooks)}'
+    hook = hooks[0]
+
+    assert _keyword_expression(hook, 'referee_id') == 'user.id'
+    assert _keyword_expression(hook, 'subscription_id') == 'updated_subscription.id'
+    assert _keyword_expression(hook, 'duration_days') == 'period_days'
+    assert _keyword_expression(hook, 'paid_amount_kopeks') == 'renewal_cost'
+    assert _keyword_expression(hook, 'source') == repr('topup_auto_extend_expired')
+    assert _keyword_expression(hook, 'bot') == 'bot'
+
+    except_nodes = _nodes_inside_except_handlers(function)
+    transactions = [call for call in _calls(function, ('create_transaction',)) if id(call) not in except_nodes]
+    assert transactions, 'не найден create_transaction платежа'
+    assert hook.lineno > max(call.lineno for call in transactions), 'хук обязан стоять после фиксации платежа'
+
+    hook_index = source.index(FIRST_PURCHASE_HOOK)
+    reward_index = source.index("first_purchase_result.status == 'rewarded'", hook_index)
+    refresh_index = source.index('await db.refresh(updated_subscription)', reward_index)
+    end_date_index = source.index('new_end_date = updated_subscription.end_date', refresh_index)
+    assert hook_index < reward_index < refresh_index < end_date_index
+
+
+def test_daily_resume_after_topup_registers_first_purchase() -> None:
+    """Возобновление суточной подписки после пополнения — тоже оплата.
+
+    Списание с баланса и ``update_daily_charge_time`` (+24 часа) уже прошли,
+    когда пишется маркер первой покупки. Хук стоит после обоих и до синка
+    RemnaWave. При ``rewarded`` подписку перечитывают, чтобы уведомления
+    показали срок вместе с бонусными днями.
+    """
+    function = _function_node(AUTO_PURCHASE_FILE, 'try_resume_disabled_daily_after_topup')
+    source = _function_source(AUTO_PURCHASE_FILE, 'try_resume_disabled_daily_after_topup')
+
+    hooks = _calls(function, (FIRST_PURCHASE_HOOK,))
+    assert len(hooks) == 1, f'ожидается один вызов {FIRST_PURCHASE_HOOK}, найдено {len(hooks)}'
+    hook = hooks[0]
+
+    assert _keyword_expression(hook, 'referee_id') == 'user.id'
+    assert _keyword_expression(hook, 'subscription_id') == 'subscription.id'
+    assert _keyword_expression(hook, 'duration_days') == '1'
+    assert _keyword_expression(hook, 'paid_amount_kopeks') == 'daily_price'
+    assert _keyword_expression(hook, 'source') == repr('topup_daily_resume')
+    assert _keyword_expression(hook, 'bot') == 'bot'
+
+    except_nodes = _nodes_inside_except_handlers(function)
+    charges = [call for call in _calls(function, ('update_daily_charge_time',)) if id(call) not in except_nodes]
+    assert charges, 'не найден update_daily_charge_time'
+    assert hook.lineno > max(call.lineno for call in charges), 'хук обязан стоять после продления срока'
+
+    transactions = [call for call in _calls(function, ('create_transaction',)) if id(call) not in except_nodes]
+    assert transactions, 'не найден create_transaction платежа'
+    assert hook.lineno > max(call.lineno for call in transactions), 'хук обязан стоять после фиксации платежа'
+
+    hook_index = source.index(FIRST_PURCHASE_HOOK)
+    reward_index = source.index("first_purchase_result.status == 'rewarded'", hook_index)
+    refresh_index = source.index('await db.refresh(subscription)', reward_index)
+    notification_index = source.index('send_subscription_extension_notification', refresh_index)
+    assert hook_index < reward_index < refresh_index < notification_index
+
+
+def test_daily_scheduler_charge_registers_first_purchase() -> None:
+    """Планировщик суточных списаний — та же оплата, что и ручное продление.
+
+    Хук обязан стоять после атомарного коммита (баланс + транзакция +
+    charge_time), до синка RemnaWave. При ``rewarded`` подписку перечитывают,
+    чтобы ``subscription.end_date`` в уведомлениях и панели включал бонус.
+    """
+    function = _function_node(DAILY_SUBSCRIPTION_FILE, '_process_single_charge')
+    source = _function_source(DAILY_SUBSCRIPTION_FILE, '_process_single_charge')
+
+    hooks = _calls(function, (FIRST_PURCHASE_HOOK,))
+    assert len(hooks) == 1, f'ожидается один вызов {FIRST_PURCHASE_HOOK}, найдено {len(hooks)}'
+    hook = hooks[0]
+
+    assert _keyword_expression(hook, 'referee_id') == 'user.id'
+    assert _keyword_expression(hook, 'subscription_id') == 'subscription.id'
+    assert _keyword_expression(hook, 'duration_days') == '1'
+    assert _keyword_expression(hook, 'paid_amount_kopeks') == 'daily_price'
+    assert _keyword_expression(hook, 'source') == repr('daily_scheduler')
+    assert _keyword_expression(hook, 'bot') == 'self._bot'
+
+    except_nodes = _nodes_inside_except_handlers(function)
+    commits = [call for call in _calls(function, ('commit',)) if id(call) not in except_nodes]
+    assert commits, 'не найден commit списания'
+    assert hook.lineno > min(call.lineno for call in commits), 'хук обязан стоять после атомарного коммита'
+
+    transactions = [call for call in _calls(function, ('create_transaction',)) if id(call) not in except_nodes]
+    assert transactions, 'не найден create_transaction платежа'
+    assert hook.lineno > max(call.lineno for call in transactions), 'хук обязан стоять после создания транзакции'
+
+    hook_index = source.index(FIRST_PURCHASE_HOOK)
+    reward_index = source.index("first_purchase_result.status == 'rewarded'", hook_index)
+    refresh_index = source.index('await db.refresh(subscription)', reward_index)
+    notification_index = source.index('send_subscription_extension_notification', refresh_index)
+    assert hook_index < reward_index < refresh_index < notification_index

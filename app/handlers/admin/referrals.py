@@ -170,8 +170,10 @@ async def show_referral_statistics(callback: types.CallbackQuery, db_user: User,
             [types.InlineKeyboardButton(text='🔍 Диагностика логов', callback_data='admin_referral_diagnostics')],
         ]
 
-        # Кнопка заявок на вывод (если функция включена)
-        if settings.is_referral_withdrawal_enabled():
+        # Кнопка заявок на вывод: сырой флаг, а не геттер. Геттер закрывает
+        # вывод в схеме «только дни», но админ должен видеть и обрабатывать
+        # старые pending-заявки независимо от текущей схемы программы.
+        if settings.REFERRAL_WITHDRAWAL_ENABLED:
             keyboard_rows.append(
                 [types.InlineKeyboardButton(text='💸 Заявки на вывод', callback_data='admin_withdrawal_requests')]
             )
@@ -880,13 +882,19 @@ async def _show_diagnostics_for_period(callback: types.CallbackQuery, db: AsyncS
                 types.InlineKeyboardButton(text='📅 Сегодня (текущий лог)', callback_data='admin_ref_diag:today'),
             ],
             [types.InlineKeyboardButton(text='📤 Загрузить лог-файл', callback_data='admin_ref_diag_upload')],
-            [types.InlineKeyboardButton(text='🔍 Проверить бонусы (по БД)', callback_data='admin_ref_check_bonuses')],
-            [
-                types.InlineKeyboardButton(
-                    text='🏆 Синхронизировать с конкурсом', callback_data='admin_ref_sync_contest'
-                )
-            ],
         ]
+        # На схеме days_only денежная проверка бонусов недоступна — не зовём в тупик.
+        if not settings.is_referral_days_only_scheme():
+            keyboard_rows.append(
+                [
+                    types.InlineKeyboardButton(
+                        text='🔍 Проверить бонусы (по БД)', callback_data='admin_ref_check_bonuses'
+                    )
+                ]
+            )
+        keyboard_rows.append(
+            [types.InlineKeyboardButton(text='🏆 Синхронизировать с конкурсом', callback_data='admin_ref_sync_contest')]
+        )
 
         # Кнопки действий (только если есть потерянные рефералы)
         if report.lost_referrals:
@@ -1153,30 +1161,31 @@ async def check_missing_bonuses(callback: types.CallbackQuery, db_user: User, db
     try:
         report = await referral_diagnostics_service.check_missing_bonuses(db)
 
-        # Проверка неприменима к многоуровневой схеме: она ищет отсутствие строки
+        # Проверка неприменима к схемам 'levels' и 'days_only': она ищет отсутствие
         # с легаси-причиной и считает суммы по ключам REFERRAL_*. Нули в отчёте
         # означают «не проверяли», и показать вместо этого «✅ Все бонусы
         # начислены!» — выдать админу заведомо ложное «всё в порядке» по аудиту,
         # который не выполнялся.
         if report.unsupported_scheme:
+            unsupported_keyboard_rows = []
+            # На схеме days_only экрана уровней нет — кнопка вела бы в пустоту.
+            if not settings.is_referral_days_only_scheme():
+                unsupported_keyboard_rows.append(
+                    [types.InlineKeyboardButton(text='🪜 Уровни наград', callback_data='admin_ref_levels')]
+                )
+            unsupported_keyboard_rows.append(
+                [types.InlineKeyboardButton(text='⬅️ К диагностике', callback_data='admin_referral_diagnostics')]
+            )
             await callback.message.edit_text(
                 '🔍 <b>Проверка бонусов по БД</b>\n\n'
-                '⚠️ Проверка недоступна: включена многоуровневая схема наград.\n\n'
+                '⚠️ Проверка недоступна: включена схема, где легаси-доплаты не '
+                'применяются (многоуровневая или «только дни»).\n\n'
                 'Детектор ищет пропущенные бонусы по правилам классической схемы и '
-                'считает суммы по настройкам REFERRAL_*. В многоуровневой схеме '
+                'считает суммы по настройкам REFERRAL_*. В такой схеме '
                 'награда могла быть выдана по другому поводу или днями подписки — '
                 'такая пара выглядела бы «пропущенной», и доначисление заплатило бы '
                 'второй раз поверх уже выданного.',
-                reply_markup=types.InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [types.InlineKeyboardButton(text='🪜 Уровни наград', callback_data='admin_ref_levels')],
-                        [
-                            types.InlineKeyboardButton(
-                                text='⬅️ К диагностике', callback_data='admin_referral_diagnostics'
-                            )
-                        ],
-                    ]
-                ),
+                reply_markup=types.InlineKeyboardMarkup(inline_keyboard=unsupported_keyboard_rows),
             )
             return
 
@@ -1267,6 +1276,27 @@ async def apply_missing_bonuses(callback: types.CallbackQuery, db_user: User, db
 
         # Применяем исправления
         fix_report = await referral_diagnostics_service.fix_missing_bonuses(db, report.missing_bonuses, apply=True)
+
+        # Нулевые выплаты — не успех, независимо от того, были ли ошибки:
+        # схема могла отклонить легаси-доплаты, либо пары уже оплачены.
+        # Показывать «✅ Бонусы начислены!» с нулями нельзя, а ошибки не
+        # отменяют этот вывод — они идут отдельной строкой к нейтральному тексту.
+        if fix_report.bonuses_to_referrals == 0 and fix_report.bonuses_to_referrers == 0:
+            neutral_text = (
+                '💤 <b>Начислять нечего</b>\n\n'
+                'Легаси-доплаты в текущей схеме не применяются, либо все подходящие пары уже оплачены.'
+            )
+            if fix_report.errors > 0:
+                neutral_text += f'\n\n⚠️ Ошибок: {fix_report.errors}'
+            await state.update_data(missing_bonuses_report=None)
+            keyboard = types.InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [types.InlineKeyboardButton(text='🔍 Проверить снова', callback_data='admin_ref_check_bonuses')],
+                    [types.InlineKeyboardButton(text='⬅️ К диагностике', callback_data='admin_referral_diagnostics')],
+                ]
+            )
+            await callback.message.edit_text(neutral_text, reply_markup=keyboard)
+            return
 
         text = f"""
 ✅ <b>Бонусы начислены!</b>

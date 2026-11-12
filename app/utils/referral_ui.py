@@ -17,6 +17,7 @@ from sqlalchemy import inspect as sa_inspect
 
 from app.config import settings
 from app.database.models import SubscriptionStatus
+from app.utils.referral_eligibility import is_referral_reward_target
 
 
 HEADER = '<tg-emoji emoji-id="5235695112419303615">🤝</tg-emoji> <b>Партнёрская программа</b>'
@@ -29,27 +30,15 @@ LIST_ICON = '5258274739041883702'
 CTA_ICON = '5314310000531766389'
 GIFT_ICON = '5359415772844152891'
 
-# EXPIRED тоже считается: дни можно начислить при продлении, и прятать от
-# такого пользователя партнёрскую ссылку значило бы врать о доступности программы.
-ELIGIBLE_STATUSES = {
-    SubscriptionStatus.ACTIVE.value,
-    SubscriptionStatus.TRIAL.value,
-    SubscriptionStatus.LIMITED.value,
-    SubscriptionStatus.EXPIRED.value,
-}
-
 
 def has_eligible_subscription(user) -> bool:
     """Есть ли подписка, к которой можно применить бонусные дни.
 
-    Требует загруженной связи ``subscriptions``: у ORM-объекта иначе будет
-    ленивая подгрузка в async-контексте, поэтому вызывающий код обязан
-    убедиться, что она загружена.
+    Требует загруженных связей ``subscriptions`` и ``subscription.tariff``:
+    у ORM-объекта иначе будет ленивая подгрузка в async-контексте, поэтому
+    вызывающий код обязан вызвать :func:`ensure_subscriptions_loaded`.
     """
-    return any(
-        (getattr(subscription, 'status', '') or '').lower() in ELIGIBLE_STATUSES
-        for subscription in (getattr(user, 'subscriptions', None) or [])
-    )
+    return any(is_referral_reward_target(subscription) for subscription in (getattr(user, 'subscriptions', None) or []))
 
 
 def is_trial_available_for_referral(user) -> bool:
@@ -68,12 +57,13 @@ def is_trial_available_for_referral(user) -> bool:
 
 
 async def ensure_subscriptions_loaded(db, user) -> None:
-    """Гарантирует загруженную связь ``subscriptions`` до проверки статусов.
+    """Гарантирует загруженные ``subscriptions`` и ``tariff`` до проверки.
 
-    Middleware обычно грузит её через selectinload, но экран не должен на это
+    Middleware обычно грузит их через selectinload, но экран не должен на это
     полагаться: незагруженная связь в async-сессии падает при обращении, а при
     неаккуратном чтении выглядит пустой — и действующий подписчик превращается
-    в «без подписки».
+    в «без подписки». ``tariff`` нужен предикату: по нему отсекается суточный
+    тариф, которому бонусные дни не начисляются.
     """
     try:
         unloaded = sa_inspect(user).unloaded
@@ -82,6 +72,14 @@ async def ensure_subscriptions_loaded(db, user) -> None:
         return
     if 'subscriptions' in unloaded:
         await db.refresh(user, ['subscriptions'])
+
+    for subscription in getattr(user, 'subscriptions', None) or []:
+        try:
+            subscription_unloaded = sa_inspect(subscription).unloaded
+        except Exception:
+            continue
+        if 'tariff' in subscription_unloaded:
+            await db.refresh(subscription, ['tariff'])
 
 
 def _days_word(days: int) -> str:
@@ -121,7 +119,7 @@ def build_days_only_referral_screen(
     if not has_eligible_subscription(user):
         text = (
             f'<blockquote><tg-emoji emoji-id="{GIFT_ICON}">🎁</tg-emoji> '
-            'Бонусные дни начисляются только при наличии подписки.</blockquote>'
+            'Бонусные дни начисляются только на подходящую подписку (не суточную).</blockquote>'
         )
         if trial_available:
             cta = InlineKeyboardButton(
@@ -140,18 +138,44 @@ def build_days_only_referral_screen(
         return text, InlineKeyboardMarkup(inline_keyboard=[[cta], [back]])
 
     trial_bonus_days = int(settings.REFERRAL_TRIAL_BONUS_DAYS)
-    purchase_bonus_days = int(settings.REFERRAL_FIRST_PURCHASE_BONUS_DAYS)
+    referee_days = settings.get_referral_first_purchase_referee_days()
+    referrer_days = settings.get_referral_first_purchase_referrer_days()
     min_period_days = int(settings.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS)
+
+    terms_lines = []
+    if trial_bonus_days > 0:
+        terms_lines.append(f'  +{trial_bonus_days} {_days_word(trial_bonus_days)} к триалу другу')
+    if referee_days > 0 or referrer_days > 0:
+        if referee_days == referrer_days:
+            terms_lines.append(
+                f'  +{referee_days} {_days_word(referee_days)} вам и другу\n'
+                f'     за первую покупку от {min_period_days} {_days_word(min_period_days)}'
+            )
+        else:
+            # Стороны настроены раздельно: каждая величина подписана явно,
+            # чтобы экран не складывал разные числа в одно обещание.
+            sides = []
+            if referrer_days > 0:
+                sides.append(f'+{referrer_days} {_days_word(referrer_days)} вам')
+            if referee_days > 0:
+                sides.append(f'+{referee_days} {_days_word(referee_days)} другу')
+            terms_lines.append(
+                f'  {" и ".join(sides)}\n     за первую покупку от {min_period_days} {_days_word(min_period_days)}'
+            )
+        # Бонус за первую покупку активен, но суточные тарифы в нём не
+        # участвуют — человек с суточной подпиской не должен ждать награды,
+        # которую система ему не выдаст.
+        terms_lines.append('  Суточные тарифы не участвуют в бонусе за первую покупку.')
+    terms_block = ''
+    if terms_lines:
+        terms_block = f'{TERMS} <b>За каждого друга</b>\n' + '\n'.join(terms_lines) + '\n\n'
 
     text = (
         f'{HEADER}\n\n'
         f'{INVITED} Приглашено: <b>{int(summary.get("invited_count") or 0)}</b>\n'
         f'{PAID} Оплатили: <b>{int(summary.get("paid_referrals_count") or 0)}</b>\n'
         f'{RECEIVED} Получено бонусом: <b>+{int(summary.get("total_earned_days") or 0)} дн.</b>\n\n'
-        f'{TERMS} <b>За каждого друга</b>\n'
-        f'  +{trial_bonus_days} {_days_word(trial_bonus_days)} к триалу другу\n'
-        f'  +{purchase_bonus_days} {_days_word(purchase_bonus_days)} вам и другу\n'
-        f'     за первую покупку от {min_period_days} {_days_word(min_period_days)}\n\n'
+        f'{terms_block}'
         f'<blockquote><code>{html.escape(bot_referral_link)}</code></blockquote>'
     )
 

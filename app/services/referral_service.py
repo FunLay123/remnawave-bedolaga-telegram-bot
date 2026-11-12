@@ -380,9 +380,15 @@ async def attach_referrer_if_missing(
     # читает подписки и пишет строку ledger'а — привязка от него не зависит,
     # поэтому сбой здесь логируется и не откатывает уже состоявшееся прикрепление.
     try:
-        from app.services.referral_purchase_service import ensure_marker_for_already_paid_referral
+        # Отдельная сессия: blocking FOR UPDATE в общей сессии висел бы на строке
+        # users до конца запроса (ранние возвраты helper'а лок не снимают), а его
+        # commit экспайрил бы объекты caller'а. New-session helper изолирует и
+        # лок, и commit.
+        from app.services.referral_purchase_service import (
+            ensure_marker_for_already_paid_referral_in_new_session,
+        )
 
-        await ensure_marker_for_already_paid_referral(db, user.id)
+        await ensure_marker_for_already_paid_referral_in_new_session(user.id)
     except Exception as error:
         # Сбой маркера мог оставить сессию в failed-транзакции. Без отката
         # следующий же запрос в этой общей сессии упадёт PendingRollbackError,
@@ -667,6 +673,36 @@ async def send_referral_notification(
         )
 
 
+async def _retry_first_purchase_marker_best_effort(
+    user_id: int, referrer_id: int, *, lock_nowait: bool = False
+) -> None:
+    """Дописать маркер первой покупки, не роняя обработку регистрации.
+
+    Маркер идемпотентен: при уже существующей строке, отсутствии привязки или
+    оплаты он ничего не пишет. Отдельная сессия изолирует commit и сбой от
+    request-сессии caller'а; ошибка только логируется — регистрация уже учтена.
+
+    ``lock_nowait`` используется ретраем по существующему якорю: caller
+    (кампания/кабинет) может держать строку пользователя в своей
+    незакоммиченной транзакции, и блокирующий ``FOR UPDATE`` во второй сессии
+    ждал бы её. Обычная ветка «уже платил» остаётся блокирующей.
+    """
+    from app.services.referral_purchase_service import ensure_marker_for_already_paid_referral_in_new_session
+
+    try:
+        if lock_nowait:
+            await ensure_marker_for_already_paid_referral_in_new_session(user_id, lock_nowait=True)
+        else:
+            await ensure_marker_for_already_paid_referral_in_new_session(user_id)
+    except Exception as error:
+        logger.error(
+            'Failed to register first-purchase marker during referral registration',
+            user_id=user_id,
+            referrer_id=referrer_id,
+            error=str(error),
+        )
+
+
 async def process_referral_registration(db: AsyncSession, new_user_id: int, referrer_id: int, bot: Bot = None):
     try:
         if new_user_id == referrer_id:
@@ -687,6 +723,93 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
         if settings.is_referral_days_only_scheme():
             logger.debug('Days-only referral scheme: registration rewards disabled', user_id=new_user_id)
 
+            # Идемпотентность регистрации. Повторный вызов случается штатно:
+            # DELETED-restore в панели возвращает пользователя, и путь привязки
+            # проходит заново. Без якоря он повторил бы уведомления и
+            # contest-событие, а конкурс мог бы обнулить уже учтённую сумму.
+            # Строка нулевая — это не награда, а только отметка «регистрация
+            # учтена». Гонку между сессиями бота и кабинета закрывает
+            # партиальный UNIQUE-индекс (миграция 0135).
+            from sqlalchemy.exc import IntegrityError as _DaysOnlyIntegrityError
+
+            from app.database.models import ReferralRewardType
+            from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
+            existing_anchor = await db.execute(
+                select(ReferralEarning.id)
+                .where(
+                    ReferralEarning.user_id == referrer_id,
+                    ReferralEarning.referral_id == new_user_id,
+                    ReferralEarning.reason == REASON_REGISTRATION_DAYS_ONLY,
+                )
+                .limit(1)
+            )
+            if existing_anchor.scalar_one_or_none() is not None:
+                logger.info(
+                    'Регистрация реферала уже учтена, повтор пропущен',
+                    new_user_id=new_user_id,
+                    referrer_id=referrer_id,
+                )
+                # Ретрай маркера: первая обработка могла упасть уже после записи
+                # якоря (например, БД недоступна в момент записи маркера), и
+                # покупка осталась бы без отметки. Уведомления и contest-событие
+                # не повторяем — якорь подтверждает, что они уже отправлены.
+                # Caller может держать строку пользователя в своей транзакции:
+                # NOWAIT не даёт второй сессии встать в ожидание этого лока.
+                await _retry_first_purchase_marker_best_effort(new_user_id, referrer_id, lock_nowait=True)
+                return True
+
+            try:
+                await create_referral_earning(
+                    db=db,
+                    user_id=referrer_id,
+                    referral_id=new_user_id,
+                    amount_kopeks=0,
+                    reason=REASON_REGISTRATION_DAYS_ONLY,
+                    reward_type=ReferralRewardType.DAYS.value,
+                    level=1,
+                    days_granted=0,
+                )
+            except _DaysOnlyIntegrityError:
+                # Проиграли гонку конкурентной сессии после SELECT: уникальный
+                # индекс поймал вставку, уведомления отправит победитель.
+                # rollback экспайрит участников, а caller продолжает читать
+                # user.id/user.telegram_id после возврата — перечитываем их,
+                # иначе в async-сессии будет MissingGreenlet. Как и в generic-
+                # ветке ниже, refresh best-effort: сбой не отменяет «повтор».
+                try:
+                    await db.rollback()
+                    await db.refresh(new_user)
+                    await db.refresh(referrer)
+                except Exception:
+                    pass
+                logger.info(
+                    'Гонка регистрации реферала поймана уникальным индексом, считаем повтором',
+                    new_user_id=new_user_id,
+                    referrer_id=referrer_id,
+                )
+                return True
+            except Exception as error:
+                # Временная ошибка записи не должна лишать регистрацию уведомлений
+                # и contest-события. Якорь не записан, поэтому повторная обработка
+                # позже снова пройдёт этот путь и может продублировать сообщения —
+                # это лучше, чем потерять их сейчас.
+                try:
+                    await db.rollback()
+                    # rollback истекает загруженные объекты сессии; перечитываем
+                    # участников, иначе обращение к их полям для уведомлений
+                    # упадёт в async-сессии (MissingGreenlet).
+                    await db.refresh(new_user)
+                    await db.refresh(referrer)
+                except Exception:
+                    pass
+                logger.error(
+                    'Не удалось записать отметку регистрации реферала, продолжаем без неё',
+                    new_user_id=new_user_id,
+                    referrer_id=referrer_id,
+                    error=str(error),
+                )
+
             try:
                 from app.services.referral_contest_service import referral_contest_service
 
@@ -694,16 +817,28 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
             except Exception as exc:
                 logger.debug('Не удалось записать конкурсную регистрацию', exc=exc)
 
+            # Привязка может быть поздней (retroactive): человек мог уже
+            # потратить триал или купить подписку до появления пригласившего.
+            # Проверка «уже платил» нужна и тексту уведомлений, и маркеру первой
+            # покупки, поэтому считается один раз ДО ветки уведомлений. Раньше
+            # она жила только внутри ``if bot``: привязки из кампании и кабинета,
+            # где bot не всегда есть, оставляли оплату без маркера, и следующая
+            # покупка получала награду за «первую».
+            from app.services.referral_purchase_service import has_paid_subscription_before_attach
+
+            already_paid = await has_paid_subscription_before_attach(db, new_user.id)
+            if already_paid:
+                # Якорь регистрации выше закоммичен (create_referral_earning
+                # коммитит сам), поэтому отдельная сессия видит привязку.
+                # Маркер пишется в своей сессии: commit в этой экспайрил бы
+                # объекты вызывающего (кампания/кабинет читают их после
+                # возврата). Сбой маркера не отменяет уже учтённую регистрацию.
+                await _retry_first_purchase_marker_best_effort(new_user_id, referrer_id)
+
             if bot:
-                from app.services.referral_purchase_service import has_paid_subscription_before_attach
                 from app.utils.pricing_utils import _pluralize_days_ru
 
-                # Привязка может быть поздней (retroactive): человек мог уже
-                # потратить триал или купить подписку до появления пригласившего.
-                # Обещания в этом случае невыполнимы — маркер первой покупки
-                # запишется сразу после отправки сообщений, и бонус не придёт.
                 trial_already_used = new_user.is_trial_already_used()
-                already_paid = await has_paid_subscription_before_attach(db, new_user.id)
 
                 trial_bonus_days = settings.REFERRAL_TRIAL_BONUS_DAYS
                 welcome_message = (
@@ -733,20 +868,21 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                     referrer_name=referrer.full_name,
                 )
 
-                first_purchase_bonus_days = settings.REFERRAL_FIRST_PURCHASE_BONUS_DAYS
+                first_purchase_referrer_days = settings.get_referral_first_purchase_referrer_days()
                 inviter_message = (
                     f'<tg-emoji emoji-id="5235695112419303615">👥</tg-emoji> <b>Новый реферал!</b>\n\n'
                     f'По вашей ссылке зарегистрировался '
                     f'<b>{html.escape(new_user.full_name)}</b>!'
                 )
-                # Маркер уже оплаченной покупки делает обещанный бонус
-                # невозможным — пригласившему уходит нейтральное уведомление.
-                if not already_paid:
+                # Обещание невыполнимо при нулевом бонусе или выключенной
+                # программе; маркер уже оплаченной покупки тоже делает его
+                # ложным — пригласившему уходит нейтральное уведомление.
+                if not already_paid and first_purchase_referrer_days > 0 and settings.is_referral_program_enabled():
                     inviter_message += (
                         f'\n\nКогда он впервые купит подписку от '
                         f'{settings.REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS} дней, '
-                        f'вы получите +{first_purchase_bonus_days} '
-                        f'{_pluralize_days_ru(first_purchase_bonus_days)}.'
+                        f'вы получите +{first_purchase_referrer_days} '
+                        f'{_pluralize_days_ru(first_purchase_referrer_days)}.'
                     )
                 await send_referral_notification(
                     bot,

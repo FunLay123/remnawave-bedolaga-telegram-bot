@@ -160,3 +160,162 @@ async def test_analyze_today(temp_log_file, sample_log_content):
     # Проверяем что период установлен корректно
     today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     assert report.analysis_period_start.date() == today.date()
+
+
+# ---------------------------------------------------------------------------
+# Идемпотентность доначислений: нулевая пара-маркер.
+#
+# Если приглашённому бонус выплачен, а пригласившему платить нечего (0 при
+# нулевой комиссии и фикс-бонусе), строка ReferralEarning всё равно обязана
+# появиться. Она не выплата, а отметка «пара учтена»: без неё повторный apply
+# из Redis/FSM снова начислил бы бонус приглашённому.
+# ---------------------------------------------------------------------------
+
+
+def _diag_user(uid: int, referred_by_id: int | None = None) -> object:
+    from app.database.models import User
+
+    return User(
+        id=uid,
+        telegram_id=1000 + uid,
+        first_name=f'U{uid}',
+        language='ru',
+        balance_kopeks=0,
+        referred_by_id=referred_by_id,
+    )
+
+
+def _missing_bonus_zero_referrer():
+    from app.services.referral_diagnostics_service import MissingBonus
+
+    return MissingBonus(
+        referral_id=2,
+        referral_telegram_id=1002,
+        referral_username=None,
+        referral_full_name='U2',
+        referrer_id=1,
+        referrer_telegram_id=1001,
+        referrer_username=None,
+        referrer_full_name='U1',
+        first_topup_amount_kopeks=10_000,
+        first_topup_date=datetime.now(UTC),
+        missing_referral_bonus=True,
+        missing_referrer_bonus=False,
+        referral_bonus_amount=5_000,
+        referrer_bonus_amount=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fix_missing_bonuses_zero_referrer_bonus_writes_pair_marker(monkeypatch):
+    from sqlalchemy import select
+
+    from app.config import settings
+    from app.database.models import Base, ReferralEarning, User
+    from tests.fixtures.sqlite_memory import memory_session
+
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'legacy')
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_TOPUP_BONUS_KOPEKS', 5_000)
+    monkeypatch.setattr(settings, 'REFERRAL_INVITER_BONUS_KOPEKS', 0)
+    monkeypatch.setattr(settings, 'REFERRAL_COMMISSION_PERCENT', 0)
+
+    service = ReferralDiagnosticsService(log_path='/nonexistent/referral-diagnostics.log')
+    async with memory_session(monkeypatch, list(Base.metadata.sorted_tables)) as db:
+        db.add_all([_diag_user(1), _diag_user(2, referred_by_id=1)])
+        await db.commit()
+
+        first = await service.fix_missing_bonuses(db, [_missing_bonus_zero_referrer()], apply=True)
+        second = await service.fix_missing_bonuses(db, [_missing_bonus_zero_referrer()], apply=True)
+
+        assert first.bonuses_to_referrals == 5_000
+        assert first.bonuses_to_referrers == 0
+        assert second.bonuses_to_referrals == 0
+
+        referral = await db.get(User, 2)
+        assert referral.balance_kopeks == 5_000
+
+        rows = (
+            (await db.execute(select(ReferralEarning).where(ReferralEarning.reason == 'referral_first_topup')))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].amount_kopeks == 0
+        assert rows[0].user_id == 1
+        assert rows[0].referral_id == 2
+
+
+@pytest.mark.asyncio
+async def test_fix_lost_referrals_zero_referrer_bonus_writes_pair_marker(monkeypatch):
+    from sqlalchemy import select
+
+    from app.config import settings
+    from app.database.models import Base, ReferralEarning, Transaction, TransactionType, User
+    from app.services.referral_diagnostics_service import LostReferral
+    from tests.fixtures.sqlite_memory import memory_session
+
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'legacy')
+    monkeypatch.setattr(settings, 'REFERRAL_MINIMUM_TOPUP_KOPEKS', 10_000)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_TOPUP_BONUS_KOPEKS', 5_000)
+    monkeypatch.setattr(settings, 'REFERRAL_INVITER_BONUS_KOPEKS', 0)
+    monkeypatch.setattr(settings, 'REFERRAL_COMMISSION_PERCENT', 0)
+
+    service = ReferralDiagnosticsService(log_path='/nonexistent/referral-diagnostics.log')
+    async with memory_session(monkeypatch, list(Base.metadata.sorted_tables)) as db:
+        db.add_all(
+            [
+                _diag_user(1),
+                _diag_user(2),
+                Transaction(
+                    id=100,
+                    user_id=2,
+                    type=TransactionType.DEPOSIT.value,
+                    amount_kopeks=10_000,
+                    description='Пополнение',
+                    is_completed=True,
+                ),
+            ]
+        )
+        await db.commit()
+
+        # Маркер-хелпер после commit привязки работает в отдельной сессии;
+        # направляем её в ту же in-memory БД.
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        monkeypatch.setattr(
+            'app.database.database.AsyncSessionLocal',
+            async_sessionmaker(db.bind, expire_on_commit=False),
+        )
+
+        def _lost():
+            return LostReferral(
+                telegram_id=1002,
+                username=None,
+                full_name='U2',
+                referral_code='refABC12345',
+                expected_referrer_code='refREF00000',
+                expected_referrer_id=1,
+                expected_referrer_name='U1',
+                click_time=datetime.now(UTC),
+                registered=True,
+                has_referrer=False,
+                current_referrer_id=None,
+            )
+
+        first = await service.fix_lost_referrals(db, [_lost()], apply=True)
+        second = await service.fix_lost_referrals(db, [_lost()], apply=True)
+
+        assert first.bonuses_to_referrals == 5_000
+        assert first.bonuses_to_referrers == 0
+        assert second.bonuses_to_referrals == 0
+
+        referral = await db.get(User, 2)
+        assert referral.balance_kopeks == 5_000
+
+        rows = (
+            (await db.execute(select(ReferralEarning).where(ReferralEarning.reason == 'referral_first_topup')))
+            .scalars()
+            .all()
+        )
+        assert len(rows) == 1
+        assert rows[0].amount_kopeks == 0

@@ -773,10 +773,11 @@ async def activate_trial(
             keyboard.append([types.InlineKeyboardButton(text='🆘 Обжаловать', url=support_url)])
         keyboard.append([types.InlineKeyboardButton(text=texts.BACK, callback_data='subscription')])
 
-        await callback.message.edit_text(
+        await _edit_message_text_or_caption(
+            callback.message,
             f'🚫 <b>Активация подписки ограничена</b>\n\n{reason}\n\n'
             'Если вы считаете это ошибкой, вы можете обжаловать решение.',
-            reply_markup=types.InlineKeyboardMarkup(inline_keyboard=keyboard),
+            types.InlineKeyboardMarkup(inline_keyboard=keyboard),
         )
         await callback.answer()
         return
@@ -785,9 +786,10 @@ async def activate_trial(
     if settings.TRIAL_DURATION_DAYS <= 0 or settings.is_trial_disabled_for_user(
         getattr(db_user, 'auth_type', 'telegram')
     ):
-        await callback.message.edit_text(
+        await _edit_message_text_or_caption(
+            callback.message,
             texts.t('TRIAL_DISABLED_FOR_USER_TYPE', 'Пробный период недоступен'),
-            reply_markup=get_back_keyboard(db_user.language),
+            get_back_keyboard(db_user.language),
         )
         await callback.answer()
         return
@@ -797,7 +799,11 @@ async def activate_trial(
     # Multi-tariff note: db_user.subscription returns the first active/most recent
     # subscription. Trial eligibility is "has any subscription" so this check is correct.
     if db_user.is_trial_already_used():
-        await callback.message.edit_text(texts.TRIAL_ALREADY_USED, reply_markup=get_back_keyboard(db_user.language))
+        await _edit_message_text_or_caption(
+            callback.message,
+            texts.TRIAL_ALREADY_USED,
+            get_back_keyboard(db_user.language),
+        )
         await callback.answer()
         return
 
@@ -979,9 +985,10 @@ async def activate_trial(
                 missing=missing_label,
             )
 
-            await callback.message.edit_text(
+            await _edit_message_text_or_caption(
+                callback.message,
                 message,
-                reply_markup=get_insufficient_balance_keyboard(
+                get_insufficient_balance_keyboard(
                     db_user.language,
                     amount_kopeks=error.required_amount,
                 ),
@@ -1041,9 +1048,10 @@ async def activate_trial(
                     'Не удалось завершить активацию триала. Средства возвращены на баланс. Попробуйте позже.',
                 )
 
-            await callback.message.edit_text(
+            await _edit_message_text_or_caption(
+                callback.message,
                 failure_text,
-                reply_markup=get_back_keyboard(db_user.language),
+                get_back_keyboard(db_user.language),
             )
             await callback.answer()
             return
@@ -1076,9 +1084,10 @@ async def activate_trial(
                     'Не удалось завершить активацию триала. Средства возвращены на баланс. Попробуйте позже.',
                 )
 
-            await callback.message.edit_text(
+            await _edit_message_text_or_caption(
+                callback.message,
                 failure_text,
-                reply_markup=get_back_keyboard(db_user.language),
+                get_back_keyboard(db_user.language),
             )
             await callback.answer()
             return
@@ -1267,17 +1276,19 @@ async def activate_trial(
                     ]
                 )
 
-            await callback.message.edit_text(
+            await _edit_message_text_or_caption(
+                callback.message,
                 trial_success_text,
-                reply_markup=connect_keyboard,
+                connect_keyboard,
                 parse_mode='HTML',
             )
         else:
             trial_success_text = f"{texts.TRIAL_ACTIVATED}\n\n⚠️ Ссылка генерируется, попробуйте перейти в раздел 'Моя подписка' через несколько секунд."
             trial_success_text += payment_note
-            await callback.message.edit_text(
+            await _edit_message_text_or_caption(
+                callback.message,
                 trial_success_text,
-                reply_markup=get_back_keyboard(db_user.language),
+                get_back_keyboard(db_user.language),
             )
 
         logger.info('✅ Активирована тестовая подписка для пользователя', telegram_id=db_user.telegram_id)
@@ -1310,7 +1321,11 @@ async def activate_trial(
                     'Не удалось завершить активацию триала. Средства возвращены на баланс. Попробуйте позже.',
                 )
 
-        await callback.message.edit_text(failure_text, reply_markup=get_back_keyboard(db_user.language))
+        await _edit_message_text_or_caption(
+            callback.message,
+            failure_text,
+            get_back_keyboard(db_user.language),
+        )
         await callback.answer()
         return
 
@@ -1322,14 +1337,17 @@ async def activate_trial(
             if settings.is_referral_days_only_scheme() and getattr(db_user, 'referral_code', None):
                 from app.utils.referral_ui import (
                     build_days_only_referral_screen,
+                    ensure_subscriptions_loaded,
                     is_trial_available_for_referral,
                 )
                 from app.utils.user_utils import get_user_referral_summary
 
                 # После активации в объекте пользователя может ещё не быть новой
                 # подписки: без перезагрузки экран показал бы «нет подписки» и
-                # предложил триал, который только что выдали.
+                # предложил триал, который только что выдали. Заодно грузим
+                # tariff каждой подписки — по нему отсекается суточный тариф.
                 await db.refresh(db_user, ['subscriptions'])
+                await ensure_subscriptions_loaded(db, db_user)
                 summary = await get_user_referral_summary(db, db_user.id)
                 bot_username = (await callback.bot.get_me()).username
                 link = settings.get_bot_referral_link(db_user.referral_code, bot_username)

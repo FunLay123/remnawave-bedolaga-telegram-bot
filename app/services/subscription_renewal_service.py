@@ -369,6 +369,7 @@ class SubscriptionRenewalService:
         charge_balance_amount: int | None = None,
         description: str | None = None,
         payment_method: PaymentMethod | None = None,
+        skip_first_purchase_hook: bool = False,
     ) -> SubscriptionRenewalResult:
         final_total = int(pricing.final_total)
         final_total = max(final_total, 0)
@@ -586,6 +587,31 @@ class SubscriptionRenewalService:
                 subscription_after_id=subscription_after.id,
                 error=error,
             )
+
+        # Классическое продление — такая же оплата, как покупка: без этого
+        # вызова первая платная покупка через «продлить» не ставила маркер и
+        # могла получить бонус повторно. create_transaction выше коммитит
+        # сессию (снимая FOR UPDATE), а хук пишет в своей сессии; вызываем до
+        # refresh, чтобы возвращённые объекты и уведомление увидели бонусные дни.
+        # menu уже вызывает хук после своих веток — там finalize идёт с флагом.
+        if not skip_first_purchase_hook:
+            try:
+                from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+                await register_first_purchase_after_purchase(
+                    referee_id=user.id,
+                    subscription_id=subscription_after.id,
+                    duration_days=period_days,
+                    paid_amount_kopeks=final_total,
+                    source='renewal_finalize',
+                )
+            except Exception as error:  # pragma: no cover - defensive logging
+                logger.error(
+                    'Failed to register first purchase after renewal',
+                    user_id=user.id,
+                    subscription_id=subscription_after.id,
+                    error=error,
+                )
 
         await db.refresh(user)
         await db.refresh(subscription_after)

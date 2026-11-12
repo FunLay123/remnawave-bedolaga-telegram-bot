@@ -12,6 +12,25 @@ from app.config import settings
 from app.services.referral_purchase_service import FirstPurchaseResult, _post_commit_effects
 
 
+class _ExpiringSubscription:
+    """Подписка, которая становится expired после rollback внутри sync.
+
+    Чтение ``user_id`` у неё после sync — это ровно тот MissingGreenlet, который
+    получает enqueue, если снимать user_id не заранее.
+    """
+
+    def __init__(self, subscription_id: int, user_id: int) -> None:
+        self.id = subscription_id
+        self._user_id = user_id
+        self.expired = False
+
+    @property
+    def user_id(self) -> int:
+        if self.expired:
+            raise RuntimeError('MissingGreenlet: expired subscription attribute read')
+        return self._user_id
+
+
 @pytest.mark.asyncio
 async def test_post_commit_syncs_both_subscriptions(monkeypatch):
     subscriptions = {
@@ -25,7 +44,7 @@ async def test_post_commit_syncs_both_subscriptions(monkeypatch):
     async def fake_session():
         yield fake_db
 
-    sync = AsyncMock()
+    sync = AsyncMock(return_value=object())
     shift = AsyncMock()
     enqueue = MagicMock()
 
@@ -50,6 +69,47 @@ async def test_post_commit_syncs_both_subscriptions(monkeypatch):
 
     assert sync.await_count == 2
     assert shift.await_count == 2
+    enqueue.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_post_commit_shifts_lava_by_side_specific_days(monkeypatch):
+    """Lava сдвигается ровно на дни своей стороны (7/3), а не на общий бонус."""
+    subscriptions = {
+        10: SimpleNamespace(id=10, user_id=2),
+        11: SimpleNamespace(id=11, user_id=1),
+    }
+    fake_db = SimpleNamespace()
+    fake_db.get = AsyncMock(side_effect=lambda model, subscription_id: subscriptions[subscription_id])
+
+    @asynccontextmanager
+    async def fake_session():
+        yield fake_db
+
+    sync = AsyncMock(return_value=object())
+    shift = AsyncMock()
+    enqueue = MagicMock()
+
+    monkeypatch.setattr('app.database.database.AsyncSessionLocal', fake_session)
+    monkeypatch.setattr(
+        subscription_module,
+        'SubscriptionService',
+        lambda: SimpleNamespace(sync_remnawave_user=sync),
+    )
+    monkeypatch.setattr(lava_module, 'shift_lava_next_charge_after_manual_extension', shift)
+    monkeypatch.setattr(retry_module.remnawave_retry_queue, 'enqueue', enqueue)
+
+    result = FirstPurchaseResult(
+        status='rewarded',
+        referee_days=7,
+        referrer_days=3,
+        referee_subscription_id=10,
+        referrer_subscription_id=11,
+    )
+
+    await _post_commit_effects(result, referee_id=2)
+
+    assert [args.args[1:] for args in shift.await_args_list] == [(10, 7), (11, 3)]
     enqueue.assert_not_called()
 
 
@@ -84,7 +144,93 @@ async def test_post_commit_enqueues_sync_failure_without_raising(monkeypatch):
 
     await _post_commit_effects(result, referee_id=2)
 
-    enqueue.assert_called_once()
+    enqueue.assert_called_once_with(subscription_id=10, user_id=2, action='update')
+
+
+@pytest.mark.asyncio
+async def test_post_commit_enqueues_sync_returning_none(monkeypatch):
+    """sync_remnawave_user вернул None — панель не применила изменения, нужен retry."""
+    subscriptions = {10: SimpleNamespace(id=10, user_id=2)}
+    fake_db = SimpleNamespace()
+    fake_db.get = AsyncMock(side_effect=lambda model, subscription_id: subscriptions[subscription_id])
+
+    @asynccontextmanager
+    async def fake_session():
+        yield fake_db
+
+    sync = AsyncMock(return_value=None)
+    shift = AsyncMock()
+    enqueue = MagicMock()
+
+    monkeypatch.setattr('app.database.database.AsyncSessionLocal', fake_session)
+    monkeypatch.setattr(
+        subscription_module,
+        'SubscriptionService',
+        lambda: SimpleNamespace(sync_remnawave_user=sync),
+    )
+    monkeypatch.setattr(lava_module, 'shift_lava_next_charge_after_manual_extension', shift)
+    monkeypatch.setattr(retry_module.remnawave_retry_queue, 'enqueue', enqueue)
+
+    result = FirstPurchaseResult(
+        status='rewarded',
+        referee_days=10,
+        referrer_days=0,
+        referee_subscription_id=10,
+    )
+
+    await _post_commit_effects(result, referee_id=2)
+
+    sync.assert_awaited_once()
+    enqueue.assert_called_once_with(subscription_id=10, user_id=2, action='update')
+    shift.assert_awaited_once()
+
+
+@pytest.mark.parametrize('sync_outcome', ['none', 'raise'])
+@pytest.mark.asyncio
+async def test_post_commit_snapshots_user_id_before_sync(monkeypatch, sync_outcome):
+    """rollback внутри sync экспайрит подписку: user_id для retry снимается заранее.
+
+    SimpleNamespace этого не ловит — его поля читаются всегда. Здесь же после
+    sync обращение к ``subscription.user_id`` падает, как у настоящего expired
+    объекта в async-сессии, и enqueue обязан обойтись снимком.
+    """
+    subscription = _ExpiringSubscription(10, 2)
+    fake_db = SimpleNamespace()
+    fake_db.get = AsyncMock(return_value=subscription)
+
+    @asynccontextmanager
+    async def fake_session():
+        yield fake_db
+
+    async def fake_sync(_db, target):
+        target.expired = True
+        if sync_outcome == 'raise':
+            raise RuntimeError('panel down')
+
+    sync = AsyncMock(side_effect=fake_sync)
+    shift = AsyncMock()
+    enqueue = MagicMock()
+
+    monkeypatch.setattr('app.database.database.AsyncSessionLocal', fake_session)
+    monkeypatch.setattr(
+        subscription_module,
+        'SubscriptionService',
+        lambda: SimpleNamespace(sync_remnawave_user=sync),
+    )
+    monkeypatch.setattr(lava_module, 'shift_lava_next_charge_after_manual_extension', shift)
+    monkeypatch.setattr(retry_module.remnawave_retry_queue, 'enqueue', enqueue)
+
+    result = FirstPurchaseResult(
+        status='rewarded',
+        referee_days=10,
+        referrer_days=0,
+        referee_subscription_id=10,
+    )
+
+    await _post_commit_effects(result, referee_id=2)
+
+    enqueue.assert_called_once_with(subscription_id=10, user_id=2, action='update')
+    shift.assert_awaited_once()
 
 
 @pytest.mark.asyncio

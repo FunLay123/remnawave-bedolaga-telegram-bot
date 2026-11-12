@@ -653,6 +653,63 @@ class UserService:
 
             await db.commit()
 
+            # Поздняя привязка: у назначенного реферала могла уже быть оплата.
+            # Маркер фиксирует её как учтённую, чтобы следующая покупка не
+            # принесла награду за «первую». Обходим всех привязанных
+            # (``to_assign``), а не только новых: повторный запуск админской
+            # привязки должен ретраить ранее упавший маркер. Существующие
+            # маркеры читаем одним SELECT'ом в текущей сессии, а непомеченных
+            # отдаём в ОДНУ batch-сессию: иначе на длинном списке получался N+1
+            # подключений. Пишем в отдельной сессии: helper коммитит, а commit в
+            # request-сессии экспайрит объекты, которые caller читает после
+            # вызова (db_user.language), и даёт MissingGreenlet. Сбой маркеров
+            # не отменяет привязку — только лог.
+            if to_assign:
+                from app.services.referral_purchase_service import (
+                    ensure_markers_for_already_paid_referrals_in_new_session,
+                )
+                from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
+
+                already_marked: set[int] = set()
+                try:
+                    markers_result = await db.execute(
+                        select(ReferralEarning.user_id).where(
+                            ReferralEarning.user_id.in_(to_assign),
+                            ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+                        )
+                    )
+                    already_marked = set(markers_result.scalars().all())
+                except Exception as error:
+                    # Привязка уже закоммичена; сбой оптимизации не должен
+                    # превращать успех в «update_failed» — падаем в прежнее
+                    # поведение и зовём batch-helper для всех.
+                    logger.warning(
+                        'Failed to preload first-purchase markers after admin referral attach',
+                        referrer_id=user_id,
+                        admin_id=admin_id,
+                        error=str(error),
+                    )
+
+                unmarked_ids = [referral_id for referral_id in to_assign if referral_id not in already_marked]
+                if unmarked_ids:
+                    try:
+                        created = await ensure_markers_for_already_paid_referrals_in_new_session(unmarked_ids)
+                        logger.debug(
+                            'First-purchase markers batch after admin referral attach',
+                            referrer_id=user_id,
+                            admin_id=admin_id,
+                            requested=len(unmarked_ids),
+                            created=created,
+                        )
+                    except Exception as error:
+                        logger.error(
+                            'Failed to register first-purchase markers after admin referral attach',
+                            referrer_id=user_id,
+                            admin_id=admin_id,
+                            requested=len(unmarked_ids),
+                            error=str(error),
+                        )
+
             logger.info(
                 'Админ обновил рефералов пользователя',
                 admin_id=admin_id,

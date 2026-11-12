@@ -91,7 +91,7 @@ def _spans(node: ast.stmt) -> int:
 
 @pytest.mark.parametrize('path', list(_iter_python_files()), ids=lambda p: str(p.relative_to(APP_ROOT)))
 def test_referral_id_grouping_excludes_referee_rows(path):
-    relative = str(path.relative_to(APP_ROOT))
+    relative = path.relative_to(APP_ROOT).as_posix()
     if relative in _ALLOWED:
         pytest.skip('файл разобран вручную')
 

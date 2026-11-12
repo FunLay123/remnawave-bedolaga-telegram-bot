@@ -264,8 +264,9 @@ class MissingBonusReport:
     total_missing_to_referrals: int = 0  # Всего не начислено рефералам
     total_missing_to_referrers: int = 0  # Всего не начислено рефереерам
 
-    # Проверка неприменима: включена многоуровневая схема, а весь детектор и
-    # доначисление считают суммы по легаси-ключам REFERRAL_*.
+    # Проверка неприменима в схемах 'levels' и 'days_only': весь детектор и
+    # доначисление считают суммы по легаси-ключам REFERRAL_*, которые в этих
+    # схемах денежными наградами не управляют.
     unsupported_scheme: bool = False
 
     def to_dict(self) -> dict:
@@ -689,6 +690,11 @@ class ReferralDiagnosticsService:
             FixReport с деталями исправлений
         """
         report = FixReport()
+        # Все обработанные пользователи с привязкой (включая уже привязанных
+        # до этого прогона). Маркер первой покупки пишется только им и только
+        # после commit: повторный apply должен ретраить ранее упавший маркер,
+        # а не только покрывать новые привязки.
+        attached_user_ids: list[int] = []
 
         if not lost_referrals:
             logger.info('🔍 Нет потерянных рефералов для исправления')
@@ -740,6 +746,13 @@ class ReferralDiagnosticsService:
                     detail.referred_by_set = True
                     report.users_fixed += 1
 
+                # Маркер пишется всем обработанным пользователям с привязкой, а
+                # не только новым: повторный apply ретраит маркер, упавший в
+                # прошлый раз уже после commit привязки. Пользователей без
+                # привязки не трогаем — им нечего отмечать.
+                if apply and user.referred_by_id is not None and user.id not in attached_user_ids:
+                    attached_user_ids.append(user.id)
+
                 # 2. Проверяем первое пополнение
                 # Ищем первое пополнение пользователя
                 from app.database.models import Transaction, TransactionType
@@ -754,8 +767,11 @@ class ReferralDiagnosticsService:
 
                 # Восстановление ПРИВЯЗКИ реферала выше безопасно при любой схеме.
                 # Доначисление бонусов — нет: ниже суммы считаются по легаси-ключам
-                # REFERRAL_*, которые в многоуровневой схеме ничем не управляют.
-                bonus_backfill_supported = not settings.is_referral_levels_scheme()
+                # REFERRAL_*, которые в схемах 'levels' и 'days_only' ничем не
+                # управляют.
+                bonus_backfill_supported = not (
+                    settings.is_referral_levels_scheme() or settings.is_referral_days_only_scheme()
+                )
 
                 if (
                     bonus_backfill_supported
@@ -841,6 +857,20 @@ class ReferralDiagnosticsService:
 
                                 # Добавляем в активные конкурсы рефералов
                                 await self._add_to_active_contests(db, user, referrer, first_topup.amount_kopeks)
+                        elif apply and detail.bonus_to_referral_kopeks > 0:
+                            # Приглашённому бонус выплачен, а пригласившему платить
+                            # нечего (нулевые фикс-бонус и комиссия). Нулевая строка
+                            # фиксирует, что пара уже учтена: без неё повторный apply
+                            # из Redis/FSM снова начислил бы бонус приглашённому.
+                            campaign_id = await get_user_campaign_id(db, user.id)
+                            await create_referral_earning(
+                                db=db,
+                                user_id=referrer.id,
+                                referral_id=user.id,
+                                amount_kopeks=0,
+                                reason='referral_first_topup',
+                                campaign_id=campaign_id,
+                            )
                     else:
                         detail.error = 'Бонусы уже начислены ранее'
 
@@ -854,6 +884,30 @@ class ReferralDiagnosticsService:
 
         if apply:
             await db.commit()
+
+            # Поздняя привязка: у человека могла уже быть оплата. Маркер
+            # фиксирует её как учтённую, чтобы следующая покупка не принесла
+            # награду за «первую». Вызывается после commit привязки для всех
+            # обработанных пользователей с referred_by_id: повторный прогон
+            # должен ретраить маркер, упавший в прошлый раз. Пишем в отдельной
+            # сессии: helper коммитит, а commit в request-сессии экспайрит
+            # объекты caller'а (db_user) и даёт MissingGreenlet. Сбой маркера
+            # не превращает исправление в ошибку.
+            if attached_user_ids:
+                from app.services.referral_purchase_service import (
+                    ensure_marker_for_already_paid_referral_in_new_session,
+                )
+
+                for attached_user_id in attached_user_ids:
+                    try:
+                        await ensure_marker_for_already_paid_referral_in_new_session(attached_user_id)
+                    except Exception as error:
+                        logger.error(
+                            'Failed to register first-purchase marker after lost-referral fix',
+                            user_id=attached_user_id,
+                            error=str(error),
+                        )
+
             logger.info(
                 '✅ Исправлено рефералов: начислено бонусов: ₽ + ₽',
                 users_fixed=report.users_fixed,
@@ -883,13 +937,16 @@ class ReferralDiagnosticsService:
         report = MissingBonusReport()
 
         # Детектор ищет ОТСУТСТВИЕ строки с легаси-причиной и считает суммы по
-        # ключам REFERRAL_*. В многоуровневой схеме начисление могло пройти по
-        # другому поводу (регистрация, каждое пополнение) или вовсе днями — такую
-        # пару детектор считает «пропущенной» и доначислил бы деньги ПОВЕРХ уже
-        # выданного. Поэтому на схеме 'levels' проверка не выполняется вовсе.
-        if settings.is_referral_levels_scheme():
+        # ключам REFERRAL_*. В схемах 'levels' и 'days_only' начисление могло
+        # пройти по другому поводу (регистрация, каждое пополнение, дни подписки) —
+        # такую пару детектор считает «пропущенной» и доначислил бы деньги ПОВЕРХ
+        # уже выданного. Поэтому в этих схемах проверка не выполняется вовсе.
+        if settings.is_referral_levels_scheme() or settings.is_referral_days_only_scheme():
             report.unsupported_scheme = True
-            logger.info('Проверка пропущенных бонусов пропущена: включена многоуровневая схема')
+            logger.info(
+                'Проверка пропущенных бонусов пропущена: схема не поддерживает легаси-доплаты',
+                scheme=settings.REFERRAL_REWARD_SCHEME,
+            )
             return report
 
         # 1. Находим всех рефералов (у кого есть referred_by_id)
@@ -1005,11 +1062,12 @@ class ReferralDiagnosticsService:
             return report
 
         # Вторая линия защиты: отчёт мог быть построен ДО переключения схемы и
-        # пролежать в Redis. Начислять по нему легаси-суммы на многоуровневой
-        # установке — это выплата поверх уже выданного, деньгами и повторно.
-        if settings.is_referral_levels_scheme():
+        # пролежать в Redis. Начислять по нему легаси-суммы в схемах 'levels' и
+        # 'days_only' — это выплата поверх уже выданного, деньгами и повторно.
+        if settings.is_referral_levels_scheme() or settings.is_referral_days_only_scheme():
             logger.warning(
-                'Доначисление бонусов отклонено: включена многоуровневая схема',
+                'Доначисление бонусов отклонено: схема не поддерживает легаси-доплаты',
+                scheme=settings.REFERRAL_REWARD_SCHEME,
                 missing_count=len(missing_bonuses),
             )
             return report
@@ -1043,6 +1101,24 @@ class ReferralDiagnosticsService:
                 continue
 
             try:
+                # Повторный или устаревший отчёт мог прийти из Redis/FSM. Если пара
+                # (реферер, реферал) уже оплачена — второй раз не платим. Проверка
+                # идёт в БД, а не в памяти: между построением отчёта и apply могло
+                # пройти время и другой apply.
+                existing_earning_result = await db.execute(
+                    select(ReferralEarning)
+                    .where(
+                        ReferralEarning.user_id == referrer.id,
+                        ReferralEarning.referral_id == referral.id,
+                        ReferralEarning.reason == 'referral_first_topup',
+                    )
+                    .limit(1)
+                )
+                if existing_earning_result.scalar_one_or_none():
+                    detail.error = 'Бонусы уже начислены ранее'
+                    report.details.append(detail)
+                    continue
+
                 # Начисляем бонус рефералу
                 if missing.missing_referral_bonus and missing.referral_bonus_amount > 0:
                     detail.bonus_to_referral_kopeks = missing.referral_bonus_amount
@@ -1099,6 +1175,21 @@ class ReferralDiagnosticsService:
 
                         # Добавляем в активные конкурсы рефералов
                         await self._add_to_active_contests(db, referral, referrer, missing.first_topup_amount_kopeks)
+
+                # Приглашённому бонус выплачен, а пригласившему платить нечего
+                # (нулевые фикс-бонус и комиссия). Нулевая строка фиксирует, что
+                # пара уже учтена: без неё повторный apply из Redis/FSM снова
+                # начислил бы бонус приглашённому.
+                if apply and detail.bonus_to_referral_kopeks > 0 and detail.bonus_to_referrer_kopeks <= 0:
+                    campaign_id = await get_user_campaign_id(db, referral.id)
+                    await create_referral_earning(
+                        db=db,
+                        user_id=referrer.id,
+                        referral_id=referral.id,
+                        amount_kopeks=0,
+                        reason='referral_first_topup',
+                        campaign_id=campaign_id,
+                    )
 
                 report.users_fixed += 1
                 report.details.append(detail)

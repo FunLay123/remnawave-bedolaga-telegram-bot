@@ -81,6 +81,21 @@ def activity_sources(user_id: int) -> dict[str, tuple]:
     - события promocode_activation исключаются — PromoCodeUse полнее (события
       пишутся только вместе с админ-уведомлениями).
     """
+    # Якорь регистрации и маркер первой покупки в схеме «только дни» — нулевые
+    # строки идемпотентности, не награды. В таймлайне они выглядели бы как
+    # начисления, поэтому источник referral_earning их не отдаёт (счётчик и
+    # выборка фильтруются одинаково).
+    from app.services.referral_reward_service import (
+        REASON_FIRST_PURCHASE_REGISTERED,
+        REASON_REGISTRATION_DAYS_ONLY,
+    )
+
+    earning_where = and_(
+        ReferralEarning.user_id == user_id,
+        ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+        ReferralEarning.reason != REASON_FIRST_PURCHASE_REGISTERED,
+    )
+
     event_referenced = select(SubscriptionEvent.transaction_id).where(
         SubscriptionEvent.user_id == user_id,
         SubscriptionEvent.transaction_id.is_not(None),
@@ -306,8 +321,8 @@ def activity_sources(user_id: int) -> dict[str, tuple]:
             _map_gift_received,
         ),
         'referral_earning': (
-            select(ReferralEarning).where(ReferralEarning.user_id == user_id),
-            select(func.count(ReferralEarning.id)).where(ReferralEarning.user_id == user_id),
+            select(ReferralEarning).where(earning_where),
+            select(func.count(ReferralEarning.id)).where(earning_where),
             ReferralEarning.created_at,
             _map_earning,
         ),

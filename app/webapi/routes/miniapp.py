@@ -7132,6 +7132,10 @@ async def switch_tariff_endpoint(
 
         if switching_from_daily:
             description = f"Переход с суточного на тариф '{new_tariff.name}' ({new_period_days} дней)"
+        elif new_is_daily:
+            # Переключение на daily — не первая покупка: описание должно
+            # попадать под daily-паттерны и не ставить маркер.
+            description = f"Переход на суточный тариф '{new_tariff.name}' (доплата за {remaining_days} дней)"
         else:
             description = f"Переход на тариф '{new_tariff.name}' (доплата за {remaining_days} дней)"
         success = await subtract_user_balance(
@@ -7161,7 +7165,11 @@ async def switch_tariff_endpoint(
         )
     else:
         # Бесплатный переход (downgrade) — записываем в историю
-        description = f"Переход на тариф '{new_tariff.name}'"
+        description = (
+            f"Переход на суточный тариф '{new_tariff.name}'"
+            if new_is_daily
+            else f"Переход на тариф '{new_tariff.name}'"
+        )
         switch_transaction = None
         await create_transaction(
             db=db,

@@ -81,6 +81,8 @@ async def test_create_transaction_releases_user_lock_for_referral_hook(monkeypat
     monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
     monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', True)
     monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_BONUS_DAYS', 10)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFEREE_DAYS', 10)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFERRER_DAYS', 10)
     monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS', 30)
     now = datetime.now(UTC)
 

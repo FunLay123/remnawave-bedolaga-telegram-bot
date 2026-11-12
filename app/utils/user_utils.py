@@ -114,6 +114,11 @@ async def mark_user_as_had_paid_subscription(db: AsyncSession, user: User) -> bo
 
 async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
     try:
+        # Якорь регистрации — нулевая отметка идемпотентности, а не награда.
+        # В ленте и типах начислений он выглядит как заработок, поэтому
+        # исключается из обеих выборок ниже.
+        from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
         invited_count_result = await db.execute(select(func.count(User.id)).where(User.referred_by_id == user_id))
         invited_count = invited_count_result.scalar() or 0
 
@@ -128,10 +133,11 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
             # Считаем маркеры только тех приглашённых, кто СЕЙЧАС привязан к
             # этому пригласившему. Иначе после передачи реферала старому
             # пригласившему оставался бы оплативший без приглашённого, и
-            # конверсия превышала бы 100%. DISTINCT страхует от когда-либо
-            # продублированной строки маркера.
+            # конверсия превышала бы 100%. DISTINCT не нужен: частичный
+            # уникальный индекс маркера гарантирует не более одной строки
+            # reason=referral_first_purchase_registered на пользователя.
             paid_referrals_result = await db.execute(
-                select(func.count(func.distinct(ReferralEarning.user_id)))
+                select(func.count(ReferralEarning.user_id))
                 .select_from(ReferralEarning)
                 .join(User, User.id == ReferralEarning.user_id)
                 .where(
@@ -181,7 +187,13 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
         recent_earnings_result = await db.execute(
             select(ReferralEarning)
             .options(selectinload(ReferralEarning.referral))
-            .where(ReferralEarning.user_id == user_id, not_referee_directed())
+            .where(
+                ReferralEarning.user_id == user_id,
+                not_referee_directed(),
+                # Фильтр в SQL, а не после выборки: LIMIT 5 иначе занимают
+                # свежие якоря регистрации, и реальная награда пропадает.
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+            )
             .order_by(ReferralEarning.created_at.desc())
             .limit(5)
         )
@@ -211,7 +223,11 @@ async def get_user_referral_summary(db: AsyncSession, user_id: int) -> dict:
                 func.coalesce(func.sum(ReferralEarning.amount_kopeks), 0).label('total_amount'),
                 func.coalesce(func.sum(ReferralEarning.days_granted), 0).label('total_days'),
             )
-            .where(ReferralEarning.user_id == user_id, not_referee_directed())
+            .where(
+                ReferralEarning.user_id == user_id,
+                not_referee_directed(),
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+            )
             .group_by(ReferralEarning.reason)
         )
 
@@ -373,6 +389,8 @@ async def get_detailed_referral_list(db: AsyncSession, user_id: int, limit: int 
 
 
 async def get_referral_analytics(db: AsyncSession, user_id: int) -> dict:
+    from app.services.referral_reward_service import REASON_REGISTRATION_DAYS_ONLY
+
     try:
         now = datetime.now(UTC)
         periods = {
@@ -410,7 +428,13 @@ async def get_referral_analytics(db: AsyncSession, user_id: int) -> dict:
                 func.coalesce(func.sum(ReferralEarning.days_granted), 0).label('total_days'),
                 func.count(ReferralEarning.id).label('earnings_count'),
             )
-            .where(ReferralEarning.user_id == user_id, not_referee_directed())
+            .where(
+                ReferralEarning.user_id == user_id,
+                not_referee_directed(),
+                # Якорь регистрации не награда: без фильтра он даёт нулевого
+                # «заработавшего» в топ-5 и ложное «(1 начислений)».
+                ReferralEarning.reason != REASON_REGISTRATION_DAYS_ONLY,
+            )
             .group_by(ReferralEarning.referral_id)
             # Дни участвуют в сортировке: на «дневной» программе все суммы равны
             # нулю, и в топ-5 попадали случайные пятеро, а реферал, принёсший

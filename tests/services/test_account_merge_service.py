@@ -6,8 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from sqlalchemy import select
 
 from app.config import Settings, settings
+from app.database.models import Base, ReferralEarning, User
 from app.services import account_merge_service
 from app.services.account_merge_service import (
     _build_subscription_preview,
@@ -16,6 +18,8 @@ from app.services.account_merge_service import (
     execute_merge,
     get_merge_preview,
 )
+from app.services.referral_reward_service import REASON_FIRST_PURCHASE_REGISTERED
+from tests.fixtures.sqlite_memory import memory_session
 
 
 @pytest.fixture(autouse=True)
@@ -1201,3 +1205,78 @@ class TestRemnawaveDeleteMode:
         await account_merge_service._delete_remnawave_user_with_fallback(1001)
 
         api.delete_user.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_merge_keeps_single_first_purchase_marker(monkeypatch):
+    """Мерж двух аккаунтов с маркером не падает на уникальном индексе 0136.
+
+    Частичный UNIQUE — по одному ``user_id`` WHERE reason=marker, без
+    ``referral_id``. Дедупликация по паре (user_id, referral_id) такой конфликт
+    не ловит: после переноса user_id вторая строка нарушает индекс. Маркер
+    secondary удаляется, у primary остаётся его собственный.
+    """
+    async with memory_session(monkeypatch, list(Base.metadata.sorted_tables)) as db:
+        now = datetime.now(UTC)
+        db.add_all(
+            [
+                User(
+                    id=1,
+                    telegram_id=1,
+                    first_name='Primary',
+                    status='active',
+                    language='ru',
+                    balance_kopeks=0,
+                    created_at=now,
+                ),
+                User(
+                    id=2,
+                    telegram_id=2,
+                    first_name='Secondary',
+                    status='active',
+                    language='ru',
+                    balance_kopeks=0,
+                    created_at=now,
+                ),
+            ]
+        )
+        db.add_all(
+            [
+                ReferralEarning(
+                    user_id=1,
+                    referral_id=3,
+                    amount_kopeks=0,
+                    reason=REASON_FIRST_PURCHASE_REGISTERED,
+                    reward_type='days',
+                    level=1,
+                    days_granted=0,
+                ),
+                ReferralEarning(
+                    user_id=2,
+                    referral_id=4,
+                    amount_kopeks=0,
+                    reason=REASON_FIRST_PURCHASE_REGISTERED,
+                    reward_type='days',
+                    level=1,
+                    days_granted=0,
+                ),
+            ]
+        )
+        await db.commit()
+
+        # Реальные данные вместо AsyncMock-дубля: индекс исполняется SQLite.
+        await execute_merge(db, 1, 2, deferred_remnawave_deletions=[])
+        await db.commit()
+
+        markers = (
+            (
+                await db.execute(
+                    select(ReferralEarning).where(ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(markers) == 1
+    assert markers[0].user_id == 1

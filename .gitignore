@@ -4,6 +4,7 @@
 # ========== WHITELIST: разрешённые файлы ==========
 
 # Конфигурация проекта
+!.gitattributes
 !.dockerignore
 !.env.example
 !.gitignore

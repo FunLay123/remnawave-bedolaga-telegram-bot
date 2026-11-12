@@ -224,6 +224,43 @@ class DailySubscriptionService:
             await db.commit()
             await db.refresh(user)
 
+            # Первая оплаченная покупка реферала: суточное списание первой
+            # покупкой не считается — хук вернёт ``daily_not_counted``, маркер
+            # не пишется, бонус остаётся за следующей не-daily покупкой. Сбой
+            # хука не должен отменять уже прошедшее списание.
+            try:
+                from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+                first_purchase_result = await register_first_purchase_after_purchase(
+                    referee_id=user.id,
+                    subscription_id=subscription.id,
+                    duration_days=1,
+                    paid_amount_kopeks=daily_price,
+                    source='daily_scheduler',
+                    bot=self._bot,
+                )
+            except Exception as hook_error:
+                logger.error(
+                    'Ошибка учёта первой покупки реферала при суточном списании',
+                    subscription_id=subscription.id,
+                    user_id=user.id,
+                    error=hook_error,
+                    exc_info=True,
+                )
+                first_purchase_result = None
+
+            if first_purchase_result is not None and first_purchase_result.status == 'rewarded':
+                # Награда записана из другой сессии; перечитываем подписку,
+                # чтобы уведомления и RemnaWave видели бонусные дни.
+                try:
+                    await db.refresh(subscription)
+                except Exception as refresh_error:
+                    logger.warning(
+                        'Не удалось перечитать подписку после реферальной награды',
+                        subscription_id=subscription.id,
+                        error=refresh_error,
+                    )
+
             user_id_display = user.telegram_id or user.email or f'#{user.id}'
             logger.info(
                 '✅ Суточное списание: подписка сумма коп., пользователь',

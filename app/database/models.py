@@ -3397,6 +3397,41 @@ class ReferralRewardLevel(Base):
 
 class ReferralEarning(Base):
     __tablename__ = 'referral_earnings'
+    # Паритет со свежей установкой: существующие БД получают этот партиальный
+    # UNIQUE миграцией 0135, а новая БД — прямо из метаданных при create_all.
+    __table_args__ = (
+        # Pending-регистрация — один аудит-ряд на пару (user_id, referral_id).
+        # Существующие БД получают индекс миграцией 0085; без объявления здесь
+        # свежая установка через create_all оставалась бы без структурной
+        # защиты от дублей, которую миграция обещает.
+        Index(
+            'uq_referral_earnings_registration_pending',
+            'user_id',
+            'referral_id',
+            unique=True,
+            postgresql_where=text("reason = 'referral_registration_pending'"),
+            sqlite_where=text("reason = 'referral_registration_pending'"),
+        ),
+        Index(
+            'uq_referral_earnings_days_only_registration',
+            'user_id',
+            'referral_id',
+            unique=True,
+            postgresql_where=text("reason = 'referral_registration_days_only'"),
+            sqlite_where=text("reason = 'referral_registration_days_only'"),
+        ),
+        # Маркер первой покупки — одна строка на приглашённого. SELECT-before-
+        # INSERT в приложении сужает окно гонки, но не закрывает его; этот
+        # партиальный UNIQUE делает дубль структурно невозможным. Существующие
+        # БД получают индекс миграцией 0136, новая — сразу из метаданных.
+        Index(
+            'uq_referral_earnings_first_purchase_registered',
+            'user_id',
+            unique=True,
+            postgresql_where=text("reason = 'referral_first_purchase_registered'"),
+            sqlite_where=text("reason = 'referral_first_purchase_registered'"),
+        ),
+    )
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, index=True)

@@ -5109,6 +5109,11 @@ async def confirm_instant_switch(
         pass
 
     try:
+        # Суточный ли новый тариф: от этого зависит и текст списания, и
+        # описание транзакции. Daily-переключение не должно выглядеть как
+        # обычная покупка — маркер первой покупки его не учитывает.
+        is_new_daily = getattr(new_tariff, 'is_daily', False)
+
         # Списываем баланс если это upgrade
         # upgrade_cost includes both group + offer discounts from PricingEngine
         if is_upgrade and upgrade_cost > 0:
@@ -5116,7 +5121,11 @@ async def confirm_instant_switch(
                 db,
                 db_user,
                 upgrade_cost,
-                f'Переключение на тариф {new_tariff.name}',
+                (
+                    f'Переключение на суточный тариф {new_tariff.name}'
+                    if is_new_daily
+                    else f'Переключение на тариф {new_tariff.name}'
+                ),
                 consume_promo_offer=consume_promo,
                 mark_as_paid_subscription=True,
             )
@@ -5138,9 +5147,6 @@ async def confirm_instant_switch(
 
             all_servers, _ = await get_all_server_squads(db, available_only=True)
             squads = [s.squad_uuid for s in all_servers if s.squad_uuid]
-
-        # Проверяем, суточный ли новый тариф
-        is_new_daily = getattr(new_tariff, 'is_daily', False)
 
         # Обновляем подписку с новыми параметрами тарифа
         # Сбрасываем лимит устройств на базу нового тарифа (докупленные не переносятся)
@@ -5305,7 +5311,25 @@ async def confirm_instant_switch(
                 user_id=db_user.id,
                 type=TransactionType.SUBSCRIPTION_PAYMENT,
                 amount_kopeks=upgrade_cost,
-                description=f'Переключение на тариф {new_tariff.name}',
+                description=(
+                    f'Переключение на суточный тариф {new_tariff.name}'
+                    if is_new_daily
+                    else f'Переключение на тариф {new_tariff.name}'
+                ),
+            )
+
+            # Платное мгновенное переключение — живая первая покупка: хук стоит
+            # после коммита платежа, до уведомления админу. Для free/downgrade
+            # (upgrade_cost == 0) не вызывается — это не оплата.
+            from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+            await register_first_purchase_after_purchase(
+                referee_id=db_user.id,
+                subscription_id=subscription.id,
+                duration_days=max(1, remaining_days),
+                paid_amount_kopeks=upgrade_cost,
+                source='bot_instant_switch',
+                bot=callback.bot,
             )
 
             # Отправляем уведомление админу

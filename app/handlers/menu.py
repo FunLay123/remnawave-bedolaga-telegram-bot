@@ -1639,6 +1639,9 @@ async def handle_activate_button(callback: types.CallbackQuery, db_user: User, d
                 pricing,
                 description=f'Автоматическое продление на {best_period} дней',
                 payment_method=PaymentMethod.BALANCE,
+                # Ниже menu вызывает хук сам (обе ветки) — без флага тот же
+                # no-op хук открыл бы вторую сессию впустую.
+                skip_first_purchase_hook=True,
             )
 
             await callback.answer(

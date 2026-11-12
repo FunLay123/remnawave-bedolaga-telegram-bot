@@ -70,6 +70,10 @@ from app.database.models import (
 )
 from app.external.remnawave_api import RemnaWaveAPI
 from app.services.panel_sync import patch_panel_account
+from app.services.referral_reward_service import (
+    REASON_FIRST_PURCHASE_REGISTERED,
+    REASON_REGISTRATION_DAYS_ONLY,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -914,34 +918,61 @@ async def execute_merge(
         )
     )
     # 8b. Переназначение оставшихся записей.
-    # Частичный уникальный индекс uq_referral_earnings_registration_pending
-    # (user_id, referral_id) WHERE reason='referral_registration_pending'. Если оба
-    # аккаунта приглашены одним реферером (или пригласили одного человека), перенос
-    # создаёт дубликат → сначала удаляем коллизии, как в секциях 10c/10h.
-    reg_pending = ReferralEarning.reason == 'referral_registration_pending'
-    # (i) перенос user_id: убрать pending-строки secondary, дублирующие primary по referral_id
-    primary_pending_referral_ids = select(ReferralEarning.referral_id).where(
-        ReferralEarning.user_id == primary.id, reg_pending
+    # Частичные уникальные индексы (user_id, referral_id) WHERE reason=...:
+    # uq_referral_earnings_registration_pending и
+    # uq_referral_earnings_days_only_registration. Если оба аккаунта приглашены
+    # одним реферером (или пригласили одного человека), перенос создаёт
+    # дубликат → сначала удаляем коллизии по каждой причине отдельно, как в
+    # секциях 10c/10h.
+    unique_registration_reasons = (
+        ReferralEarning.reason == 'referral_registration_pending',
+        ReferralEarning.reason == REASON_REGISTRATION_DAYS_ONLY,
     )
-    await db.execute(
-        delete(ReferralEarning).where(
-            ReferralEarning.user_id == secondary.id,
-            reg_pending,
-            ReferralEarning.referral_id.in_(primary_pending_referral_ids),
+    # (i) перенос user_id: убрать строки secondary, дублирующие primary по referral_id
+    for unique_reason in unique_registration_reasons:
+        primary_referral_ids = select(ReferralEarning.referral_id).where(
+            ReferralEarning.user_id == primary.id, unique_reason
         )
+        await db.execute(
+            delete(ReferralEarning).where(
+                ReferralEarning.user_id == secondary.id,
+                unique_reason,
+                ReferralEarning.referral_id.in_(primary_referral_ids),
+            )
+        )
+    # Маркер первой покупки уникален по ОДНОМУ user_id (индекс 0136), поэтому
+    # referral_id в коллизии не участвует: если маркер уже есть у primary, маркер
+    # secondary удаляется целиком, иначе UPDATE user_id создаст вторую строку с
+    # тем же user_id и упадёт на уникальном индексе.
+    marker_result = await db.execute(
+        select(ReferralEarning.id)
+        .where(
+            ReferralEarning.user_id == primary.id,
+            ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+        )
+        .limit(1)
     )
+    primary_has_marker = marker_result.scalar_one_or_none() is not None
+    if primary_has_marker:
+        await db.execute(
+            delete(ReferralEarning).where(
+                ReferralEarning.user_id == secondary.id,
+                ReferralEarning.reason == REASON_FIRST_PURCHASE_REGISTERED,
+            )
+        )
     await db.execute(update(ReferralEarning).where(ReferralEarning.user_id == secondary.id).values(user_id=primary.id))
-    # (ii) перенос referral_id: убрать pending-строки secondary, дублирующие primary по user_id
-    primary_pending_user_ids = select(ReferralEarning.user_id).where(
-        ReferralEarning.referral_id == primary.id, reg_pending
-    )
-    await db.execute(
-        delete(ReferralEarning).where(
-            ReferralEarning.referral_id == secondary.id,
-            reg_pending,
-            ReferralEarning.user_id.in_(primary_pending_user_ids),
+    # (ii) перенос referral_id: убрать строки secondary, дублирующие primary по user_id
+    for unique_reason in unique_registration_reasons:
+        primary_user_ids = select(ReferralEarning.user_id).where(
+            ReferralEarning.referral_id == primary.id, unique_reason
         )
-    )
+        await db.execute(
+            delete(ReferralEarning).where(
+                ReferralEarning.referral_id == secondary.id,
+                unique_reason,
+                ReferralEarning.user_id.in_(primary_user_ids),
+            )
+        )
     await db.execute(
         update(ReferralEarning).where(ReferralEarning.referral_id == secondary.id).values(referral_id=primary.id)
     )
