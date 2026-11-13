@@ -1484,7 +1484,7 @@
   Классы: нет
   Функции: `get_merge_preview` — Возвращает превью данных обоих аккаунтов для подтверждения мержа., `flush_remnawave_deletions` — Удаляет (или деактивирует как fallback) пользователей RemnaWave., `execute_merge` — Выполняет атомарный мерж двух аккаунтов. Caller отвечает за commit/rollback.
 - `app/services/admin_notification_service.py` — Python-модуль
-  Классы: `NotificationCategory`, `AdminNotificationService` (50 методов)
+  Классы: `NotificationCategory`, `AdminNotificationService` (51 методов)
   Функции: нет
 - `app/services/antilopay_service.py` — Python-модуль
   Классы: `AntilopayAPIError` (1 методов), `AntilopayService` (12 методов)
@@ -1692,6 +1692,9 @@
   Классы: `PartnerStatsService` (12 методов)
   Функции: нет
 - `app/services/payment/`
+- `app/services/payment_alert_service.py` — Python-модуль
+  Классы: `PaymentAlert`
+  Функции: `build_pending_alert` — Return an alert for a payment pending at least the configured age., `build_check_error_alert` — Return an alert for a payment whose provider check failed., `format_payment_alerts_digest` — Build the admin digest, capped at the configured number of item lines., `dispatch_payment_alerts` — Claim cooldowns, format a digest and send it to the admin chat.
 - `app/services/payment_method_config_service.py` — Python-модуль
   Классы: нет
   Функции: `refresh_display_name_overrides` — Reload the method_id -> display_name override cache from the DB., `get_display_name_override` — Sync read of a cabinet-set display name for a method, or None if not set., `normalize_quick_amounts`, `get_effective_quick_amounts`, `get_method_amount_limits` — Эффективные min/max метода: настройка кабинета, иначе дефолт из env., `get_methods_amount_limits` — Эффективные min/max для набора конфигов одним запросом., `ensure_payment_method_configs` — Initialize payment method configs if they don't exist yet., `get_all_configs` — Get all payment method configs ordered by sort_order., `get_config_by_method_id` — Get a single config by method_id., `update_config` — Update a payment method config., `update_sort_order` — Batch update sort order for all methods., `get_all_promo_groups` — Get all promo groups for the filter selector., `get_enabled_methods_for_user` — Get payment methods available for a specific user.
@@ -1811,7 +1814,7 @@
   Классы: `RemnaWaveAutoSyncStatus`, `FullSyncAlreadyRunning` (1 методов), `RemnaWaveAutoSyncService` (12 методов)
   Функции: `is_full_sync_running`, `perform_full_sync` — Полная синхронизация — одна для бота, кабинета и расписания., `sync_servers_from_panel` — Сквады панели → серверы бота; кеш стран сбрасывается.
 - `app/services/remnawave_webhook_service.py` — Python-модуль
-  Классы: `RemnaWaveWebhookService` (48 методов)
+  Классы: `RemnaWaveWebhookService` (49 методов)
   Функции: нет
 - `app/services/reporting_service.py` — Python-модуль
   Классы: `ReportingServiceError`, `ReportPeriod`, `ReportPeriodRange`, `ReportingService` (22 методов)
@@ -2767,10 +2770,12 @@
 - `docs/superpowers/plans/2026-10-30-legal-documents-support-menu.md` — файл
 - `docs/superpowers/plans/2026-11-11-topup-amount-first.md` — файл
 - `docs/superpowers/plans/2026-11-12-referral-days-only-p0-p1.md` — файл
+- `docs/superpowers/plans/2026-11-13-trial-payment-resilience.md` — файл
 
 #### docs/superpowers/specs
 
 - `docs/superpowers/specs/2026-10-30-legal-documents-support-menu-design.md` — файл
+- `docs/superpowers/specs/2026-11-13-trial-payment-resilience-design.md` — файл
 
 ## migrations
 
@@ -4928,6 +4933,9 @@
 - `tests/services/test_payer_identity.py` — Python-модуль
   Классы: нет
   Функции: `test_telegram_user_is_identified_by_telegram_id_and_username`, `test_username_is_not_prefixed_twice`, `test_name_is_used_without_username`, `test_telegram_user_without_any_names_is_named_by_id`, `test_verified_email_is_the_contact`, `test_email_user_is_identified_by_internal_id`, `test_unverified_email_is_never_the_contact` — Адрес назначается до подтверждения, MulenPay фискализирует платёж — чек чужому ящику не нужен., `test_broken_telegram_name_does_not_reach_the_provider` — Обрезанный эмодзи (одинокий суррогат) и управляющие символы из имени не уходят в запрос., `test_whitespace_only_fields_fall_through`, `test_overlong_values_are_cut`, `test_platega_metadata_has_both_string_fields`, `test_guest_with_email_contact`, `test_guest_with_telegram_contact`, `test_guest_without_contact_is_still_filled`, `test_resolve_user_payer_reads_the_user`, `test_resolve_user_payer_without_the_user_is_still_filled`, `test_resolve_user_payer_survives_a_database_error` — Данные плательщика не имеют права сорвать создание платежа., `test_resolve_guest_payer_reads_the_purchase`, `test_resolve_guest_payer_without_the_purchase_is_still_filled`
+- `tests/services/test_payment_alert_service.py` — Python-модуль
+  Классы: нет
+  Функции: `test_pending_alert_boundary_uses_configured_minutes`, `test_check_error_alert_has_no_exception_payload`, `test_digest_contains_sanitized_payment_details`, `test_first_digest_sends_and_identical_keys_are_suppressed`, `test_cooldown_works_with_redis_disconnected`, `test_failed_delivery_releases_claim_for_retry`, `test_digest_limits_item_lines_and_reports_overflow`, `test_send_payment_alert_calls_bypass_path`, `test_send_payment_alert_reaches_chat_with_master_switch_off`, `test_ordinary_send_message_stays_master_gated`, `test_send_payment_alert_requires_switch_and_chat`
 - `tests/services/test_payment_common.py` — Python-модуль
   Классы: нет
   Функции: `anyio_backend`, `test_send_payment_success_notification_recovers_missing_greenlet`, `test_success_keyboard_reload_prefers_active_subscription` — Мультитариф: есть активная подписка — возврат к checkout не предлагаем., `test_success_keyboard_reload_offers_resume_for_expired_subscription`, `test_success_keyboard_reload_skips_pending_trial_like_normal_path` — Pending-триал не считается подпиской: кнопка возврата к checkout остаётся.
@@ -4988,6 +4996,9 @@
 - `tests/services/test_payment_service_yookassa.py` — Python-модуль
   Классы: `DummySession` (3 методов), `DummyLocalPayment` (1 методов), `StubYooKassaService` (3 методов)
   Функции: `anyio_backend` — Запускаем async-тесты на asyncio, чтобы избежать зависимостей trio., `test_create_yookassa_payment_success` — Успешное создание платежа формирует корректные метаданные и локальную запись., `test_create_yookassa_payment_returns_none_when_service_missing` — Если сервис не настроен, метод должен вернуть None., `test_create_yookassa_payment_handles_error_response` — Ответ с ключом error должен приводить к None без записи в БД., `test_create_yookassa_sbp_payment_success` — Проверяем SBP-сценарий, включая передачу confirmation_token., `test_create_yookassa_sbp_payment_returns_none_on_error` — Ошибочный ответ СБП не должен создавать запись.
+- `tests/services/test_payment_verification_alerts.py` — Python-модуль
+  Классы: нет
+  Функции: `test_pending_alert_is_dispatched_after_commit`, `test_check_error_alert_is_sanitized_and_dispatched`
 - `tests/services/test_platega_callback_casing.py` — Python-модуль
   Классы: `TestIsSubscriptionCallback` (6 методов), `TestReadCallbackFields` (6 методов)
   Функции: нет
@@ -5135,6 +5146,9 @@
 - `tests/services/test_registration_invite_service.py` — Python-модуль
   Классы: `ScalarResult` (2 методов), `GiftScalars` (2 методов), `GiftResult` (2 методов), `FakeDB` (3 методов)
   Функции: `test_inactive_referrer_is_not_an_invitation`, `test_active_referrer_grants_invitation`, `test_active_campaign_grants_invitation`, `test_gift_is_not_accepted_when_gift_invites_are_disabled`, `test_claimable_gift_is_returned_and_bound_without_commit`, `test_self_gift_does_not_grant_invitation`, `test_early_gift_validation_does_not_lock_row`
+- `tests/services/test_remnawave_connection_onboarding.py` — Python-модуль
+  Классы: нет
+  Функции: `test_duplicate_not_connected_notifies_once_and_records_hour`, `test_failed_not_connected_delivery_allows_retry`, `test_not_connected_after_first_connected_sends_nothing`, `test_first_connected_marker_recorded_when_notification_not_delivered` — The marker means "the user connected", not "the message was sent"., `test_duplicate_first_connected_notifies_once`, `test_invalid_not_connected_hours_normalize_to_zero`, `test_main_starts_web_app_for_remnawave_webhook_only`
 - `tests/services/test_remnawave_devices_stats.py` — Python-модуль
   Классы: нет
   Функции: `test_devices_statistics_aggregates_nested_byapp_2_8_0`, `test_devices_statistics_prefers_top_level_byapp_2_7_x`, `test_devices_statistics_explicit_none_byapp_aggregates_nested` — byApp explicitly None (not just absent) must still trigger nested aggregation., `test_devices_statistics_platform_without_byapp_is_skipped_not_fatal` — A platform lacking byApp (or with a malformed non-list byApp) is skipped; siblings still aggregate., `test_devices_statistics_none_counts_coerced_to_zero` — Present-but-null counts must not leak None into the response (defensive)., `test_devices_statistics_empty_byplatform_yields_empty_byapp`

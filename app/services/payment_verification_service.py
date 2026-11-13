@@ -321,6 +321,17 @@ class AutoPaymentVerificationService:
         if not self._payment_service:
             return
 
+        # Local import keeps payment_alert_service (which imports PendingPayment
+        # and method_display_name) free of a module-level import cycle.
+        from app.services.payment_alert_service import (
+            build_check_error_alert,
+            build_pending_alert,
+            dispatch_payment_alerts,
+        )
+
+        alerts = []
+        checked_at = datetime.now(UTC)
+
         async with AsyncSessionLocal() as session:
             try:
                 pending = await list_recent_pending_payments(session)
@@ -354,6 +365,7 @@ class AutoPaymentVerificationService:
                             identifier=record.identifier,
                             error=check_error,
                         )
+                        alerts.append(build_check_error_alert(record, checked_at))
                         if session.in_transaction():
                             await session.rollback()
                         continue
@@ -364,6 +376,9 @@ class AutoPaymentVerificationService:
                             method_display_name=method_display_name(record.method),
                             identifier=record.identifier,
                         )
+                        pending_alert = build_pending_alert(record, checked_at)
+                        if pending_alert:
+                            alerts.append(pending_alert)
                         continue
 
                     if refreshed.is_paid and not record.is_paid:
@@ -388,12 +403,25 @@ class AutoPaymentVerificationService:
                             refreshed_status=refreshed.status or '—',
                         )
 
+                    if not refreshed.is_paid:
+                        pending_alert = build_pending_alert(refreshed, checked_at)
+                        if pending_alert:
+                            alerts.append(pending_alert)
+
                 if session.in_transaction():
                     await session.commit()
             except Exception:
                 if session.in_transaction():
                     await session.rollback()
                 raise
+
+        # Send only after the session has been committed successfully. The
+        # digest contains no exception payloads.
+        if alerts:
+            try:
+                await dispatch_payment_alerts(getattr(self._payment_service, 'bot', None), alerts)
+            except Exception as dispatch_error:  # pragma: no cover - defensive
+                logger.warning('Не удалось отправить алерт о проблемных платежах', error=dispatch_error)
 
 
 auto_payment_verification_service = AutoPaymentVerificationService()

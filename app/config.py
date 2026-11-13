@@ -169,6 +169,7 @@ class Settings(BaseSettings):
     ADMIN_NOTIFICATIONS_ERRORS_TOPIC_ID: int | None = None  # Ошибки бота
     ADMIN_NOTIFICATIONS_PROMO_TOPIC_ID: int | None = None  # Промокоды, кампании, промогруппы
     ADMIN_NOTIFICATIONS_PARTNERS_TOPIC_ID: int | None = None  # Партнёрки, выводы, админ-действия
+    ADMIN_NOTIFICATIONS_PAYMENTS_TOPIC_ID: int | None = None  # Зависшие платежи и ошибки проверки
 
     # Per-category enable/disable (default True for backwards compatibility)
     ADMIN_NOTIFICATIONS_PURCHASES_ENABLED: bool = True
@@ -180,6 +181,7 @@ class Settings(BaseSettings):
     ADMIN_NOTIFICATIONS_ERRORS_ENABLED: bool = True
     ADMIN_NOTIFICATIONS_PROMO_ENABLED: bool = True
     ADMIN_NOTIFICATIONS_PARTNERS_ENABLED: bool = True
+    ADMIN_NOTIFICATIONS_PAYMENTS_ENABLED: bool = True
     ADMIN_NOTIFICATIONS_TICKETS_ENABLED: bool = True
 
     # Настройки очереди чеков NaloGO
@@ -791,6 +793,13 @@ class Settings(BaseSettings):
     SUPPORT_TOPUP_ENABLED: bool = True
     PAYMENT_VERIFICATION_AUTO_CHECK_ENABLED: bool = False
     PAYMENT_VERIFICATION_AUTO_CHECK_INTERVAL_MINUTES: int = 10
+
+    # Оповещения администраторов о зависших платежах и ошибках проверки провайдеров.
+    # Независимы от ADMIN_NOTIFICATIONS_ENABLED: нужен только ADMIN_NOTIFICATIONS_CHAT_ID.
+    PAYMENT_ALERTS_ENABLED: bool = True
+    PAYMENT_ALERT_PENDING_MINUTES: int = 30
+    PAYMENT_ALERT_REPEAT_HOURS: int = 6
+    PAYMENT_ALERT_MAX_PER_CYCLE: int = 20
 
     NALOGO_ENABLED: bool = False
     NALOGO_INN: str | None = None

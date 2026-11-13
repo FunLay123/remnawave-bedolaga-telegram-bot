@@ -87,6 +87,7 @@ class NotificationCategory(StrEnum):
     ERRORS = 'errors'  # Ошибки бота, краши
     PROMO = 'promo'  # Промокоды, кампании, промогруппы
     PARTNERS = 'partners'  # Партнёрки, выводы, админ-действия
+    PAYMENTS = 'payments'  # Зависшие платежи и ошибки проверки провайдеров
     TICKETS = 'tickets'  # Тикеты (уже существует)
 
 
@@ -135,6 +136,7 @@ class AdminNotificationService:
             NotificationCategory.ERRORS: getattr(settings, 'ADMIN_NOTIFICATIONS_ERRORS_TOPIC_ID', None),
             NotificationCategory.PROMO: getattr(settings, 'ADMIN_NOTIFICATIONS_PROMO_TOPIC_ID', None),
             NotificationCategory.PARTNERS: getattr(settings, 'ADMIN_NOTIFICATIONS_PARTNERS_TOPIC_ID', None),
+            NotificationCategory.PAYMENTS: getattr(settings, 'ADMIN_NOTIFICATIONS_PAYMENTS_TOPIC_ID', None),
             NotificationCategory.TICKETS: self.ticket_topic_id,
         }
 
@@ -1516,8 +1518,15 @@ class AdminNotificationService:
         *,
         category: NotificationCategory | None = None,
         thread_id: int | None = None,
+        bypass_master: bool = False,
     ) -> bool:
-        if not self._is_enabled():
+        if bypass_master:
+            # Dedicated payment alerts must work even when the general
+            # ADMIN_NOTIFICATIONS_ENABLED switch is off. They still require a
+            # configured admin chat and respect the category switch below.
+            if not self.chat_id:
+                return False
+        elif not self._is_enabled():
             return False
 
         # Per-category suppression
@@ -1641,6 +1650,24 @@ class AdminNotificationService:
     def is_enabled(self) -> bool:
         """Public check for whether admin notifications are configured and active."""
         return self._is_enabled()
+
+    async def send_payment_alert(self, text: str) -> bool:
+        """Send a payment alert, bypassing the general admin-notification switch.
+
+        Requires ``PAYMENT_ALERTS_ENABLED`` and a configured admin chat. All
+        other notification paths keep their existing master-switch gating.
+        """
+        if not settings.PAYMENT_ALERTS_ENABLED:
+            logger.debug('Алерты о платежах отключены настройками')
+            return False
+        if not self.chat_id:
+            logger.debug('Алерты о платежах не отправлены: админ-чат не настроен')
+            return False
+        return await self._send_message(
+            text,
+            category=NotificationCategory.PAYMENTS,
+            bypass_master=True,
+        )
 
     async def send_admin_notification(
         self,
