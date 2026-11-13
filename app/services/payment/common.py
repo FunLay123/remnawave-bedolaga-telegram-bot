@@ -13,160 +13,70 @@ from typing import Any
 
 from aiogram.types import InlineKeyboardMarkup
 from sqlalchemy import select
-from sqlalchemy.exc import MissingGreenlet
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.database.crud.user import get_user_by_id, get_user_by_telegram_id
-from app.database.database import AsyncSessionLocal, get_db
+from app.database.crud.user import get_user_by_telegram_id
+from app.database.database import get_db
 from app.localization.texts import get_texts
-from app.services.subscription_checkout_service import (
-    has_subscription_checkout_draft,
-    should_offer_checkout_resume,
-)
 from app.services.user_cart_service import user_cart_service
-from app.utils.miniapp_buttons import build_main_menu_button, build_miniapp_or_callback_button
+from app.utils.miniapp_buttons import build_main_menu_button, build_subscription_extend_button
 from app.utils.payment_button_styles import apply_button_style
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.payment_utils import payment_success_text
 
 
 def _pick_current_subscription(user: Any) -> Any | None:
-    """Текущая подписка с той же семантикой, что и в обычном пути.
-
-    Сначала любая реально активная подписка (``is_active``), затем
-    ``user.subscription`` — он предпочитает ACTIVE/TRIAL и пропускает
-    неоплаченные черновики триала. Одноимённый выбор нужен и в резервном
-    запросе, иначе мультитарифный пользователь с активной подпиской может
-    получить кнопку возврата к оформлению, а пользователь с pending-триалом —
-    наоборот, потерять её.
-    """
+    """Активная подписка, а при её отсутствии — текущая по правилам модели пользователя."""
     if user is None:
         return None
 
-    try:
-        active = next(
-            (s for s in (getattr(user, 'subscriptions', None) or []) if getattr(s, 'is_active', False)),
-            None,
-        )
-    except Exception:
-        active = None
-
-    if active is not None:
-        return active
-
-    try:
-        return getattr(user, 'subscription', None)
-    except Exception:
-        return None
+    subscriptions = getattr(user, 'subscriptions', None) or []
+    active = next((subscription for subscription in subscriptions if getattr(subscription, 'is_active', False)), None)
+    return active if active is not None else getattr(user, 'subscription', None)
 
 
 class PaymentCommonMixin:
     """Mixin с базовой логикой, которую используют остальные платёжные блоки."""
 
     async def build_topup_success_keyboard(self, user: Any) -> InlineKeyboardMarkup:
-        """Одна кнопка: вернуться к оформлению, если есть корзина/черновик, иначе — в главное меню."""
+        """Главное меню и, при наличии подписки, переход к её продлению.
+
+        Возврат к корзине/черновику оформления здесь намеренно не предлагается:
+        в этой поставке сохранённая корзина, checkout-черновик и gift-корзина
+        не используются. Кнопка продления использует тот же маршрут и дизайн,
+        что и одноимённая кнопка на экране подписки.
+        """
         texts = get_texts(user.language if user else 'ru')
-        main_menu_button = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    apply_button_style(
-                        build_main_menu_button(texts.MAIN_MENU_BUTTON),
-                        'success:main_menu',
-                    )
-                ]
-            ]
-        )
-
-        if not user:
-            return main_menu_button
+        buttons = [
+            apply_button_style(
+                build_main_menu_button(texts.MAIN_MENU_BUTTON),
+                'success:main_menu',
+            )
+        ]
 
         try:
-            cart_data = await user_cart_service.get_user_cart(user.id)
-        except Exception as cart_error:
+            subscription = _pick_current_subscription(user)
+        except Exception as error:
+            # Недогруженная связь не должна мешать отправке подтверждения оплаты.
             logger.warning(
-                'Не удалось проверить наличие сохраненной корзины у пользователя',
-                user_id=user.id,
-                cart_error=cart_error,
-            )
-            cart_data = None
-
-        if cart_data:
-            if cart_data.get('cart_mode') == 'gift_purchase':
-                return InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            apply_button_style(
-                                build_miniapp_or_callback_button(
-                                    text=texts.t('GIFT_RETURN_TO_CART_BUTTON', '🎁 Вернуться к подарку'),
-                                    callback_data='return_to_gift_cart',
-                                    style='primary',
-                                ),
-                                'success:gift',
-                            )
-                        ]
-                    ]
-                )
-            if not settings.CART_RESUME_ENABLED:
-                return main_menu_button
-            return InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [
-                        apply_button_style(
-                            build_miniapp_or_callback_button(
-                                text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
-                                callback_data='return_to_saved_cart',
-                                style='primary',
-                            ),
-                            'success:return',
-                        )
-                    ]
-                ]
-            )
-
-        subscription = _pick_current_subscription(user)
-
-        try:
-            draft_exists = await has_subscription_checkout_draft(user.id)
-
-            if draft_exists and subscription is None and getattr(user, 'id', None) is not None:
-                try:
-                    # Берём пользователя целиком (с eager-загруженными подписками),
-                    # чтобы применить тот же выбор, что и в обычном пути, а не
-                    # «последнюю созданную» строку.
-                    async with AsyncSessionLocal() as session:
-                        fetched_user = await get_user_by_id(session, user.id)
-                        subscription = _pick_current_subscription(fetched_user)
-                except Exception as error:
-                    logger.warning(
-                        'Не удалось загрузить подписку для клавиатуры после пополнения',
-                        user_id=getattr(user, 'id', None),
-                        error=error,
-                    )
-
-            if should_offer_checkout_resume(user, draft_exists, subscription=subscription):
-                return InlineKeyboardMarkup(
-                    inline_keyboard=[
-                        [
-                            apply_button_style(
-                                build_miniapp_or_callback_button(
-                                    text=texts.RETURN_TO_SUBSCRIPTION_CHECKOUT,
-                                    callback_data='subscription_resume_checkout',
-                                    style='primary',
-                                ),
-                                'success:return',
-                            )
-                        ]
-                    ]
-                )
-        except Exception as error:  # pragma: no cover - защитный код
-            logger.warning(
-                'Не удалось проверить черновик оформления подписки',
+                'Не удалось определить подписку для клавиатуры после пополнения',
                 user_id=getattr(user, 'id', None),
-                error=error,
+                error_type=type(error).__name__,
+            )
+            subscription = None
+
+        if subscription is not None:
+            buttons.append(
+                build_subscription_extend_button(
+                    text=texts.t('BTN_RENEW_SUBSCRIPTION', 'Продлить подписку'),
+                    subscription_id=getattr(subscription, 'id', None),
+                    style='primary',
+                    icon_custom_emoji_id='5334552404736104314',
+                )
             )
 
-        return main_menu_button
+        return InlineKeyboardMarkup(inline_keyboard=[buttons])
 
     async def _send_payment_success_notification(
         self,
@@ -263,18 +173,15 @@ class PaymentCommonMixin:
             if source is None:
                 return None
 
-            subs = getattr(source, 'subscriptions', None) or []
-            active_sub = next(
-                (s for s in subs if getattr(s, 'is_active', False)),
-                None,
-            )
+            current_subscription = _pick_current_subscription(source)
             subscription_snapshot = None
 
-            if active_sub is not None:
+            if current_subscription is not None:
                 subscription_snapshot = SimpleNamespace(
-                    is_trial=getattr(active_sub, 'is_trial', False),
-                    is_active=getattr(active_sub, 'is_active', False),
-                    actual_status=getattr(active_sub, 'actual_status', None),
+                    id=getattr(current_subscription, 'id', None),
+                    is_trial=getattr(current_subscription, 'is_trial', False),
+                    is_active=getattr(current_subscription, 'is_active', False),
+                    actual_status=getattr(current_subscription, 'actual_status', None),
                 )
 
             return SimpleNamespace(
@@ -287,7 +194,7 @@ class PaymentCommonMixin:
 
         try:
             snapshot = _build_snapshot(user)
-        except MissingGreenlet:
+        except Exception:
             snapshot = None
 
         if snapshot is not None:

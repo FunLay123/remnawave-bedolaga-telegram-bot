@@ -27,8 +27,6 @@ These tests pin both layers.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
-
 import pytest
 from aiogram.types import InlineKeyboardButton
 
@@ -320,8 +318,8 @@ def test_home_button_key_is_not_in_cabinet_miniapp_button_keys() -> None:
 
 
 @pytest.mark.asyncio
-async def test_topup_success_keyboard_without_cart_points_to_main_menu() -> None:
-    """No saved cart/draft -> a single primary "Главное меню" button."""
+async def test_topup_success_keyboard_points_to_main_menu() -> None:
+    """Top-up success -> a single primary "Главное меню" button."""
     from types import SimpleNamespace
 
     from app.services.payment.common import PaymentCommonMixin
@@ -329,17 +327,7 @@ async def test_topup_success_keyboard_without_cart_points_to_main_menu() -> None
     user = SimpleNamespace(id=42, language='ru', subscription=None)
     mixin_instance = type('_TestMixin', (PaymentCommonMixin,), {})()
 
-    with (
-        patch(
-            'app.services.payment.common.user_cart_service.get_user_cart',
-            AsyncMock(return_value=None),
-        ),
-        patch(
-            'app.services.payment.common.has_subscription_checkout_draft',
-            AsyncMock(return_value=False),
-        ),
-    ):
-        keyboard = await mixin_instance.build_topup_success_keyboard(user)
+    keyboard = await mixin_instance.build_topup_success_keyboard(user)
 
     assert len(keyboard.inline_keyboard) == 1
     button = keyboard.inline_keyboard[0][0]

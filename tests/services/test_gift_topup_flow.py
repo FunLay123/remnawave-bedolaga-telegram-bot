@@ -76,10 +76,6 @@ def _callbacks(keyboard: InlineKeyboardMarkup) -> list[str]:
     return [b.callback_data for row in keyboard.inline_keyboard for b in row if b.callback_data]
 
 
-def _button_texts(keyboard: InlineKeyboardMarkup) -> list[str]:
-    return [b.text for row in keyboard.inline_keyboard for b in row if b.text]
-
-
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
 
@@ -445,15 +441,11 @@ class TestGiftInsufficientBalanceAndCart:
 
 
 class TestGiftTopupSuccessKeyboardAndResume:
-    """Step 2: Payment success keyboard cart-mode inspection and return_to_gift_cart handler."""
+    """Step 2: Top-up success keyboard and return_to_gift_cart handler."""
 
     @pytest.mark.asyncio
-    async def test_topup_success_keyboard_gift_cart_mode_offers_return_to_gift_cart(
-        self, mock_db_user, test_cart_service, monkeypatch
-    ):
-        """With gift cart, payment success keyboard offers return_to_gift_cart, not return_to_saved_cart."""
-        monkeypatch.setattr('app.services.payment.common.user_cart_service', test_cart_service)
-
+    async def test_topup_success_keyboard_ignores_gift_cart(self, mock_db_user, test_cart_service):
+        """Even with a gift cart, the top-up success keyboard is only «Главное меню»."""
         await test_cart_service.save_user_cart(
             mock_db_user.id,
             {
@@ -468,20 +460,11 @@ class TestGiftTopupSuccessKeyboardAndResume:
         mixin = type('_TestMixin', (PaymentCommonMixin,), {})()
         keyboard = await mixin.build_topup_success_keyboard(mock_db_user)
 
-        callbacks = _callbacks(keyboard)
-        texts = _button_texts(keyboard)
-
-        assert 'return_to_gift_cart' in callbacks
-        assert 'return_to_saved_cart' not in callbacks
-        assert any('подарк' in t.lower() or 'gift' in t.lower() for t in texts)
+        assert _callbacks(keyboard) == ['back_to_menu']
 
     @pytest.mark.asyncio
-    async def test_topup_success_keyboard_subscription_cart_mode_offers_return_to_saved_cart(
-        self, mock_db_user, test_cart_service, monkeypatch
-    ):
-        """With normal subscription cart, payment success keyboard offers return_to_saved_cart."""
-        monkeypatch.setattr('app.services.payment.common.user_cart_service', test_cart_service)
-
+    async def test_topup_success_keyboard_ignores_subscription_cart(self, mock_db_user, test_cart_service):
+        """Even with a normal subscription cart, the top-up success keyboard is only «Главное меню»."""
         await test_cart_service.save_user_cart(
             mock_db_user.id,
             {
@@ -495,9 +478,7 @@ class TestGiftTopupSuccessKeyboardAndResume:
         mixin = type('_TestMixin', (PaymentCommonMixin,), {})()
         keyboard = await mixin.build_topup_success_keyboard(mock_db_user)
 
-        callbacks = _callbacks(keyboard)
-        assert 'return_to_saved_cart' in callbacks
-        assert 'return_to_gift_cart' not in callbacks
+        assert _callbacks(keyboard) == ['back_to_menu']
 
     @pytest.mark.asyncio
     async def test_return_to_gift_cart_expired_or_not_found(
