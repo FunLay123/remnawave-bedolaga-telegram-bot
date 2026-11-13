@@ -636,6 +636,7 @@ async def main():
                 or payment_webhooks_enabled
                 or settings.get_miniapp_static_path().exists()
                 or settings.is_subscription_proxy_enabled()
+                or settings.is_remnawave_webhook_enabled()
             )
 
             if should_start_web_app:

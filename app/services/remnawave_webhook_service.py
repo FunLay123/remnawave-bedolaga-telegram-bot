@@ -25,6 +25,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.exc import StaleDataError
 
 from app.config import settings
+from app.database.crud.notification import notification_sent, record_notification
 from app.database.crud.subscription import (
     deactivate_subscription,
     decrement_subscription_server_counts,
@@ -47,6 +48,13 @@ from app.utils.miniapp_buttons import build_miniapp_or_callback_button, build_su
 
 
 logger = structlog.get_logger(__name__)
+
+
+# Durable markers in SentNotification for the trial-connection nudges. They are
+# stored per (user, subscription) so reordered/duplicated Remnawave events do not
+# spam the user, and a successful first connection suppresses later nudges.
+_MARKER_FIRST_CONNECTED = 'webhook_first_connected'
+_MARKER_NOT_CONNECTED = 'webhook_not_connected'
 
 
 # Mapping from locale text_key to NotificationType for unified delivery
@@ -1059,7 +1067,7 @@ class RemnaWaveWebhookService:
         reply_markup: InlineKeyboardMarkup | None = None,
         format_kwargs: dict[str, Any] | None = None,
         subscription: Subscription | None = None,
-    ) -> None:
+    ) -> bool:
         """Send a notification to user via appropriate channel.
 
         Telegram users receive a bot message; email-only users receive
@@ -1068,15 +1076,19 @@ class RemnaWaveWebhookService:
 
         Respects WEBHOOK_NOTIFY_USER_ENABLED master toggle and
         per-event toggles from Settings.
+
+        Returns True only when the delivery service reports success. Existing
+        callers may ignore the result; connection-nudge handlers use it to
+        avoid recording a delivered marker after a failed send.
         """
         if not settings.WEBHOOK_NOTIFY_USER_ENABLED:
             logger.debug('Webhook user notifications disabled globally, skipping', text_key=text_key)
-            return
+            return False
 
         setting_key = _TEXT_KEY_TO_SETTING.get(text_key)
         if setting_key and not getattr(settings, setting_key, True):
             logger.debug('Webhook notification disabled via', text_key=text_key, setting_key=setting_key)
-            return
+            return False
 
         expiry_days_by_text_key = {
             'WEBHOOK_SUB_EXPIRES_72H': 3,
@@ -1092,13 +1104,13 @@ class RemnaWaveWebhookService:
                     user_id=user.id,
                     text_key=text_key,
                 )
-                return
+                return False
 
         texts = get_texts(user.language)
         message = texts.get(text_key)
         if not message:
             logger.warning('Missing locale key for language', text_key=text_key, language=user.language)
-            return
+            return False
 
         # Inject tariff_label for multi-tariff subscription identification
         if format_kwargs is None:
@@ -1118,7 +1130,7 @@ class RemnaWaveWebhookService:
                 message = message.format(**format_kwargs)
             except (KeyError, IndexError):
                 logger.warning('Failed to format message with kwargs', text_key=text_key, format_kwargs=format_kwargs)
-                return
+                return False
 
         # Append "Close" button to every webhook notification keyboard
         close_text = texts.get('WEBHOOK_CLOSE_BUTTON', '✖️ Закрыть')
@@ -1133,12 +1145,12 @@ class RemnaWaveWebhookService:
         notification_type = _TEXT_KEY_TO_NOTIFICATION_TYPE.get(text_key)
         if not notification_type:
             logger.warning('No NotificationType mapping for text_key', text_key=text_key)
-            return
+            return False
 
         context = {'text_key': text_key, **(format_kwargs or {})}
 
         try:
-            await notification_delivery_service.send_notification(
+            delivered = await notification_delivery_service.send_notification(
                 user=user,
                 notification_type=notification_type,
                 context=context,
@@ -1148,6 +1160,8 @@ class RemnaWaveWebhookService:
             )
         except Exception:
             logger.exception('Notification delivery failed', user_id=user.id, text_key=text_key)
+            return False
+        return bool(delivered)
 
     # ------------------------------------------------------------------
     # Webhook timestamp helper
@@ -1810,12 +1824,29 @@ class RemnaWaveWebhookService:
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
         logger.info('Webhook: user first VPN connection', user_id=user.id)
+
+        if subscription is not None:
+            if await notification_sent(db, user.id, subscription.id, _MARKER_FIRST_CONNECTED):
+                logger.debug(
+                    'Webhook: first-connected already handled, suppressing duplicate',
+                    user_id=user.id,
+                    subscription_id=subscription.id,
+                )
+                return
+
         await self._notify_user(
             user,
             'WEBHOOK_SUB_FIRST_CONNECTED',
             reply_markup=self._get_subscription_keyboard(user),
             subscription=subscription,
         )
+
+        # The marker means "the user did connect", not "the message was sent".
+        # Record it even when notifications are disabled so a later (possibly
+        # reordered) user.not_connected event cannot nudge an already-connected
+        # user.
+        if subscription is not None:
+            await record_notification(db, user.id, subscription.id, _MARKER_FIRST_CONNECTED)
 
     async def _handle_bandwidth_threshold(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
@@ -1848,26 +1879,63 @@ class RemnaWaveWebhookService:
             subscription=subscription,
         )
 
+    @staticmethod
+    def _normalize_not_connected_hours(value: Any) -> int:
+        """Coerce ``notConnectedAfterHours`` to a non-negative int.
+
+        The payload is external data: missing, malformed, negative, or boolean
+        values all collapse to 0 so the marker key stays stable and two retries
+        of the same event dedupe against each other.
+        """
+        if value is None or isinstance(value, bool):
+            return 0
+        try:
+            hours = int(value)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, hours)
+
     async def _handle_user_not_connected(
         self, db: AsyncSession, user: User, subscription: Subscription | None, data: dict
     ) -> None:
         meta = data.get('_meta') or {}
-        hours = meta.get('notConnectedAfterHours')
+        raw_hours = meta.get('notConnectedAfterHours')
+        hours = self._normalize_not_connected_hours(raw_hours)
         logger.info(
             'Webhook: user has not connected to VPN',
             user_id=user.id,
             not_connected_after_hours=hours,
         )
-        format_kwargs: dict[str, Any] = {}
-        if hours is not None:
-            format_kwargs['hours'] = str(hours)
-        await self._notify_user(
+
+        if subscription is not None:
+            if await notification_sent(db, user.id, subscription.id, _MARKER_FIRST_CONNECTED):
+                logger.debug(
+                    'Webhook: user already connected once, suppressing not-connected nudge',
+                    user_id=user.id,
+                    subscription_id=subscription.id,
+                )
+                return
+            if await notification_sent(db, user.id, subscription.id, _MARKER_NOT_CONNECTED, hours):
+                logger.debug(
+                    'Webhook: not-connected nudge already delivered for this threshold',
+                    user_id=user.id,
+                    subscription_id=subscription.id,
+                    hours=hours,
+                )
+                return
+
+        delivered = await self._notify_user(
             user,
             'WEBHOOK_USER_NOT_CONNECTED',
             reply_markup=self._get_connect_keyboard(user),
-            format_kwargs=format_kwargs or None,
+            format_kwargs={'hours': str(hours)},
             subscription=subscription,
         )
+
+        # Only a confirmed delivery may claim the marker; otherwise a transient
+        # Telegram/email failure would permanently silence the nudge.
+        if subscription is not None and delivered:
+            await record_notification(db, user.id, subscription.id, _MARKER_NOT_CONNECTED, hours)
 
     # ------------------------------------------------------------------
     # Device event handlers (user_hwid_devices scope)
