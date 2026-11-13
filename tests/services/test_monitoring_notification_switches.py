@@ -52,11 +52,11 @@ async def test_expiration_state_updates_even_when_notifications_are_disabled(mon
     monkeypatch.setattr('app.database.crud.subscription.expire_subscription_if_still_due', expire_subscription)
 
     service = _service()
-    service._send_subscription_expired_notification = AsyncMock()
+    service._send_initial_expired_notification = AsyncMock()
     service._log_monitoring_event = AsyncMock()
     db = SimpleNamespace(execute=AsyncMock(), refresh=AsyncMock())
 
     await service._check_expired_subscriptions(db)
 
     expire_subscription.assert_awaited_once_with(db, subscription)
-    service._send_subscription_expired_notification.assert_not_awaited()
+    service._send_initial_expired_notification.assert_not_awaited()

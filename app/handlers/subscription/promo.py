@@ -3,23 +3,29 @@ from typing import Any
 
 from aiogram import types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.crud.discount_offer import (
     get_offer_by_id,
+    get_offer_by_id_for_update,
+    get_offer_subscription_for_update,
+    lock_discount_offer_user_for_update,
     mark_offer_claimed,
 )
 from app.database.crud.promo_offer_template import get_promo_offer_template_by_id
 from app.database.models import User
 from app.localization.texts import get_texts
 from app.services.promo_offer_service import promo_offer_service
-from app.utils.miniapp_buttons import build_miniapp_or_callback_button
+from app.utils.miniapp_buttons import build_main_menu_button, build_miniapp_or_callback_button
+from app.utils.payment_button_styles import apply_button_style
 from app.utils.pricing_utils import (
     format_period_description,
 )
 from app.utils.promo_offer import (
     build_promo_offer_hint,
+    get_user_active_promo_discount_percent,
 )
 from app.utils.timezone import format_local_datetime
 
@@ -103,6 +109,191 @@ async def _build_promo_group_discount_text(
     return '\n'.join(lines)
 
 
+WAVE_DISCOUNT_NOTIFICATION_TYPES = frozenset({'expired_discount_wave2', 'expired_discount_wave3'})
+
+WAVE_CLAIM_SUCCESS_FALLBACK = (
+    '<tg-emoji emoji-id="5303040337059543238">🎉</tg-emoji> <b>Скидка {percent}% активирована!</b>\n\n'
+    'Она суммируется с другими скидками.\n'
+    'Примените её при оплате до <b>{expires_at}</b>.'
+)
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Treat naive legacy datetimes as UTC before comparing them to ``now``."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _is_lock_not_available(error: DBAPIError) -> bool:
+    """Return True for PostgreSQL lock_not_available (SQLSTATE 55P03)."""
+
+    orig = getattr(error, 'orig', None)
+    sqlstate = getattr(orig, 'sqlstate', None) or getattr(orig, 'pgcode', None)
+    return sqlstate == '55P03'
+
+
+def _build_wave_claim_success_keyboard(texts) -> InlineKeyboardMarkup:
+    purchase_button = apply_button_style(
+        build_miniapp_or_callback_button(
+            text=texts.get('MENU_BUY_SUBSCRIPTION', '💎 Купить подписку'),
+            callback_data='subscription_upgrade',
+        ),
+        'subscription:upgrade',
+    )
+    main_menu_button = apply_button_style(
+        build_main_menu_button(texts.get('BACK_TO_MENU', '🏠 В главное меню')),
+        'success:main_menu',
+    )
+    return InlineKeyboardMarkup(inline_keyboard=[[purchase_button], [main_menu_button]])
+
+
+async def _claim_wave_discount_offer(
+    callback: types.CallbackQuery,
+    db_user: User,
+    db: AsyncSession,
+    offer,
+    texts,
+) -> None:
+    """Claim one of the two expired-discount waves.
+
+    Eligibility is re-checked against locked rows rather than the callback
+    message: the subscription may have been renewed, the offer may have been
+    deactivated, and a better personal discount may already be active.
+    """
+
+    now = datetime.now(UTC)
+    expected_subscription_id = offer.subscription_id
+
+    # Lock order: Subscription -> User -> DiscountOffer. Existing device and
+    # tariff-switch flows hold the subscription row FOR UPDATE and then lock the
+    # user through commit; taking the same order here prevents a real
+    # Subscription/User deadlock cycle. The user lock is held until
+    # `mark_offer_claimed` commits, making the no-downgrade comparison and the
+    # discount write atomic.
+    subscription = None
+    if expected_subscription_id is not None:
+        subscription = await get_offer_subscription_for_update(db, expected_subscription_id)
+
+    try:
+        locked_user = await lock_discount_offer_user_for_update(db, db_user.id)
+    except DBAPIError as error:
+        if not _is_lock_not_available(error):
+            raise
+        # NOWAIT aborted instead of waiting, so the transaction still holds the
+        # subscription lock acquired above. Roll it back to release that lock
+        # before showing the generic error; no claim state may be written.
+        await db.rollback()
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_ERROR', '❌ Не удалось активировать скидку. Попробуйте позже.'),
+            show_alert=True,
+        )
+        return
+
+    if locked_user is None:
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_NOT_FOUND', '❌ Предложение не найдено'),
+            show_alert=True,
+        )
+        return
+    db_user = locked_user
+
+    locked_offer = await get_offer_by_id_for_update(db, offer.id)
+    if locked_offer is None or locked_offer.user_id != db_user.id:
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_NOT_FOUND', '❌ Предложение не найдено'),
+            show_alert=True,
+        )
+        return
+
+    offer = locked_offer
+
+    if offer.subscription_id != expected_subscription_id:
+        # The offer was re-pointed after the initial read; the locked
+        # subscription belongs to the old binding, so this claim must not write.
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_WAVE_NOT_ELIGIBLE', 'ℹ️ Скидка недоступна: подписка уже не истекла.'),
+            show_alert=True,
+        )
+        return
+
+    if offer.claimed_at is not None:
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_ALREADY', 'ℹ️ Скидка уже была активирована'),
+            show_alert=True,
+        )
+        return
+
+    offer_expires_at = _as_utc(offer.expires_at)
+    if not offer.is_active or offer_expires_at is None or offer_expires_at <= now:
+        offer.is_active = False
+        await db.commit()
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_EXPIRED', '⚠️ Время действия предложения истекло'),
+            show_alert=True,
+        )
+        return
+
+    discount_percent = int(offer.discount_percent or 0)
+    if discount_percent <= 0:
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_ERROR', '❌ Не удалось активировать скидку. Попробуйте позже.'),
+            show_alert=True,
+        )
+        return
+
+    if subscription is None or subscription.user_id != db_user.id or subscription.actual_status != 'expired':
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_WAVE_NOT_ELIGIBLE', 'ℹ️ Скидка недоступна: подписка уже не истекла.'),
+            show_alert=True,
+        )
+        return
+
+    if get_user_active_promo_discount_percent(db_user) >= discount_percent:
+        await callback.answer(
+            texts.get('DISCOUNT_CLAIM_WAVE_ALREADY_BEST', 'ℹ️ У вас уже действует скидка не меньше этой.'),
+            show_alert=True,
+        )
+        return
+
+    db_user.promo_offer_discount_percent = discount_percent
+    db_user.promo_offer_discount_source = offer.notification_type
+    # The wave discount is usable until the deadline printed on the card; it
+    # must not start a fresh `active_discount_hours` window at claim time.
+    db_user.promo_offer_discount_expires_at = offer.expires_at
+    db_user.updated_at = now
+
+    await mark_offer_claimed(
+        db,
+        offer,
+        details={
+            'context': 'discount_claim',
+            'discount_percent': discount_percent,
+            'discount_expires_at': offer.expires_at.isoformat(),
+        },
+    )
+    await db.refresh(db_user)
+
+    success_template = texts.get('DISCOUNT_CLAIM_WAVE_SUCCESS', WAVE_CLAIM_SUCCESS_FALLBACK)
+    expires_text = format_local_datetime(offer.expires_at, '%d.%m.%Y %H:%M')
+    success_message = _format_text_with_placeholders(
+        success_template,
+        {'percent': discount_percent, 'expires_at': expires_text},
+    )
+
+    await callback.answer(
+        texts.get('DISCOUNT_CLAIM_WAVE_POPUP', 'Скидка активирована!'),
+        show_alert=True,
+    )
+    await callback.message.answer(
+        success_message,
+        reply_markup=_build_wave_claim_success_keyboard(texts),
+    )
+
+
 async def claim_discount_offer(
     callback: types.CallbackQuery,
     db_user: User,
@@ -125,6 +316,10 @@ async def claim_discount_offer(
             texts.get('DISCOUNT_CLAIM_NOT_FOUND', '❌ Предложение не найдено'),
             show_alert=True,
         )
+        return
+
+    if offer.notification_type in WAVE_DISCOUNT_NOTIFICATION_TYPES:
+        await _claim_wave_discount_offer(callback, db_user, db, offer, texts)
         return
 
     now = datetime.now(UTC)

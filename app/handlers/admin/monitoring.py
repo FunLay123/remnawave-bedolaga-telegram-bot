@@ -22,6 +22,7 @@ from app.services.traffic_monitoring_service import (
 from app.states import AdminStates
 from app.utils.decorators import admin_required
 from app.utils.pagination import paginate_list
+from app.utils.pricing_utils import format_period_description
 from app.utils.timezone import format_local_datetime
 
 
@@ -216,6 +217,7 @@ async def _build_notification_preview_message(language: str, notification_type: 
             percent=percent,
             expires_at=format_local_datetime(now + timedelta(hours=valid_hours), '%d.%m.%Y %H:%M'),
             discounted_price=settings.format_price(int(settings.PRICE_30_DAYS * (100 - percent) / 100)),
+            period=format_period_description(30, language),
             trigger_days=3,
             tariff_label='',
         )
@@ -264,6 +266,7 @@ async def _build_notification_preview_message(language: str, notification_type: 
             trigger_days=trigger_days,
             expires_at=format_local_datetime(now + timedelta(hours=valid_hours), '%d.%m.%Y %H:%M'),
             discounted_price=settings.format_price(int(settings.PRICE_30_DAYS * (100 - percent) / 100)),
+            period=format_period_description(30, language),
             tariff_label='',
         )
         keyboard = InlineKeyboardMarkup(

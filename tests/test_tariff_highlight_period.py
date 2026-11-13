@@ -43,9 +43,9 @@ def _labels(keyboard) -> list[str]:
     return [button.text for row in keyboard.inline_keyboard for button in row]
 
 
-def _extend_keyboard(tariff, language):
+def _extend_keyboard(tariff, language, user=None):
     """Продление берёт те же периоды, но требует id подписки в колбэке."""
-    return get_tariff_extend_keyboard(tariff, language, subscription_id=1)
+    return get_tariff_extend_keyboard(tariff, language, user, subscription_id=1)
 
 
 KEYBOARDS = (
@@ -54,6 +54,25 @@ KEYBOARDS = (
     get_tariff_switch_periods_keyboard,
     _extend_keyboard,
 )
+
+# Смену тарифа этап активной скидки не затрагивает.
+DISCOUNTED_KEYBOARDS = (
+    get_tariff_periods_keyboard,
+    get_tariff_periods_keyboard_with_traffic,
+    _extend_keyboard,
+)
+
+
+def _discounted_user():
+    """Промогруппа 10% и личный оффер 20% — последовательно это 28%."""
+    group = SimpleNamespace(
+        get_discount_percent=lambda category, period_days=None: 10 if category == 'period' else 0,
+    )
+    return SimpleNamespace(
+        get_primary_promo_group=lambda: group,
+        promo_offer_discount_percent=20,
+        promo_offer_discount_expires_at=None,
+    )
 
 
 @pytest.mark.parametrize('build', KEYBOARDS, ids=lambda f: f.__name__)
@@ -87,6 +106,17 @@ def test_prices_stay_visible_next_to_the_badge():
     marked = next(label for label in labels if BADGE in label)
 
     assert '1500' in marked.replace(' ', '').replace(' ', '')
+
+
+@pytest.mark.parametrize('build', DISCOUNTED_KEYBOARDS, ids=lambda build: build.__name__)
+def test_discounted_period_keeps_the_best_value_badge(build):
+    """Активная скидка не съедает отметку выгоды: она остаётся перед подписью."""
+    labels = _labels(build(_tariff(highlight=90), 'ru', _discounted_user()))
+    marked = [label for label in labels if BADGE in label]
+
+    assert len(marked) == 1, labels
+    assert '90' in marked[0]
+    assert 'Скидка 28%' in marked[0]
 
 
 def test_purchase_header_is_compact_and_shows_premium_traffic():

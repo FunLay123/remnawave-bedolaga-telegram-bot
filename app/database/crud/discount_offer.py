@@ -8,10 +8,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database.crud.promo_offer_log import log_promo_offer_action
-from app.database.models import DiscountOffer
+from app.database.models import DiscountOffer, Subscription, User
 
 
 logger = structlog.get_logger(__name__)
+
+#: The two expired-subscription waves.  Their offers are valid only while the
+#: subscription they point at is expired, so a successful renewal deactivates
+#: outstanding unclaimed offers of exactly these types.
+WAVE_DISCOUNT_NOTIFICATION_TYPES = frozenset({'expired_discount_wave2', 'expired_discount_wave3'})
 
 
 async def upsert_discount_offer(
@@ -75,6 +80,65 @@ async def get_offer_by_id(db: AsyncSession, offer_id: int) -> DiscountOffer | No
             selectinload(DiscountOffer.subscription),
         )
         .where(DiscountOffer.id == offer_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_offer_by_id_for_update(db: AsyncSession, offer_id: int) -> DiscountOffer | None:
+    """Lock an offer row for the duration of a claim transaction.
+
+    The claim handler must not trust the offer object carried by the callback
+    message: another transaction may have claimed or deactivated the offer after
+    the card was sent. ``with_for_update`` serializes the claim against renewal
+    invalidation, and the caller must use the freshly returned row.
+    """
+
+    result = await db.execute(
+        select(DiscountOffer)
+        .options(
+            selectinload(DiscountOffer.user),
+            selectinload(DiscountOffer.subscription),
+        )
+        .where(DiscountOffer.id == offer_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_offer_subscription_for_update(db: AsyncSession, subscription_id: int) -> Subscription | None:
+    """Re-read and lock the subscription tied to an offer in the same transaction.
+
+    ``populate_existing`` is important: the session may still hold the
+    subscription as it looked when the wave card was built. A renewal must be
+    visible to the claim handler even when the session identity map is warm.
+    """
+
+    result = await db.execute(
+        select(Subscription)
+        .where(Subscription.id == subscription_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return result.scalar_one_or_none()
+
+
+async def lock_discount_offer_user_for_update(db: AsyncSession, user_id: int) -> User | None:
+    """Lock the offer owner's row so the no-downgrade check and write are atomic.
+
+    The wave claim takes locks in ``Subscription -> User -> DiscountOffer`` order,
+    matching existing device/tariff-switch flows that hold the subscription FOR
+    UPDATE and then lock the user through commit. There is also a remaining
+    ``User -> Subscription`` path (zero-charge renewal finalize), so waiting here
+    could close either cycle. ``NOWAIT`` makes PostgreSQL abort immediately with
+    SQLSTATE 55P03 instead of waiting; the claim handler rolls back the failed
+    transaction (releasing its subscription lock), shows the generic claim error,
+    and leaves every row untouched. A successful lock is still a fresh
+    ``populate_existing`` read and is held until the claim commit.
+    """
+
+    result = await db.execute(
+        select(User).where(User.id == user_id).with_for_update(nowait=True).execution_options(populate_existing=True)
     )
     return result.scalar_one_or_none()
 
@@ -187,6 +251,54 @@ async def mark_offer_claimed(
             )
 
     return offer
+
+
+async def deactivate_unclaimed_wave_offers(
+    db: AsyncSession,
+    subscription_id: int,
+    *,
+    commit: bool = False,
+) -> int:
+    """Deactivate outstanding unclaimed expired-subscription wave offers.
+
+    Called from the successful positive-day renewal transaction, after the
+    subscription row is locked.  Only active, unclaimed offers whose
+    ``notification_type`` is exactly ``expired_discount_wave2`` or
+    ``expired_discount_wave3`` and whose ``subscription_id`` matches are
+    affected; non-wave offers and discounts already claimed by the user stay
+    untouched until their own deadline.
+    """
+
+    result = await db.execute(
+        select(DiscountOffer).where(
+            DiscountOffer.subscription_id == subscription_id,
+            DiscountOffer.notification_type.in_(WAVE_DISCOUNT_NOTIFICATION_TYPES),
+            DiscountOffer.is_active == True,
+            DiscountOffer.claimed_at.is_(None),
+        )
+    )
+    offers = result.scalars().all()
+    if not offers:
+        if commit:
+            await db.commit()
+        return 0
+
+    now = datetime.now(UTC)
+    for offer in offers:
+        offer.is_active = False
+        offer.updated_at = now
+
+    if commit:
+        await db.commit()
+    else:
+        await db.flush()
+
+    logger.info(
+        'Deactivated outstanding wave discount offers',
+        subscription_id=subscription_id,
+        count=len(offers),
+    )
+    return len(offers)
 
 
 async def deactivate_expired_offers(db: AsyncSession) -> int:

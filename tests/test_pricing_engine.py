@@ -1007,3 +1007,116 @@ class TestOriginalPriceIdentity:
         with patch('app.services.pricing_engine.get_user_active_promo_discount_percent', return_value=5):
             result = await engine.calculate_renewal_price(db, sub, 30, user=user)
         assert result.original_total == 20000  # undiscounted subtotal
+
+
+class TestWavePreviewOfferOverride:
+    """The wave preview replaces the existing personal offer, never stacks on it."""
+
+    @pytest.mark.asyncio
+    async def test_tariff_override_replaces_existing_personal_offer(self):
+        engine = PricingEngine()
+        db = AsyncMock()
+        subscription = MagicMock()
+        subscription.tariff_id = 2
+        subscription.tariff = MagicMock()
+        subscription.tariff.period_prices = {'30': 100_000}
+        subscription.tariff.device_limit = 1
+        subscription.tariff.device_price_kopeks = None
+        subscription.tariff.id = 2
+        subscription.device_limit = 1
+        subscription.connected_squads = []
+        subscription.traffic_limit_gb = 50
+        subscription.purchased_traffic_gb = 0
+        user = MagicMock()
+        user.promo_group = None
+        user.get_primary_promo_group.return_value = None
+        user.promo_group_id = None
+        user.promo_offer_discount_percent = 10
+        user.promo_offer_discount_expires_at = None
+        with (
+            patch('app.services.pricing_engine.get_user_active_promo_discount_percent', return_value=10),
+            patch('app.services.pricing_engine.settings') as ms,
+        ):
+            ms.PRICE_PER_DEVICE = 0
+            result = await engine.calculate_renewal_price(
+                db,
+                subscription,
+                30,
+                user=user,
+                promo_offer_percent_override=20,
+            )
+        # 1000 ₽ base, wave 20% as the only personal offer → 800 ₽ (not 720 ₽).
+        assert result.final_total == 80_000
+        assert result.promo_offer_discount == 20_000
+        assert result.breakdown['offer_discount_pct'] == 20
+        # The SQLAlchemy user is not mutated for the preview.
+        assert user.promo_offer_discount_percent == 10
+
+    @pytest.mark.asyncio
+    async def test_tariff_override_none_keeps_existing_personal_offer(self):
+        engine = PricingEngine()
+        db = AsyncMock()
+        subscription = MagicMock()
+        subscription.tariff_id = 2
+        subscription.tariff = MagicMock()
+        subscription.tariff.period_prices = {'30': 100_000}
+        subscription.tariff.device_limit = 1
+        subscription.tariff.device_price_kopeks = None
+        subscription.tariff.id = 2
+        subscription.device_limit = 1
+        user = MagicMock()
+        user.promo_group = None
+        user.get_primary_promo_group.return_value = None
+        user.promo_group_id = None
+        with (
+            patch('app.services.pricing_engine.get_user_active_promo_discount_percent', return_value=10),
+            patch('app.services.pricing_engine.settings') as ms,
+        ):
+            ms.PRICE_PER_DEVICE = 0
+            result = await engine.calculate_renewal_price(db, subscription, 30, user=user)
+        assert result.final_total == 90_000
+        assert result.breakdown['offer_discount_pct'] == 10
+
+    @pytest.mark.asyncio
+    async def test_classic_override_stacks_with_promo_group_sequentially(self):
+        engine = PricingEngine()
+        db = AsyncMock()
+        subscription = MagicMock()
+        subscription.tariff_id = None
+        subscription.tariff = None
+        subscription.connected_squads = []
+        subscription.traffic_limit_gb = 0
+        subscription.purchased_traffic_gb = 0
+        subscription.device_limit = 2
+        promo_group = MagicMock()
+        promo_group.id = 1
+        promo_group.get_discount_percent.return_value = 10
+        user = MagicMock()
+        user.promo_group = promo_group
+        user.get_primary_promo_group.return_value = promo_group
+        user.promo_group_id = 1
+        user.promo_offer_discount_percent = 10
+        user.promo_offer_discount_expires_at = None
+        with (
+            patch('app.services.pricing_engine.get_user_active_promo_discount_percent', return_value=10),
+            patch('app.services.pricing_engine.settings') as ms,
+            patch('app.services.pricing_engine.CLASSIC_PERIOD_PRICES', {30: 100_000}),
+            patch('app.services.pricing_engine.PERIOD_PRICES', {30: 100_000}),
+        ):
+            ms.get_traffic_price.return_value = 0
+            ms.PRICE_PER_DEVICE = 0
+            ms.DEFAULT_DEVICE_LIMIT = 2
+            ms.is_traffic_fixed.return_value = False
+            result = await engine.calculate_renewal_price(
+                db,
+                subscription,
+                30,
+                user=user,
+                promo_offer_percent_override=20,
+            )
+        # Group 10% → 900 ₽, then wave 20% → 720 ₽: 28% effective, not 30%.
+        assert result.final_total == 72_000
+        assert result.promo_group_discount == 10_000
+        assert result.promo_offer_discount == 18_000
+        assert result.breakdown['offer_discount_pct'] == 20
+        assert user.promo_offer_discount_percent == 10

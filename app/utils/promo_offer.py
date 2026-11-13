@@ -19,6 +19,16 @@ def _escape_format_braces(text: str) -> str:
     return text.replace('{', '{{').replace('}', '}}')
 
 
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Treat naive legacy datetimes as UTC before comparing them to ``now``."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def get_user_active_promo_discount_percent(user: User | None) -> int:
     if not user:
         return 0
@@ -28,7 +38,7 @@ def get_user_active_promo_discount_percent(user: User | None) -> int:
     except (TypeError, ValueError):
         return 0
 
-    expires_at = getattr(user, 'promo_offer_discount_expires_at', None)
+    expires_at = _as_utc(getattr(user, 'promo_offer_discount_expires_at', None))
     if expires_at and expires_at <= datetime.now(UTC):
         return 0
 
@@ -112,7 +122,7 @@ async def build_promo_offer_timer_line(
     user: User,
     texts,
 ) -> str | None:
-    expires_at = getattr(user, 'promo_offer_discount_expires_at', None)
+    expires_at = _as_utc(getattr(user, 'promo_offer_discount_expires_at', None))
     if not expires_at:
         return None
 
@@ -132,8 +142,9 @@ async def build_promo_offer_timer_line(
     except Exception:
         offer = None
 
-    if offer and getattr(offer, 'claimed_at', None):
-        total_seconds = int((expires_at - offer.claimed_at).total_seconds())
+    claimed_at = _as_utc(getattr(offer, 'claimed_at', None)) if offer else None
+    if claimed_at:
+        total_seconds = int((expires_at - claimed_at).total_seconds())
         if total_seconds <= 0:
             total_seconds = None
 

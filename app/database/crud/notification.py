@@ -28,6 +28,23 @@ async def notification_sent(
     return result.scalars().first() is not None
 
 
+async def get_notifications_by_type_prefix(
+    db: AsyncSession,
+    notification_type_prefix: str,
+) -> list[SentNotification]:
+    """Return markers whose ``notification_type`` starts with the given prefix.
+
+    Used by cycle-keyed retry recovery: the cycle token is part of the type
+    (``expired_retry:<end_date>``), so a prefix scan is the only lookup.
+    """
+    result = await db.execute(
+        select(SentNotification).where(
+            SentNotification.notification_type.like(f'{notification_type_prefix}%')
+        )
+    )
+    return list(result.scalars().all())
+
+
 async def record_notification(
     db: AsyncSession,
     user_id: int,

@@ -522,12 +522,17 @@ class PricingEngine:
         period_days: int,
         *,
         user: User | None = None,
+        promo_offer_percent_override: int | None = None,
     ) -> RenewalPricing:
         """Calculate renewal price for a subscription.
 
         Routes to tariff mode (subscription has a tariff) or classic mode
         (legacy env-based pricing).  Stacked discounts (promo-group then
         promo-offer) are applied in both modes.
+
+        ``promo_offer_percent_override`` replaces (does not stack with) the
+        user's current personal promo offer, for previews such as the expired
+        discount waves. ``None`` preserves the existing behavior.
         """
         if not isinstance(period_days, int) or period_days <= 0:
             raise ValueError(f'Invalid period_days: {period_days}')
@@ -540,8 +545,20 @@ class PricingEngine:
                     tariff_id=subscription.tariff_id,
                 )
             else:
-                return await self._calculate_tariff_mode(db, subscription, period_days, user=user)
-        return await self._calculate_classic_mode(db, subscription, period_days, user=user)
+                return await self._calculate_tariff_mode(
+                    db,
+                    subscription,
+                    period_days,
+                    user=user,
+                    promo_offer_percent_override=promo_offer_percent_override,
+                )
+        return await self._calculate_classic_mode(
+            db,
+            subscription,
+            period_days,
+            user=user,
+            promo_offer_percent_override=promo_offer_percent_override,
+        )
 
     # ------------------------------------------------------------------
     # Tariff mode
@@ -554,6 +571,7 @@ class PricingEngine:
         period_days: int,
         *,
         user: User | None = None,
+        promo_offer_percent_override: int | None = None,
     ) -> RenewalPricing:
         """Price calculation when subscription is linked to a Tariff."""
         tariff = subscription.tariff
@@ -563,6 +581,7 @@ class PricingEngine:
             period_days,
             device_limit,
             user=user,
+            promo_offer_percent_override=promo_offer_percent_override,
         )
 
     async def _calculate_tariff_core(
@@ -573,6 +592,7 @@ class PricingEngine:
         *,
         custom_traffic_gb: int | None = None,
         user: User | None = None,
+        promo_offer_percent_override: int | None = None,
     ) -> RenewalPricing:
         """Core tariff pricing logic (raw params, no Subscription needed).
 
@@ -626,7 +646,10 @@ class PricingEngine:
             period_pct = promo_group.get_discount_percent('period', period_days)
             devices_pct = promo_group.get_discount_percent('devices', period_days)
 
-        offer_pct = get_user_active_promo_discount_percent(user) if user else 0
+        if promo_offer_percent_override is not None:
+            offer_pct = max(0, min(100, int(promo_offer_percent_override)))
+        else:
+            offer_pct = get_user_active_promo_discount_percent(user) if user else 0
 
         discounted_base = self.apply_discount(base_price, period_pct)
         discounted_devices = self.apply_discount(devices_price, devices_pct)
@@ -716,6 +739,7 @@ class PricingEngine:
         *,
         purchased_traffic_gb: int = 0,
         user: User | None = None,
+        promo_offer_percent_override: int | None = None,
     ) -> RenewalPricing:
         """Core classic-mode pricing logic (raw params, no Subscription needed).
 
@@ -752,7 +776,10 @@ class PricingEngine:
             traffic_pct = promo_group.get_discount_percent('traffic', period_days)
             devices_pct = promo_group.get_discount_percent('devices', period_days)
 
-        offer_pct = get_user_active_promo_discount_percent(user) if user else 0
+        if promo_offer_percent_override is not None:
+            offer_pct = max(0, min(100, int(promo_offer_percent_override)))
+        else:
+            offer_pct = get_user_active_promo_discount_percent(user) if user else 0
 
         # --- Base price with period discount ---
         base_price = self.apply_discount(base_price_original, period_pct)
@@ -854,6 +881,7 @@ class PricingEngine:
         period_days: int,
         *,
         user: User | None = None,
+        promo_offer_percent_override: int | None = None,
     ) -> RenewalPricing:
         """Price calculation for legacy (non-tariff) subscriptions.
 
@@ -879,6 +907,7 @@ class PricingEngine:
             device_limit,
             purchased_traffic_gb=purchased_traffic_gb,
             user=user,
+            promo_offer_percent_override=promo_offer_percent_override,
         )
 
     async def calculate_classic_new_subscription_price(

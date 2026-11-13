@@ -13,7 +13,10 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database.auth_methods import OAUTH_PROVIDER_COLUMNS
 from app.database.constants import POSTGRES_INT4_MAX, POSTGRES_INT4_MIN
-from app.database.crud.discount_offer import get_latest_claimed_offer_for_user
+from app.database.crud.discount_offer import (
+    WAVE_DISCOUNT_NOTIFICATION_TYPES,
+    get_latest_claimed_offer_for_user,
+)
 from app.database.crud.promo_group import get_default_promo_group
 from app.database.crud.promo_offer_log import log_promo_offer_action
 from app.database.crud.subscription_segments import segment_condition
@@ -864,6 +867,74 @@ async def subtract_user_balance(
             await db.rollback()
             return False
         raise
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    """Treat naive legacy datetimes as UTC before comparing them to ``now``."""
+
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+async def backfill_wave_discount_expiry(
+    db: AsyncSession,
+    *,
+    now: datetime | None = None,
+) -> tuple[int, int]:
+    """Give legacy wave discounts a bounded deadline.
+
+    Users whose personal discount came from ``expired_discount_wave2`` or
+    ``expired_discount_wave3`` may carry ``promo_offer_discount_expires_at=NULL``
+    from before the wave claim stored the original card deadline.  For each such
+    user we copy ``expires_at`` from the matching claimed offer of the same
+    source.  When no matching offer exists we do not invent a deadline: the user
+    gets exactly one 24-hour migration window from this backfill run, and later
+    runs skip the row because its deadline is no longer NULL.
+
+    Returns ``(matched, unmatched)`` counts.  Only aggregate counts are logged;
+    no user identifiers or personal data appear in the log.
+    """
+
+    reference = _as_utc(now) if now is not None else datetime.now(UTC)
+
+    result = await db.execute(
+        select(User).where(
+            User.promo_offer_discount_percent > 0,
+            User.promo_offer_discount_source.in_(WAVE_DISCOUNT_NOTIFICATION_TYPES),
+            User.promo_offer_discount_expires_at.is_(None),
+        )
+    )
+    users = result.scalars().all()
+    if not users:
+        return (0, 0)
+
+    matched = 0
+    unmatched = 0
+    for user in users:
+        source = getattr(user, 'promo_offer_discount_source', None)
+        offer = await get_latest_claimed_offer_for_user(db, user.id, source)
+        offer_expires_at = _as_utc(getattr(offer, 'expires_at', None)) if offer is not None else None
+
+        if offer_expires_at is not None:
+            user.promo_offer_discount_expires_at = offer_expires_at
+            matched += 1
+        else:
+            user.promo_offer_discount_expires_at = reference + timedelta(hours=24)
+            unmatched += 1
+
+        user.updated_at = reference
+
+    await db.commit()
+
+    logger.info(
+        'Backfilled wave promo-offer discount deadlines',
+        matched=matched,
+        unmatched=unmatched,
+    )
+    return (matched, unmatched)
 
 
 async def cleanup_expired_promo_offer_discounts(db: AsyncSession) -> int:

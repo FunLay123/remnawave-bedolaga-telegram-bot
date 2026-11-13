@@ -29,6 +29,10 @@ EXCLUDED_NOTIFICATION_TYPES = frozenset(
         'referral_registered',
         'referral_welcome',
         'ticket_reply',
+        # Обе волны скидок уже оформлены вручную: на карточке свой кастомный
+        # эмодзи, и общий шлюз не должен заменять его на «мельницу»/предупреждение.
+        'expired_discount_wave2',
+        'expired_discount_wave3',
     }
 )
 

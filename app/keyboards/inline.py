@@ -33,6 +33,44 @@ logger = structlog.get_logger(__name__)
 
 # Иконка кнопок выбора периода («30 дней — 300 ₽»).
 PERIOD_BUTTON_ICON_ID = '5334829606220354437'
+# Иконка периода с активной скидкой (💠) — заменяет обычную на всех строках.
+DISCOUNTED_PERIOD_BUTTON_ICON_ID = '5335020345717973061'
+
+
+def effective_discount_percent(undiscounted_total_kopeks: int, final_total_kopeks: int) -> int:
+    """Эффективная скидка от исходной суммы до итоговой, в процентах.
+
+    Скидки применяются последовательно (промогруппа, затем промо-оффер), поэтому
+    проценты нельзя складывать: считаем от реально списанной суммы. Некорректная
+    или нулевая база не должна давать деление на ноль — показываем 0%.
+    """
+    if undiscounted_total_kopeks <= 0 or final_total_kopeks >= undiscounted_total_kopeks:
+        return 0
+    discount = (undiscounted_total_kopeks - final_total_kopeks) * 100 / undiscounted_total_kopeks
+    return max(0, min(100, round(discount)))
+
+
+def discounted_period_button(
+    period_label: str,
+    price_text: str,
+    undiscounted_total_kopeks: int,
+    final_total_kopeks: int,
+    *,
+    badge: str | None = None,
+) -> tuple[str, str] | None:
+    """Внешний вид кнопки периода со скидкой: (текст, id кастомной иконки).
+
+    ``None`` означает, что скидки нет: вызывающий код оставляет прежнюю подпись
+    и иконку. В скидочном виде на кнопке только итоговая цена и эффективный
+    процент — без старой цены, стрелки и «🔥−N%».
+    """
+    percent = effective_discount_percent(undiscounted_total_kopeks, final_total_kopeks)
+    if percent <= 0:
+        return None
+    label = f'{period_label} — {price_text} · Скидка {percent}%'
+    if badge:
+        label = f'{badge} · {label}'
+    return label, DISCOUNTED_PERIOD_BUTTON_ICON_ID
 
 
 def pad_button_labels(
@@ -1497,21 +1535,31 @@ def get_subscription_period_keyboard(
         # Format period description
         period_display = format_period_description(days, language)
 
-        # Format button text with discount display
-        button_text = format_price_button(
-            period_label=period_display,
-            price_info=price_info,
-            format_price_func=texts.format_price,
-            emphasize=False,
-            add_exclamation=False,
+        discounted = discounted_period_button(
+            period_display,
+            texts.format_price(price_info.final_price),
+            price_info.base_price,
+            price_info.final_price,
         )
+        if discounted is not None:
+            button_text, button_icon = discounted
+        else:
+            # Без скидки — прежняя цена и прежняя иконка.
+            button_text = format_price_button(
+                period_label=period_display,
+                price_info=price_info,
+                format_price_func=texts.format_price,
+                emphasize=False,
+                add_exclamation=False,
+            )
+            button_icon = PERIOD_BUTTON_ICON_ID
 
         keyboard.append(
             [
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'period_{days}',
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                    icon_custom_emoji_id=button_icon,
                 )
             ]
         )
@@ -3710,31 +3758,42 @@ def get_extend_subscription_keyboard_with_prices(language: str, prices: dict) ->
 
         period_display = format_period_description(days, language)
 
-        # Create PriceInfo from already calculated prices
-        # Note: original_price and final_price are calculated in the handler
-        discount_percent = 0
-        if original_price > final_price and original_price > 0:
-            discount_percent = ((original_price - final_price) * 100) // original_price
-
-        price_info_obj = PriceInfo(
-            base_price=original_price, final_price=final_price, discount_percent=discount_percent
+        # Active discount: итоговая цена и эффективный процент без старой цены.
+        discounted = discounted_period_button(
+            period_display,
+            texts.format_price(final_price),
+            original_price,
+            final_price,
         )
+        if discounted is not None:
+            button_text, button_icon = discounted
+        else:
+            # Create PriceInfo from already calculated prices
+            # Note: original_price and final_price are calculated in the handler
+            discount_percent = 0
+            if original_price > final_price and original_price > 0:
+                discount_percent = ((original_price - final_price) * 100) // original_price
 
-        # Format button using unified system
-        button_text = format_price_button(
-            period_label=period_display,
-            price_info=price_info_obj,
-            format_price_func=texts.format_price,
-            emphasize=False,
-            add_exclamation=False,
-        )
+            price_info_obj = PriceInfo(
+                base_price=original_price, final_price=final_price, discount_percent=discount_percent
+            )
+
+            # Format button using unified system
+            button_text = format_price_button(
+                period_label=period_display,
+                price_info=price_info_obj,
+                format_price_func=texts.format_price,
+                emphasize=False,
+                add_exclamation=False,
+            )
+            button_icon = PERIOD_BUTTON_ICON_ID
 
         keyboard.append(
             [
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'extend_period_{days}',
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID,
+                    icon_custom_emoji_id=button_icon,
                 )
             ]
         )

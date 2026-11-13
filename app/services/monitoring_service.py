@@ -3,6 +3,7 @@ import html
 import math
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ from app.database.crud.discount_offer import (
 )
 from app.database.crud.notification import (
     clear_notification_by_type,
+    get_notifications_by_type_prefix,
     notification_sent,
     record_notification,
 )
@@ -31,6 +33,7 @@ from app.database.crud.subscription import (
     reactivate_subscription,
 )
 from app.database.crud.user import (
+    backfill_wave_discount_expiry,
     cleanup_expired_promo_offer_discounts,
     delete_user,
     get_inactive_users,
@@ -83,10 +86,56 @@ from app.utils.message_patch import caption_exceeds_telegram_limit
 from app.utils.miniapp_buttons import build_miniapp_or_callback_button, build_subscription_extend_button
 from app.utils.notification_emoji import style_notification_text
 from app.utils.notification_prefs import get_subscription_expiry_days, is_subscription_expiry_enabled
+from app.utils.pricing_utils import format_period_description
 from app.utils.promo_offer import get_user_active_promo_discount_percent
 from app.utils.rich_notify import try_send_rich_notification
 from app.utils.subscription_time import ends_within_days
 from app.utils.timezone import format_local_datetime
+
+
+class NotificationDeliveryStatus(StrEnum):
+    """Typed outcome of a notification send.
+
+    ``SENT`` covers rich sends that return no aiogram ``Message``. ``TIMEOUT``
+    is ambiguous: Telegram may have accepted the message even though the await
+    timed out, so callers must not retry it immediately.
+    """
+
+    SENT = 'sent'
+    FAILED = 'failed'
+    TIMEOUT = 'timeout'
+    SKIPPED = 'skipped'
+    UNREACHABLE = 'unreachable'
+
+
+@dataclass
+class NotificationDeliveryResult:
+    status: NotificationDeliveryStatus
+    message: Any | None = None
+
+
+# Persistent SentNotification types for the once-per-cycle autopay card.
+AUTOPAY_ATTENTION_NOTIFICATION_TYPE = 'autopay_attention'
+AUTOPAY_ATTENTION_UNCONFIRMED_NOTIFICATION_TYPE = 'autopay_attention_unconfirmed'
+EXPIRING_NOTIFICATION_TYPE = 'expiring'
+
+# Cycle-keyed markers for the initial ``SUBSCRIPTION_EXPIRED`` message. The
+# ``end_date`` timestamp in the type makes a retry belong to exactly one
+# subscription cycle: renewal (new end_date) or a stale marker never matches.
+EXPIRED_NOTIFICATION_TYPE = 'expired'
+EXPIRED_RETRY_NOTIFICATION_TYPE_PREFIX = 'expired_retry:'
+EXPIRED_NOTIFICATION_MAX_ATTEMPTS = 3
+
+
+def expired_notification_cycle_token(subscription) -> int | None:
+    """Timestamp of the subscription's current expiry cycle (``end_date``)."""
+    end_date = getattr(subscription, 'end_date', None)
+    if end_date is None:
+        return None
+    if end_date.tzinfo is None:
+        end_date = end_date.replace(tzinfo=UTC)
+    return int(end_date.timestamp())
+
 
 
 @dataclass
@@ -219,6 +268,15 @@ def should_suppress_expiring_notification(
     return 0 <= elapsed < window_seconds
 
 
+def autopay_warning_day(hours_left: float) -> int:
+    """Day number used by the configured warning list: ``ceil(hours / 24)``.
+
+    Clamped to 1 so a tick just after ``end_date`` still maps to the last
+    configured warning day instead of a non-positive number.
+    """
+    return max(1, math.ceil(hours_left / 24.0))
+
+
 def should_merge_autopay_failure_with_expiring(
     *,
     is_final: bool,
@@ -318,29 +376,35 @@ class MonitoringService:
         # недоступности Redis). Ключ — (subscription_id, cycle_token=int(end_date.timestamp())).
         self._autopay_fail_state: dict[tuple[int, int], dict] = {}
 
-    async def _send_message_with_logo(
+    async def _send_message_with_logo_result(
         self,
         chat_id: int | None,
         text: str,
         reply_markup=None,
         parse_mode: str | None = 'HTML',
         user: User | None = None,
-    ):
-        """Отправляет сообщение, добавляя логотип при необходимости."""
+        notification_type: str | None = None,
+    ) -> NotificationDeliveryResult:
+        """Отправляет сообщение, добавляя логотип, и возвращает типизированный исход.
+
+        Rich-отправка не возвращает aiogram ``Message`` — это всё равно ``SENT``.
+        Таймаут отличается от успеха: сообщение могло уйти, поэтому повторять его
+        сразу нельзя.
+        """
         if not self.bot:
             raise RuntimeError('Bot instance is not available')
 
         # Skip email-only users (no telegram_id)
         if not chat_id:
             logger.debug('Пропуск уведомления: chat_id не указан (email-пользователь)')
-            return None
+            return NotificationDeliveryResult(NotificationDeliveryStatus.SKIPPED)
 
-        text = style_notification_text(text)
+        text = style_notification_text(text, notification_type=notification_type)
 
         # Skip blocked/deleted users to save Telegram rate limits
         if user and user.status in (UserStatus.BLOCKED.value, UserStatus.DELETED.value):
             logger.debug('Пропуск уведомления: пользователь недоступен', user_id=user.id, status=user.status)
-            return None
+            return NotificationDeliveryResult(NotificationDeliveryStatus.SKIPPED)
 
         # Rich-путь идёт первым, чтобы уведомления мониторинга выглядели так же, как
         # меню. Логотип не теряется: в rich он вставляется публичной ссылкой в <img>,
@@ -362,9 +426,9 @@ class MonitoringService:
                 chat_id=chat_id,
                 timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
             )
-            return None
+            return NotificationDeliveryResult(NotificationDeliveryStatus.TIMEOUT)
         if sent_rich:
-            return None
+            return NotificationDeliveryResult(NotificationDeliveryStatus.SENT)
 
         if (
             settings.ENABLE_LOGO_MODE
@@ -390,14 +454,14 @@ class MonitoringService:
                     timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
                 )
                 _cache_logo_file_id(result)
-                return result
+                return NotificationDeliveryResult(NotificationDeliveryStatus.SENT, message=result)
             except TimeoutError:
                 logger.warning(
                     'send_photo завис дольше таймаута — пропускаем получателя, цикл продолжается',
                     chat_id=chat_id,
                     timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
                 )
-                return None
+                return NotificationDeliveryResult(NotificationDeliveryStatus.TIMEOUT)
             except TelegramBadRequest as exc:
                 logger.warning(
                     'Не удалось отправить сообщение с логотипом, отправляем текстовое сообщение',
@@ -406,7 +470,7 @@ class MonitoringService:
                 )
 
         try:
-            return await asyncio.wait_for(
+            message = await asyncio.wait_for(
                 self.bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -415,13 +479,34 @@ class MonitoringService:
                 ),
                 timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
             )
+            return NotificationDeliveryResult(NotificationDeliveryStatus.SENT, message=message)
         except TimeoutError:
             logger.warning(
                 'send_message завис дольше таймаута — пропускаем получателя, цикл продолжается',
                 chat_id=chat_id,
                 timeout=settings.MONITORING_NOTIFICATION_SEND_TIMEOUT,
             )
-            return None
+            return NotificationDeliveryResult(NotificationDeliveryStatus.TIMEOUT)
+
+    async def _send_message_with_logo(
+        self,
+        chat_id: int | None,
+        text: str,
+        reply_markup=None,
+        parse_mode: str | None = 'HTML',
+        user: User | None = None,
+        notification_type: str | None = None,
+    ):
+        """Compatibility wrapper: return the aiogram ``Message`` (or ``None``)."""
+        result = await self._send_message_with_logo_result(
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            user=user,
+            notification_type=notification_type,
+        )
+        return result.message
 
     @staticmethod
     def _is_unreachable_error(error: TelegramBadRequest) -> bool:
@@ -519,7 +604,18 @@ class MonitoringService:
                 if expired_offers:
                     logger.info('🧹 Деактивировано просроченных скидочных предложений', expired_offers=expired_offers)
 
-                expired_active_discounts = await cleanup_expired_promo_offer_discounts(db)
+                # Backfill bounded deadlines for legacy NULL wave discounts first:
+                # a matched deadline that is already past must be cleared by the
+                # cleanup call immediately below, in this same cycle.
+                matched_backfills, unmatched_backfills, expired_active_discounts = (
+                    await self._backfill_and_cleanup_promo_offer_discounts(db)
+                )
+                if matched_backfills or unmatched_backfills:
+                    logger.info(
+                        '🧹 Бэкфилл сроков волновых скидок',
+                        matched_backfills=matched_backfills,
+                        unmatched_backfills=unmatched_backfills,
+                    )
                 if expired_active_discounts:
                     logger.info(
                         '🧹 Сброшено активных скидок промо-предложений с истекшим сроком',
@@ -593,6 +689,19 @@ class MonitoringService:
                     pass
                 await db.rollback()
 
+    async def _backfill_and_cleanup_promo_offer_discounts(self, db: AsyncSession) -> tuple[int, int, int]:
+        """Backfill legacy wave deadlines, then clear already expired ones.
+
+        The order is load-bearing: a NULL wave discount matched to a claimed
+        offer whose deadline is already in the past is only cleared when the
+        backfill writes that deadline before ``cleanup_expired_promo_offer_discounts``
+        queries for expired rows.  Returns ``(matched, unmatched, cleared)``.
+        """
+
+        matched, unmatched = await backfill_wave_discount_expiry(db)
+        cleared = await cleanup_expired_promo_offer_discounts(db)
+        return matched, unmatched, cleared
+
     async def _cleanup_notification_cache(self):
         current_time = datetime.now(UTC)
 
@@ -658,70 +767,180 @@ class MonitoringService:
         current_time: datetime,
         *,
         cause: str = 'insufficient_balance',
+        db: AsyncSession | None = None,
     ) -> None:
-        """Send an autopay-failure notification iff policy allows it this tick, then
-        record state. Policy = decide_autopay_fail_notification() + AUTOPAY_FAIL_* config.
+        """Send at most one merged autopay-problem card per expiry cycle.
 
-        `cause` ('charge_error' | 'insufficient_balance') selects the email/non-Telegram
-        reason wording so a non-balance charge failure isn't mislabelled as low balance."""
+        Cadence is governed by persistent ``SentNotification`` markers, not by
+        Redis or the old three-hour merged timestamp. Only an explicit
+        ``insufficient_balance`` failure is user-facing; ``charge_error`` and
+        other system failures stay quiet. A confirmed send covers the cycle;
+        an ambiguous timeout records an unconfirmed terminal attempt so the bot
+        never duplicates a message that Telegram may already have delivered.
+        """
+        if cause != 'insufficient_balance':
+            return
         if not NotificationSettingsService.are_notifications_globally_enabled():
             return
-
-        cycle_token = int(subscription.end_date.timestamp())
-        now_ts = current_time.timestamp()
-        hours_left = (subscription.end_date - current_time).total_seconds() / 3600.0
-
-        state = await self._load_autopay_fail_state(subscription.id, cycle_token)
-        reason = decide_autopay_fail_notification(
-            state,
-            hours_left,
-            now_ts,
-            max_notifications=settings.AUTOPAY_FAIL_MAX_NOTIFICATIONS,
-            final_reminder_hours=settings.AUTOPAY_FAIL_FINAL_REMINDER_HOURS,
-            repeat_interval_hours=settings.AUTOPAY_FAIL_REPEAT_INTERVAL_HOURS,
-        )
-        if reason is None:
+        if not is_subscription_expiry_enabled(user):
             return
 
-        is_final = reason == 'final'
-        days_left = max(1, math.ceil((subscription.end_date - current_time).total_seconds() / 86400))
-        # Пользователь может сузить окно предупреждений; слияние не должно
-        # отправлять карточку «истекает через 3 дня» тому, кто ждёт её за 1 день.
+        hours_left = (subscription.end_date - current_time).total_seconds() / 3600.0
+        days_left = autopay_warning_day(hours_left)
+
         user_expiry_days = get_subscription_expiry_days(user)
-        warning_days = [day for day in settings.get_autopay_warning_days() if day <= user_expiry_days]
-        merge_with_expiry = should_merge_autopay_failure_with_expiring(
-            is_final=is_final,
-            expiry_notifications_enabled=is_subscription_expiry_enabled(user),
-            days_left=days_left,
-            warning_days=warning_days,
-        )
-        sent = False
+        configured_warning_days = settings.get_autopay_warning_days()
+        warning_days = [day for day in configured_warning_days if day <= user_expiry_days]
+        if days_left not in warning_days:
+            return
+
+        # Any attention marker on any configured warning day covers the whole
+        # cycle, including later warning days.
+        if db is not None:
+            for day in configured_warning_days:
+                if await notification_sent(
+                    db, user.id, subscription.id, AUTOPAY_ATTENTION_NOTIFICATION_TYPE, day
+                ):
+                    return
+                if await notification_sent(
+                    db, user.id, subscription.id, AUTOPAY_ATTENTION_UNCONFIRMED_NOTIFICATION_TYPE, day
+                ):
+                    return
+
+        status: NotificationDeliveryStatus
         if user.telegram_id and self.bot:
-            sent = await self._send_autopay_failed_notification(
+            status = await self._send_autopay_failed_notification_result(
                 user,
                 int(getattr(user, 'balance_kopeks', 0) or 0),
                 charge_amount,
                 subscription=subscription,
-                is_final=is_final,
-                merge_with_expiry=merge_with_expiry,
+                merge_with_expiry=True,
             )
         elif not user.telegram_id:
-            if is_final:
-                reason_text = 'Последнее напоминание: подписка скоро отключится — недостаточно средств'
-            elif cause == 'charge_error':
-                reason_text = 'Ошибка списания средств'
-            else:
-                reason_text = 'Недостаточно средств на балансе'
-            await notification_delivery_service.notify_autopay_failed(user=user, reason=reason_text)
+            delivered = await notification_delivery_service.notify_autopay_failed(
+                user=user,
+                reason='Недостаточно средств на балансе',
+            )
+            status = NotificationDeliveryStatus.SENT if delivered else NotificationDeliveryStatus.FAILED
+        else:
+            status = NotificationDeliveryStatus.SKIPPED
 
-        apply_autopay_fail_notification(state, reason, now_ts)
-        if merge_with_expiry and user.telegram_id and sent:
-            state.merged_expiring_ts = now_ts
-        ttl_seconds = int(max(0.0, hours_left) * 3600) + 72 * 3600
-        await self._save_autopay_fail_state(subscription.id, cycle_token, state, ttl_seconds)
+        if db is None:
+            return
+        if status == NotificationDeliveryStatus.SENT:
+            await record_notification(
+                db,
+                user.id,
+                subscription.id,
+                AUTOPAY_ATTENTION_NOTIFICATION_TYPE,
+                days_left,
+            )
+            # The merged card also covers the planned-expiry warning for this day.
+            await record_notification(
+                db,
+                user.id,
+                subscription.id,
+                EXPIRING_NOTIFICATION_TYPE,
+                days_left,
+            )
+        elif status == NotificationDeliveryStatus.TIMEOUT:
+            await record_notification(
+                db,
+                user.id,
+                subscription.id,
+                AUTOPAY_ATTENTION_UNCONFIRMED_NOTIFICATION_TYPE,
+                days_left,
+            )
+
+    async def _retry_expired_notifications(self, db: AsyncSession) -> None:
+        """Recover explicitly pending initial-expired sends on a later cycle.
+
+        Only rows created by the initial bot path are considered; an old
+        EXPIRED subscription without a cycle-keyed marker is never notified
+        retroactively. The pending marker stores the attempt about to be made,
+        so a restart cannot lose or extend the three-attempt budget.
+        """
+        try:
+            pending_markers = await get_notifications_by_type_prefix(db, EXPIRED_RETRY_NOTIFICATION_TYPE_PREFIX)
+        except Exception:
+            logger.exception('Не удалось загрузить отложенные уведомления об истечении подписки')
+            return
+
+        # Plain tuples: a rollback below expires ORM instances, and the next
+        # iteration must not trigger a lazy load on a detached marker.
+        pending_work = [
+            (marker.subscription_id, marker.notification_type, marker.days_before) for marker in pending_markers
+        ]
+        for subscription_id, pending_type, pending_days_before in pending_work:
+            # ``days_before`` is the last attempt that was started (the marker
+            # is committed before the network call). A crash mid-send therefore
+            # leaves that attempt on disk; recovery consumes it and moves to the
+            # next one instead of repeating it, so a persistent crash cannot
+            # loop on one send or exceed three actual sends.
+            try:
+                last_consumed_attempt = int(pending_days_before or 0)
+            except (TypeError, ValueError):
+                last_consumed_attempt = 0
+            last_consumed_attempt = max(last_consumed_attempt, 0)
+            if last_consumed_attempt >= EXPIRED_NOTIFICATION_MAX_ATTEMPTS:
+                try:
+                    await clear_notification_by_type(db, subscription_id, pending_type)
+                except Exception:
+                    logger.exception(
+                        'Не удалось снять исчерпавший лимит маркер повтора уведомления об истечении подписки',
+                        subscription_id=subscription_id,
+                    )
+                continue
+            attempt = last_consumed_attempt + 1
+
+            try:
+                subscription = await _reload_subscription(db, subscription_id)
+                cycle_token = expired_notification_cycle_token(subscription) if subscription is not None else None
+                if (
+                    subscription is None
+                    or subscription.status != SubscriptionStatus.EXPIRED.value
+                    or cycle_token is None
+                    or pending_type != f'{EXPIRED_RETRY_NOTIFICATION_TYPE_PREFIX}{cycle_token}'
+                ):
+                    # Renewed, no longer EXPIRED, or an older end_date cycle:
+                    # defense in depth on top of renewal's clear_notifications.
+                    await clear_notification_by_type(db, subscription_id, pending_type)
+                    continue
+
+                user = subscription.user
+                if (
+                    user is None
+                    or not getattr(user, 'telegram_id', None)
+                    or not self.bot
+                    or not NotificationSettingsService.are_notifications_globally_enabled()
+                    or not is_subscription_expiry_enabled(user)
+                ):
+                    await clear_notification_by_type(db, subscription_id, pending_type)
+                    continue
+
+                tariff_name = subscription.tariff.name if getattr(subscription, 'tariff', None) else None
+                price_kopeks = await self._resolve_renewal_cost_kopeks(db, subscription, user)
+                await self._deliver_expired_notification_attempt(
+                    db,
+                    user,
+                    subscription,
+                    attempt=attempt,
+                    tariff_name=tariff_name,
+                    price_kopeks=price_kopeks,
+                )
+            except Exception:
+                logger.exception(
+                    'Не удалось повторить уведомление об истечении подписки',
+                    subscription_id=subscription_id,
+                )
+                await db.rollback()
 
     async def _check_expired_subscriptions(self, db: AsyncSession):
         try:
+            # Retries must run before new expirations are processed: a
+            # subscription that expires during this very cycle gets its first
+            # attempt below and is never retried immediately.
+            await self._retry_expired_notifications(db)
             expired_subscriptions = await get_expired_subscriptions(db)
 
             rolled_back = False
@@ -802,7 +1021,8 @@ class MonitoringService:
                 skip_notify = skip_notify or other_active.scalar_one_or_none() is not None
             if not skip_notify:
                 price_kopeks = await self._resolve_renewal_cost_kopeks(db, subscription, user)
-                await self._send_subscription_expired_notification(
+                await self._send_initial_expired_notification(
+                    db,
                     user,
                     subscription,
                     tariff_name=_tariff_name,
@@ -1022,16 +1242,30 @@ class MonitoringService:
             logger.error('Ошибка обновления RemnaWave пользователя', error=e)
             return None
 
-    async def _resolve_renewal_cost_kopeks(self, db: AsyncSession, subscription: Subscription, user: User) -> int:
-        """Цена продления для уведомления — та же, что попытается списать автоплатёж."""
+    @staticmethod
+    def _resolve_renewal_period_days(subscription: Subscription) -> int:
+        """Период продления: автоплатёж → дефолт → кратчайший тариф → 30 дней.
+
+        Общий для цены продления и превью скидочной волны: карточка должна
+        называть ровно тот период, который выбрал бы автоплатёж/продление.
+        """
         tariff = getattr(subscription, 'tariff', None)
         try:
-            period = (
-                resolve_autopay_period_candidate(getattr(subscription, 'autopay_period_days', None), tariff)
-                or resolve_autopay_period_candidate(getattr(settings, 'DEFAULT_AUTOPAY_PERIOD_DAYS', 0), tariff)
-                or (tariff.get_shortest_period() if tariff else None)
-                or 30
-            )
+            shortest_period = tariff.get_shortest_period() if tariff is not None else None
+        except Exception:
+            shortest_period = None
+
+        return (
+            resolve_autopay_period_candidate(getattr(subscription, 'autopay_period_days', None), tariff)
+            or resolve_autopay_period_candidate(getattr(settings, 'DEFAULT_AUTOPAY_PERIOD_DAYS', 0), tariff)
+            or shortest_period
+            or 30
+        )
+
+    async def _resolve_renewal_cost_kopeks(self, db: AsyncSession, subscription: Subscription, user: User) -> int:
+        """Цена продления для уведомления — та же, что попытается списать автоплатёж."""
+        try:
+            period = self._resolve_renewal_period_days(subscription)
             from app.services.pricing_engine import pricing_engine
 
             pricing = await pricing_engine.calculate_renewal_price(db, subscription, period, user=user)
@@ -1076,6 +1310,12 @@ class MonitoringService:
                     if days > user_expiry_days:
                         continue
 
+                    # Autopay-enabled subscriptions use the event-driven
+                    # failure/expiry cadence; the generic planned warning (OK/SHORT)
+                    # is skipped entirely, not merely deduplicated.
+                    if getattr(subscription, 'autopay_enabled', False):
+                        continue
+
                     # Use user.id + subscription.id for key to support multiple subscriptions per user
                     sub_key = f'user_{user.id}_sub_{subscription.id}_today'
                     user_identifier = user.telegram_id or f'email:{user.id}'
@@ -1107,22 +1347,6 @@ class MonitoringService:
 
                     if not should_send:
                         continue
-
-                    # Объединённая карточка об ошибке автоплатежа уже содержит дату и
-                    # сумму — не дублируем её плановым предупреждением в том же окне.
-                    if user.telegram_id and subscription.autopay_enabled:
-                        cycle_token = int(subscription.end_date.timestamp())
-                        fail_state = await self._load_autopay_fail_state(subscription.id, cycle_token)
-                        if should_suppress_expiring_notification(
-                            fail_state.merged_expiring_ts,
-                            datetime.now(UTC).timestamp(),
-                        ):
-                            logger.info(
-                                'Пропуск планового предупреждения: объединённая карточка уже отправлена',
-                                user_identifier=user_identifier,
-                                days=days,
-                            )
-                            continue
 
                     # Handle email-only users via notification delivery service
                     if not user.telegram_id:
@@ -1629,8 +1853,15 @@ class MonitoringService:
 
                 # Second wave (2-3 days) discount
                 if NotificationSettingsService.is_second_wave_enabled() and 2 <= days_since < 4:
-                    if not await notification_sent(db, user.id, subscription.id, 'expired_discount_wave2'):
-                        percent = NotificationSettingsService.get_second_wave_discount_percent()
+                    percent = NotificationSettingsService.get_second_wave_discount_percent()
+                    if get_user_active_promo_discount_percent(user) >= percent:
+                        logger.debug(
+                            'Пропускаем вторую волну: активна не меньшая личная скидка',
+                            user_id=user.id,
+                            active_percent=get_user_active_promo_discount_percent(user),
+                            wave_percent=percent,
+                        )
+                    elif not await notification_sent(db, user.id, subscription.id, 'expired_discount_wave2'):
                         valid_hours = NotificationSettingsService.get_second_wave_valid_hours()
                         offer = await upsert_discount_offer(
                             db,
@@ -1659,8 +1890,15 @@ class MonitoringService:
                 if NotificationSettingsService.is_third_wave_enabled():
                     trigger_days = NotificationSettingsService.get_third_wave_trigger_days()
                     if trigger_days <= days_since < trigger_days + 1:
-                        if not await notification_sent(db, user.id, subscription.id, 'expired_discount_wave3'):
-                            percent = NotificationSettingsService.get_third_wave_discount_percent()
+                        percent = NotificationSettingsService.get_third_wave_discount_percent()
+                        if get_user_active_promo_discount_percent(user) >= percent:
+                            logger.debug(
+                                'Пропускаем третью волну: активна не меньшая личная скидка',
+                                user_id=user.id,
+                                active_percent=get_user_active_promo_discount_percent(user),
+                                wave_percent=percent,
+                            )
+                        elif not await notification_sent(db, user.id, subscription.id, 'expired_discount_wave3'):
                             valid_hours = NotificationSettingsService.get_third_wave_valid_hours()
                             offer = await upsert_discount_offer(
                                 db,
@@ -2132,7 +2370,7 @@ class MonitoringService:
                         else:
                             failed_count += 1
                             await self._maybe_notify_autopay_failure(
-                                user, charge_amount, subscription, current_time, cause='charge_error'
+                                user, charge_amount, subscription, current_time, cause='charge_error', db=db
                             )
                             logger.warning(
                                 '💳 Ошибка списания средств для автопродления пользователя',
@@ -2140,7 +2378,9 @@ class MonitoringService:
                             )
                     else:
                         failed_count += 1
-                        await self._maybe_notify_autopay_failure(user, charge_amount, subscription, current_time)
+                        await self._maybe_notify_autopay_failure(
+                            user, charge_amount, subscription, current_time, db=db
+                        )
                         logger.warning(
                             '💳 Недостаточно средств для автопродления у пользователя',
                             user_identifier=user_identifier,
@@ -2178,21 +2418,27 @@ class MonitoringService:
         except Exception as e:
             logger.error('Ошибка обработки автоплатежей', error=e, exc_info=True)
 
-    async def _send_subscription_expired_notification(
+    async def _send_subscription_expired_notification_result(
         self,
         user: User,
         subscription: Subscription,
         *,
         tariff_name: str | None = None,
         price_kopeks: int | None = None,
-    ) -> bool:
+    ) -> NotificationDeliveryStatus:
+        """Send the initial expired card and report the typed delivery outcome.
+
+        Timeouts are deliberately ``TIMEOUT`` (unconfirmed), so the caller can
+        schedule bounded later-cycle recovery instead of an immediate duplicate.
+        """
         try:
             if not user.telegram_id:
-                return await notification_delivery_service.send_notification(
+                delivered = await notification_delivery_service.send_notification(
                     user=user,
                     notification_type=NotificationType.SUBSCRIPTION_EXPIRED,
                     context={'tariff_name': tariff_name or ''},
                 )
+                return NotificationDeliveryStatus.SENT if delivered else NotificationDeliveryStatus.FAILED
             texts = get_texts(getattr(user, 'language', 'ru'))
             price = int(price_kopeks) if price_kopeks is not None else int(getattr(settings, 'PRICE_30_DAYS', 0) or 0)
             tariff_label = ''
@@ -2233,28 +2479,158 @@ class MonitoringService:
                 ]
             )
 
-            await self._send_message_with_logo(
+            result = await self._send_message_with_logo_result(
                 chat_id=user.telegram_id,
                 text=message,
                 parse_mode='HTML',
                 reply_markup=keyboard,
+                user=user,
             )
-            return True
+            return result.status
 
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             if await self._handle_unreachable_user(user, exc, 'уведомление об истечении подписки'):
-                return True
+                return NotificationDeliveryStatus.UNREACHABLE
+
+            # A rejected payload is permanent: resending the same message cannot
+            # fix it, so it is classified with the other non-retryable outcomes.
             logger.error(
-                'Ошибка Telegram API при отправке уведомления об истечении подписки пользователю',
+                'Постоянная ошибка Telegram API при отправке уведомления об истечении подписки пользователю',
                 telegram_id=user.telegram_id,
                 exc=exc,
             )
-            return False
+            return NotificationDeliveryStatus.UNREACHABLE
+        except TelegramNetworkError as e:
+            logger.warning(
+                'Сетевая ошибка при отправке уведомления об истечении подписки пользователю',
+                telegram_id=user.telegram_id,
+                e=e,
+            )
+            return NotificationDeliveryStatus.TIMEOUT
         except Exception as e:
             logger.error(
                 'Ошибка отправки уведомления об истечении подписки пользователю', telegram_id=user.telegram_id, e=e
             )
-            return False
+            return NotificationDeliveryStatus.FAILED
+
+    async def _send_subscription_expired_notification(
+        self,
+        user: User,
+        subscription: Subscription,
+        *,
+        tariff_name: str | None = None,
+        price_kopeks: int | None = None,
+    ) -> bool:
+        """Compatibility wrapper: ``True`` unless the send explicitly failed."""
+        status = await self._send_subscription_expired_notification_result(
+            user,
+            subscription,
+            tariff_name=tariff_name,
+            price_kopeks=price_kopeks,
+        )
+        return status != NotificationDeliveryStatus.FAILED
+
+    async def _send_initial_expired_notification(
+        self,
+        db: AsyncSession,
+        user: User,
+        subscription: Subscription,
+        *,
+        tariff_name: str | None = None,
+        price_kopeks: int | None = None,
+    ) -> NotificationDeliveryStatus:
+        """First attempt of a cycle; creates the persistent pending marker."""
+        return await self._deliver_expired_notification_attempt(
+            db,
+            user,
+            subscription,
+            attempt=1,
+            tariff_name=tariff_name,
+            price_kopeks=price_kopeks,
+        )
+
+    async def _deliver_expired_notification_attempt(
+        self,
+        db: AsyncSession,
+        user: User,
+        subscription: Subscription,
+        *,
+        attempt: int,
+        tariff_name: str | None = None,
+        price_kopeks: int | None = None,
+    ) -> NotificationDeliveryStatus:
+        """Persist the attempt budget, send, then apply the typed outcome."""
+        cycle_token = expired_notification_cycle_token(subscription)
+        is_telegram_attempt = bool(getattr(user, 'telegram_id', None)) and bool(self.bot)
+        pending_type = (
+            f'{EXPIRED_RETRY_NOTIFICATION_TYPE_PREFIX}{cycle_token}' if cycle_token is not None else None
+        )
+
+        if is_telegram_attempt and pending_type is not None:
+            # Written before the network call: a crash mid-send leaves the
+            # attempt budget on disk instead of silently resetting it.
+            await clear_notification_by_type(db, subscription.id, pending_type, commit=False)
+            await record_notification(db, user.id, subscription.id, pending_type, attempt, commit=False)
+            await db.commit()
+
+        status = await self._send_subscription_expired_notification_result(
+            user,
+            subscription,
+            tariff_name=tariff_name,
+            price_kopeks=price_kopeks,
+        )
+
+        if is_telegram_attempt and pending_type is not None:
+            await self._apply_expired_notification_outcome(
+                db,
+                user,
+                subscription,
+                attempt=attempt,
+                pending_type=pending_type,
+                status=status,
+            )
+        return status
+
+    async def _apply_expired_notification_outcome(
+        self,
+        db: AsyncSession,
+        user: User,
+        subscription: Subscription,
+        *,
+        attempt: int,
+        pending_type: str,
+        status: NotificationDeliveryStatus,
+    ) -> None:
+        """Update cycle markers according to a single delivery outcome."""
+        cycle_token = expired_notification_cycle_token(subscription)
+        if cycle_token is None:
+            return
+        confirmed_type = f'{EXPIRED_NOTIFICATION_TYPE}:{cycle_token}'
+
+        if status == NotificationDeliveryStatus.SENT:
+            # Pending removal and confirmation land in one transaction: a
+            # confirmed cycle can never keep a retry marker behind.
+            await clear_notification_by_type(db, subscription.id, pending_type, commit=False)
+            await record_notification(db, user.id, subscription.id, confirmed_type, None, commit=False)
+            await db.commit()
+        elif status in (NotificationDeliveryStatus.FAILED, NotificationDeliveryStatus.TIMEOUT):
+            # For a retryable outcome the marker already records this attempt
+            # as consumed: it was committed before the network call. Leaving it
+            # untouched lets recovery advance to ``attempt + 1``. Rewriting it
+            # here would open a crash window in which the same send repeats.
+            if attempt >= EXPIRED_NOTIFICATION_MAX_ATTEMPTS:
+                await clear_notification_by_type(db, subscription.id, pending_type)
+                logger.error(
+                    'Уведомление об истечении подписки не доставлено за три попытки — повторы прекращены',
+                    user_id=user.id,
+                    subscription_id=subscription.id,
+                    cycle_token=cycle_token,
+                    last_status=str(status),
+                )
+        else:
+            # UNREACHABLE/SKIPPED: blocked, deactivated or a permanent Telegram
+            # rejection — nothing to retry in this cycle.
+            await clear_notification_by_type(db, subscription.id, pending_type)
 
     async def _send_subscription_expiring_notification(
         self,
@@ -2645,6 +3021,18 @@ class MonitoringService:
         db: AsyncSession | None = None,
     ) -> bool:
         try:
+            # Не понижаем уже активную не меньшую личную скидку: волна не создаётся
+            # (проверка в цикле follow-up) и не отправляется даже при прямом вызове.
+            if get_user_active_promo_discount_percent(user) >= int(percent):
+                logger.debug(
+                    'Пропускаем скидочную волну: активна не меньшая личная скидка',
+                    user_id=getattr(user, 'id', None),
+                    wave=wave,
+                    active_percent=get_user_active_promo_discount_percent(user),
+                    wave_percent=percent,
+                )
+                return False
+
             if not user.telegram_id:
                 return await notification_delivery_service.send_notification(
                     user=user,
@@ -2661,19 +3049,33 @@ class MonitoringService:
             if settings.is_multi_tariff_enabled() and hasattr(subscription, 'tariff') and subscription.tariff:
                 tariff_label = f' «{subscription.tariff.name}»'
 
-            base_price = (
-                await self._resolve_renewal_cost_kopeks(db, subscription, user)
-                if db is not None
-                else max(0, int(getattr(settings, 'PRICE_30_DAYS', 0) or 0))
-            )
-            discounted_price = int(round(base_price * (100 - max(0, min(100, int(percent)))) / 100))
+            period_days = self._resolve_renewal_period_days(subscription)
+            if db is not None:
+                from app.services.pricing_engine import pricing_engine
+
+                pricing = await pricing_engine.calculate_renewal_price(
+                    db,
+                    subscription,
+                    period_days,
+                    user=user,
+                    promo_offer_percent_override=percent,
+                )
+                discounted_price = max(0, int(pricing.final_total))
+            else:
+                from app.services.pricing_engine import PricingEngine
+
+                discounted_price = PricingEngine.apply_discount(
+                    max(0, int(getattr(settings, 'PRICE_30_DAYS', 0) or 0)),
+                    percent,
+                )
 
             template = texts.get(
                 'SUBSCRIPTION_EXPIRED_SECOND_WAVE' if wave == 'second' else 'SUBSCRIPTION_EXPIRED_THIRD_WAVE',
                 (
-                    '⚠️ <b>Скидка {percent} % на продление подписки{tariff_label}</b>\n\n'
-                    'Действует до <b>{expires_at}</b>\n'
-                    'Цена со скидкой: <b>{discounted_price}</b>\n\n'
+                    '<tg-emoji emoji-id="5303040337059543238">⚠️</tg-emoji> '
+                    '<b>Скидка {percent}% на продление подписки{tariff_label}</b>\n\n'
+                    'Активируйте и используйте до <b>{expires_at}</b>\n'
+                    'Цена со скидкой за {period}: <b>{discounted_price}</b>\n\n'
                     'Заберите скидку и продлите доступ.'
                 ),
             )
@@ -2682,6 +3084,7 @@ class MonitoringService:
                 percent=percent,
                 expires_at=format_local_datetime(expires_at, '%d.%m.%Y %H:%M'),
                 discounted_price=settings.format_price(discounted_price),
+                period=format_period_description(period_days, getattr(user, 'language', 'ru')),
                 trigger_days=trigger_days or '',
                 tariff_label=tariff_label,
             )
@@ -2695,7 +3098,7 @@ class MonitoringService:
                             text=texts.t('CLAIM_DISCOUNT_BUTTON', 'Получить скидку'),
                             callback_data=f'claim_discount_{offer_id}',
                             style='primary',
-                            icon_custom_emoji_id='5334552404736104314',
+                            icon_custom_emoji_id='5235695112419303615',
                         )
                     ],
                     [
@@ -2713,6 +3116,7 @@ class MonitoringService:
                 text=message,
                 parse_mode='HTML',
                 reply_markup=keyboard,
+                notification_type=('expired_discount_wave2' if wave == 'second' else 'expired_discount_wave3'),
             )
             return True
 
@@ -2737,6 +3141,7 @@ class MonitoringService:
     ):
         try:
             from app.utils.formatters import format_days_declension
+            from app.utils.miniapp_buttons import build_notification_main_menu_keyboard
 
             texts = get_texts(getattr(user, 'language', 'ru'))
             days_text = format_days_declension(days, getattr(user, 'language', 'ru'))
@@ -2764,6 +3169,9 @@ class MonitoringService:
                 chat_id=user.telegram_id,
                 text=message,
                 parse_mode='HTML',
+                reply_markup=build_notification_main_menu_keyboard(
+                    texts.t('MAIN_MENU_BUTTON', 'Главное меню')
+                ),
             )
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
             if not await self._handle_unreachable_user(user, exc, 'уведомление об успешном автоплатеже'):
@@ -2779,7 +3187,7 @@ class MonitoringService:
         except Exception as e:
             logger.error('Ошибка отправки уведомления об автоплатеже пользователю', telegram_id=user.telegram_id, e=e)
 
-    async def _send_autopay_failed_notification(
+    async def _send_autopay_failed_notification_result(
         self,
         user: User,
         balance: int,
@@ -2788,7 +3196,14 @@ class MonitoringService:
         subscription: Subscription | None = None,
         is_final: bool = False,
         merge_with_expiry: bool = False,
-    ):
+    ) -> NotificationDeliveryStatus:
+        """Send the autopay-failure card and report the typed delivery outcome.
+
+        ``is_final`` and the standalone ``AUTOPAY_FAILED`` template are kept for
+        dormant compatibility; the active cadence only sends the merged card.
+        """
+        if not getattr(user, 'telegram_id', None):
+            return NotificationDeliveryStatus.SKIPPED
         try:
             from app.utils.formatters import format_days_declension
 
@@ -2804,7 +3219,8 @@ class MonitoringService:
                 )
             elif merge_with_expiry and subscription is not None:
                 template_key = 'AUTOPAY_FAILED_MERGED'
-                days_left = max(1, math.ceil((subscription.end_date - datetime.now(UTC)).total_seconds() / 86400))
+                hours_left = (subscription.end_date - datetime.now(UTC)).total_seconds() / 3600.0
+                days_left = autopay_warning_day(hours_left)
                 days_text = format_days_declension(days_left, getattr(user, 'language', 'ru'))
                 default = (
                     '\n⚠️ <b>Подписка{tariff_label} истекает через {days_text} — автоплатёж не прошёл</b>\n\n'
@@ -2869,32 +3285,54 @@ class MonitoringService:
             rows.append([sub_button])
             keyboard = InlineKeyboardMarkup(inline_keyboard=rows)
 
-            await self._send_message_with_logo(
+            result = await self._send_message_with_logo_result(
                 chat_id=user.telegram_id,
                 text=message,
                 parse_mode='HTML',
                 reply_markup=keyboard,
             )
-            return True
+            return result.status
 
         except (TelegramForbiddenError, TelegramBadRequest) as exc:
-            if not await self._handle_unreachable_user(user, exc, 'уведомление о неудачном автоплатеже'):
-                logger.error(
-                    'Ошибка Telegram API при отправке уведомления о неудачном автоплатеже пользователю',
-                    telegram_id=user.telegram_id,
-                    exc=exc,
-                )
-            return False
+            if await self._handle_unreachable_user(user, exc, 'уведомление о неудачном автоплатеже'):
+                return NotificationDeliveryStatus.UNREACHABLE
+            logger.error(
+                'Ошибка Telegram API при отправке уведомления о неудачном автоплатеже пользователю',
+                telegram_id=user.telegram_id,
+                exc=exc,
+            )
+            return NotificationDeliveryStatus.FAILED
         except TelegramNetworkError as e:
             logger.warning(
                 'Таймаут отправки уведомления о неудачном автоплатеже пользователю', telegram_id=user.telegram_id, e=e
             )
-            return False
+            return NotificationDeliveryStatus.TIMEOUT
         except Exception as e:
             logger.error(
                 'Ошибка отправки уведомления о неудачном автоплатеже пользователю', telegram_id=user.telegram_id, e=e
             )
-            return False
+            return NotificationDeliveryStatus.FAILED
+
+    async def _send_autopay_failed_notification(
+        self,
+        user: User,
+        balance: int,
+        required: int,
+        *,
+        subscription: Subscription | None = None,
+        is_final: bool = False,
+        merge_with_expiry: bool = False,
+    ) -> bool:
+        """Compatibility wrapper: True only when delivery was confirmed."""
+        status = await self._send_autopay_failed_notification_result(
+            user,
+            balance,
+            required,
+            subscription=subscription,
+            is_final=is_final,
+            merge_with_expiry=merge_with_expiry,
+        )
+        return status == NotificationDeliveryStatus.SENT
 
     async def _retry_stuck_guest_purchases(self, db: AsyncSession):
         from app.services.guest_purchase_service import (

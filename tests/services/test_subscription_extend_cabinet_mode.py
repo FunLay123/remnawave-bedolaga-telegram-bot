@@ -167,12 +167,18 @@ def test_call_sites_do_not_build_extend_callback_by_hand(module_name: str) -> No
 
 async def test_expired_notification_keyboard_opens_cabinet(cabinet_mode) -> None:
     """Сквозная проверка на том самом уведомлении из отчёта пользователя."""
-    from app.services.monitoring_service import MonitoringService
+    from app.services.monitoring_service import (
+        MonitoringService,
+        NotificationDeliveryResult,
+        NotificationDeliveryStatus,
+    )
 
     _multi_tariff(cabinet_mode, True)
 
     service = MonitoringService.__new__(MonitoringService)
-    service._send_message_with_logo = AsyncMock()
+    service._send_message_with_logo_result = AsyncMock(
+        return_value=NotificationDeliveryResult(NotificationDeliveryStatus.SENT)
+    )
 
     user = SimpleNamespace(telegram_id=1, language='ru', id=7)
     subscription = SimpleNamespace(id=42, tariff=None)
@@ -180,7 +186,7 @@ async def test_expired_notification_keyboard_opens_cabinet(cabinet_mode) -> None
     sent = await service._send_subscription_expired_notification(user, subscription, tariff_name='Базовый')
 
     assert sent is True
-    keyboard = service._send_message_with_logo.await_args.kwargs['reply_markup']
+    keyboard = service._send_message_with_logo_result.await_args.kwargs['reply_markup']
     buttons: list[InlineKeyboardButton] = [b for row in keyboard.inline_keyboard for b in row]
 
     assert all(b.web_app is not None for b in buttons), (

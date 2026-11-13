@@ -348,53 +348,66 @@ async def test_autopay_failure_real_locale_body_has_no_emoji_or_block_markup(mon
     assert '<table' not in sent_text
 
 
-async def test_maybe_notify_autopay_failure_marks_merged_expiring(monkeypatch):
+def _install_cycle_markers(monkeypatch) -> set[tuple]:
     from app.services import monitoring_service as ms
 
+    markers: set[tuple] = set()
+
+    async def fake_sent(db, user_id, subscription_id, notification_type, days_before=None):
+        return (user_id, subscription_id, notification_type, days_before) in markers
+
+    async def fake_record(db, user_id, subscription_id, notification_type, days_before=None, *, commit=True):
+        markers.add((user_id, subscription_id, notification_type, days_before))
+
+    monkeypatch.setattr(settings, 'AUTOPAY_WARNING_DAYS', '3,1')
+    monkeypatch.setattr(
+        ms.NotificationSettingsService,
+        'are_notifications_globally_enabled',
+        classmethod(lambda cls: True),
+    )
+    monkeypatch.setattr(ms, 'notification_sent', fake_sent)
+    monkeypatch.setattr(ms, 'record_notification', fake_record)
+    return markers
+
+
+async def test_maybe_notify_autopay_failure_records_confirmed_attention(monkeypatch):
+    from app.services import monitoring_service as ms
+
+    markers = _install_cycle_markers(monkeypatch)
     service = MonitoringService(bot=object())
-    saved: dict = {}
-
-    async def fake_save(subscription_id, cycle_token, state, ttl_seconds):
-        saved.update(state.to_dict())
-
-    monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
-    monkeypatch.setattr(service, '_save_autopay_fail_state', fake_save)
-    monkeypatch.setattr(service, '_send_autopay_failed_notification', AsyncMock(return_value=True))
+    send = AsyncMock(return_value=ms.NotificationDeliveryStatus.SENT)
+    monkeypatch.setattr(service, '_send_autopay_failed_notification_result', send)
     monkeypatch.setattr(ms, 'is_subscription_expiry_enabled', lambda _user: True)
 
     now = datetime.now(UTC)
     user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0, notification_settings={})
-    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=40))
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=72), autopay_enabled=True)
 
-    await service._maybe_notify_autopay_failure(user, 15000, sub, now)
+    await service._maybe_notify_autopay_failure(user, 15000, sub, now, db=object())
 
-    assert saved['merged_expiring_ts'] == now.timestamp()
-    service._send_autopay_failed_notification.assert_awaited_once()
-    assert service._send_autopay_failed_notification.await_args.kwargs['merge_with_expiry'] is True
+    send.assert_awaited_once()
+    assert send.await_args.kwargs['merge_with_expiry'] is True
+    assert markers == {(1, 7, 'autopay_attention', 3), (1, 7, 'expiring', 3)}
 
 
-async def test_maybe_notify_final_does_not_mark_merged_expiring(monkeypatch):
+async def test_maybe_notify_inside_final_window_sends_merged_not_final(monkeypatch):
     from app.services import monitoring_service as ms
 
+    markers = _install_cycle_markers(monkeypatch)
     service = MonitoringService(bot=object())
-    saved: dict = {}
-
-    async def fake_save(subscription_id, cycle_token, state, ttl_seconds):
-        saved.update(state.to_dict())
-
-    monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
-    monkeypatch.setattr(service, '_save_autopay_fail_state', fake_save)
-    monkeypatch.setattr(service, '_send_autopay_failed_notification', AsyncMock())
+    send = AsyncMock(return_value=ms.NotificationDeliveryStatus.SENT)
+    monkeypatch.setattr(service, '_send_autopay_failed_notification_result', send)
     monkeypatch.setattr(ms, 'is_subscription_expiry_enabled', lambda _user: True)
 
     now = datetime.now(UTC)
     user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0, notification_settings={})
-    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=2))
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=2), autopay_enabled=True)
 
-    await service._maybe_notify_autopay_failure(user, 15000, sub, now)
+    await service._maybe_notify_autopay_failure(user, 15000, sub, now, db=object())
 
-    assert saved['merged_expiring_ts'] == 0.0
-    assert service._send_autopay_failed_notification.await_args.kwargs['merge_with_expiry'] is False
+    send.assert_awaited_once()
+    assert send.await_args.kwargs.get('is_final', False) is False
+    assert markers == {(1, 7, 'autopay_attention', 1), (1, 7, 'expiring', 1)}
 
 
 # ── Planned warning: suppression after merge + required price passed through ─
@@ -438,14 +451,9 @@ async def _run_expiring_check(monkeypatch, service, subscription, user):
     await service._check_expiring_subscriptions(db)
 
 
-async def test_expiring_warning_is_suppressed_after_merged_card(monkeypatch):
+async def test_expiring_warning_is_skipped_for_autopay_enabled(monkeypatch):
     service = MonitoringService(bot=object())
     subscription, user = _planned_warning_fixtures()
-    monkeypatch.setattr(
-        service,
-        '_load_autopay_fail_state',
-        AsyncMock(return_value=AutopayFailState(count=1, merged_expiring_ts=datetime.now(UTC).timestamp())),
-    )
     service._send_subscription_expiring_notification = AsyncMock()
 
     await _run_expiring_check(monkeypatch, service, subscription, user)
@@ -456,7 +464,7 @@ async def test_expiring_warning_is_suppressed_after_merged_card(monkeypatch):
 async def test_expiring_warning_passes_required_price(monkeypatch):
     service = MonitoringService(bot=object())
     subscription, user = _planned_warning_fixtures()
-    monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
+    subscription.autopay_enabled = False
     monkeypatch.setattr(service, '_resolve_renewal_cost_kopeks', AsyncMock(return_value=15000))
     service._send_subscription_expiring_notification = AsyncMock(return_value=True)
 
@@ -543,7 +551,10 @@ async def test_discount_wave_has_discounted_price_and_two_buttons(monkeypatch):
     _set_sender_settings(monkeypatch)
     bot = _sender_bot()
     service = MonitoringService(bot=bot)
-    monkeypatch.setattr(service, '_resolve_renewal_cost_kopeks', AsyncMock(return_value=15000))
+    from app.services import pricing_engine as pricing_engine_module
+
+    calculate = AsyncMock(return_value=SimpleNamespace(final_total=13500))
+    monkeypatch.setattr(pricing_engine_module.pricing_engine, 'calculate_renewal_price', calculate)
 
     result = await service._send_expired_discount_notification(
         db=SimpleNamespace(),
@@ -557,12 +568,12 @@ async def test_discount_wave_has_discounted_price_and_two_buttons(monkeypatch):
 
     assert result is True
     text = bot.send_message.await_args.kwargs['text']
-    assert 'Скидка 10 %' in text
-    assert 'Цена со скидкой' in text
+    assert 'Скидка 10%' in text
+    assert 'Цена со скидкой за 1 месяц' in text
     assert '135 ₽' in text
     buttons = _buttons(bot)
     assert buttons['claim_discount_1'].style == 'primary'
-    assert buttons['claim_discount_1'].icon_custom_emoji_id == '5334552404736104314'
+    assert buttons['claim_discount_1'].icon_custom_emoji_id == '5235695112419303615'
     assert buttons['balance_topup'].icon_custom_emoji_id == '5258500422393415126'
     assert 'subscription_extend' not in buttons
 
@@ -585,6 +596,26 @@ async def test_autopay_success_uses_new_text(monkeypatch):
     assert 'Списано' in text
     assert 'баланс' in text
     assert '150 ₽' in text
+
+
+async def test_autopay_success_has_main_menu_keyboard(monkeypatch):
+    _set_sender_settings(monkeypatch)
+    bot = _sender_bot()
+    service = MonitoringService(bot=bot)
+
+    await service._send_autopay_success_notification(
+        _sender_user(balance=50000),
+        15000,
+        30,
+        subscription=_sender_subscription(),
+    )
+
+    buttons = _buttons(bot)
+    assert set(buttons) == {'back_to_menu'}
+    button = buttons['back_to_menu']
+    assert button.text == 'Главное меню'
+    assert button.style == 'primary'
+    assert button.icon_custom_emoji_id == '5314310000531766389'
 
 
 async def test_trial_ending_uses_new_text_and_button_icons(monkeypatch):
@@ -679,20 +710,19 @@ def test_tariff_traffic_keyboard_premium_button_has_icon():
     assert '💠' not in buttons['premium_traffic_topup'].text
 
 
-async def test_maybe_notify_does_not_merge_outside_user_window(monkeypatch):
+async def test_maybe_notify_does_not_send_outside_user_window(monkeypatch):
     """Пользователь сузил окно до 1 дня — карточка «через 3 дня» не должна уходить."""
     from app.services import monitoring_service as ms
 
+    _install_cycle_markers(monkeypatch)
     service = MonitoringService(bot=object())
     sent: list[bool] = []
 
     async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
         sent.append(merge_with_expiry)
-        return True
+        return ms.NotificationDeliveryStatus.SENT
 
-    monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
-    monkeypatch.setattr(service, '_save_autopay_fail_state', AsyncMock())
-    monkeypatch.setattr(service, '_send_autopay_failed_notification', fake_send)
+    monkeypatch.setattr(service, '_send_autopay_failed_notification_result', fake_send)
     monkeypatch.setattr(ms, 'is_subscription_expiry_enabled', lambda _user: True)
 
     now = datetime.now(UTC)
@@ -702,35 +732,31 @@ async def test_maybe_notify_does_not_merge_outside_user_window(monkeypatch):
         balance_kopeks=0,
         notification_settings={'subscription_expiry_days': 1},
     )
-    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=40))
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=72), autopay_enabled=True)
 
-    await service._maybe_notify_autopay_failure(user, 15000, sub, now)
+    await service._maybe_notify_autopay_failure(user, 15000, sub, now, db=object())
 
-    assert sent == [False]
+    assert sent == []
 
 
-async def test_maybe_notify_failed_send_does_not_mark_merged_expiring(monkeypatch):
-    """Если отправка упала, плановое предупреждение нельзя глушить на три часа."""
+async def test_maybe_notify_failed_send_records_no_attention(monkeypatch):
+    """Явная ошибка отправки не покрывает день — более поздняя попытка может повторить."""
     from app.services import monitoring_service as ms
 
+    markers = _install_cycle_markers(monkeypatch)
     service = MonitoringService(bot=object())
-    saved: dict = {}
-
-    async def fake_save(subscription_id, cycle_token, state, ttl_seconds):
-        saved.update(state.to_dict())
-
-    monkeypatch.setattr(service, '_load_autopay_fail_state', AsyncMock(return_value=AutopayFailState()))
-    monkeypatch.setattr(service, '_save_autopay_fail_state', fake_save)
-    monkeypatch.setattr(service, '_send_autopay_failed_notification', AsyncMock(return_value=False))
+    send = AsyncMock(return_value=ms.NotificationDeliveryStatus.FAILED)
+    monkeypatch.setattr(service, '_send_autopay_failed_notification_result', send)
     monkeypatch.setattr(ms, 'is_subscription_expiry_enabled', lambda _user: True)
 
     now = datetime.now(UTC)
     user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0, notification_settings={})
-    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=40))
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=72), autopay_enabled=True)
 
-    await service._maybe_notify_autopay_failure(user, 15000, sub, now)
+    await service._maybe_notify_autopay_failure(user, 15000, sub, now, db=object())
 
-    assert saved['merged_expiring_ts'] == 0.0
+    send.assert_awaited_once()
+    assert markers == set()
 
 
 # ── Multi-tariff labels: one subscription must be identifiable ──────────────

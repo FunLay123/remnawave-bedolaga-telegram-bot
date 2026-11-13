@@ -38,6 +38,29 @@ from app.services.monitoring_service import (
 DEFAULTS = dict(max_notifications=2, final_reminder_hours=3, repeat_interval_hours=0)
 
 
+def _install_cycle_markers(monkeypatch) -> set[tuple]:
+    """Persistent SentNotification boundary used by the active cadence."""
+    from app.services import monitoring_service as ms
+
+    markers: set[tuple] = set()
+
+    async def fake_sent(db, user_id, subscription_id, notification_type, days_before=None):
+        return (user_id, subscription_id, notification_type, days_before) in markers
+
+    async def fake_record(db, user_id, subscription_id, notification_type, days_before=None, *, commit=True):
+        markers.add((user_id, subscription_id, notification_type, days_before))
+
+    monkeypatch.setattr(settings, 'AUTOPAY_WARNING_DAYS', '3,1')
+    monkeypatch.setattr(
+        ms.NotificationSettingsService,
+        'are_notifications_globally_enabled',
+        classmethod(lambda cls: True),
+    )
+    monkeypatch.setattr(ms, 'notification_sent', fake_sent)
+    monkeypatch.setattr(ms, 'record_notification', fake_record)
+    return markers
+
+
 def test_state_dict_roundtrip():
     s = AutopayFailState(count=1, last_sent_ts=123.5, final_sent=True)
     assert AutopayFailState.from_dict(s.to_dict()) == s
@@ -191,54 +214,51 @@ async def test_cleanup_evicts_old_cycles(monkeypatch):
 
 
 async def test_maybe_notify_sends_first_then_silent(monkeypatch):
-    """_maybe_notify_autopay_failure sends on first failure, records state, and stays
-    silent on an immediate second tick (no repeat configured)."""
+    """One merged card on the first eligible warning day, then silence for the cycle."""
     from app.services import monitoring_service as ms
 
+    _install_cycle_markers(monkeypatch)
     svc = ms.MonitoringService(bot=object())  # truthy bot so the telegram branch is taken
     sent: list[bool] = []
 
     async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
-        sent.append(is_final)
-        return True
+        sent.append(merge_with_expiry)
+        return ms.NotificationDeliveryStatus.SENT
 
-    monkeypatch.setattr(svc, '_send_autopay_failed_notification', fake_send)
-    monkeypatch.setattr(ms.cache, 'get', AsyncMock(return_value=None))
-    monkeypatch.setattr(ms.cache, 'set', AsyncMock(return_value=True))
+    monkeypatch.setattr(svc, '_send_autopay_failed_notification_result', fake_send)
 
     now = datetime.now(UTC)
-    user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0)
-    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=40))
+    user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0, notification_settings={})
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=20), autopay_enabled=True)
 
-    await svc._maybe_notify_autopay_failure(user, 50000, sub, now)
-    assert sent == [False]  # 'first' → is_final False
+    await svc._maybe_notify_autopay_failure(user, 50000, sub, now, db=object())
+    assert sent == [True]
 
-    await svc._maybe_notify_autopay_failure(user, 50000, sub, now)
-    assert sent == [False]  # second tick: silent (not in final window, repeat disabled)
+    await svc._maybe_notify_autopay_failure(user, 50000, sub, now, db=object())
+    assert sent == [True]  # persistent attention marker silences repeat ticks
 
 
-async def test_maybe_notify_final_when_inside_window(monkeypatch):
-    """When the first failure lands inside the final window, the wrapper sends a final
-    (is_final=True) message."""
+async def test_maybe_notify_inside_window_sends_merged_card_not_final(monkeypatch):
+    """Even when the first failure lands in the last day, the active cadence sends one
+    merged card instead of the removed final reminder."""
     from app.services import monitoring_service as ms
 
+    _install_cycle_markers(monkeypatch)
     svc = ms.MonitoringService(bot=object())
-    sent: list[bool] = []
+    calls: list[tuple[bool, bool]] = []
 
     async def fake_send(user, balance, required, *, subscription=None, is_final=False, merge_with_expiry=False):
-        sent.append(is_final)
-        return True
+        calls.append((is_final, merge_with_expiry))
+        return ms.NotificationDeliveryStatus.SENT
 
-    monkeypatch.setattr(svc, '_send_autopay_failed_notification', fake_send)
-    monkeypatch.setattr(ms.cache, 'get', AsyncMock(return_value=None))
-    monkeypatch.setattr(ms.cache, 'set', AsyncMock(return_value=True))
+    monkeypatch.setattr(svc, '_send_autopay_failed_notification_result', fake_send)
 
     now = datetime.now(UTC)
-    user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0)
-    sub = SimpleNamespace(id=8, end_date=now + timedelta(hours=2))  # inside default 3h window
+    user = SimpleNamespace(id=1, telegram_id=555, balance_kopeks=0, notification_settings={})
+    sub = SimpleNamespace(id=8, end_date=now + timedelta(hours=2), autopay_enabled=True)
 
-    await svc._maybe_notify_autopay_failure(user, 50000, sub, now)
-    assert sent == [True]
+    await svc._maybe_notify_autopay_failure(user, 50000, sub, now, db=object())
+    assert calls == [(False, True)]
 
 
 # ── Regression tests for the per-cycle policy hardening ──
@@ -323,55 +343,75 @@ async def test_save_persists_with_ttl_floor(monkeypatch):
     assert kwargs['expire'] == 60  # floored up from 10
 
 
-async def test_email_only_path_uses_cause_specific_reason(monkeypatch):
-    """Non-Telegram (email) users: the reason text reflects the failure cause —
-    'charge_error' must NOT be mislabelled as insufficient balance."""
+async def test_email_only_charge_error_is_silent_and_balance_failure_notifies(monkeypatch):
+    """'charge_error' is a quiet operational failure; insufficient balance notifies once."""
     from app.services import monitoring_service as ms
 
+    _install_cycle_markers(monkeypatch)
     svc = ms.MonitoringService(bot=None)
     reasons: list[str] = []
 
     async def fake_notify(*, user, reason):
         reasons.append(reason)
+        return True
 
     monkeypatch.setattr(ms.notification_delivery_service, 'notify_autopay_failed', fake_notify)
-    monkeypatch.setattr(ms.cache, 'get', AsyncMock(return_value=None))
-    monkeypatch.setattr(ms.cache, 'set', AsyncMock(return_value=True))
 
     now = datetime.now(UTC)
-    user = SimpleNamespace(id=1, telegram_id=None, balance_kopeks=0)
-
-    await svc._maybe_notify_autopay_failure(
-        user, 50000, SimpleNamespace(id=7, end_date=now + timedelta(hours=40)), now, cause='charge_error'
-    )
-    await svc._maybe_notify_autopay_failure(
-        user, 50000, SimpleNamespace(id=8, end_date=now + timedelta(hours=40)), now, cause='insufficient_balance'
+    user = SimpleNamespace(
+        id=1,
+        telegram_id=None,
+        balance_kopeks=0,
+        notification_settings={},
     )
 
-    assert reasons == ['Ошибка списания средств', 'Недостаточно средств на балансе']
+    await svc._maybe_notify_autopay_failure(
+        user,
+        50000,
+        SimpleNamespace(id=7, end_date=now + timedelta(hours=72), autopay_enabled=True),
+        now,
+        cause='charge_error',
+        db=object(),
+    )
+    assert reasons == []
+
+    await svc._maybe_notify_autopay_failure(
+        user,
+        50000,
+        SimpleNamespace(id=8, end_date=now + timedelta(hours=72), autopay_enabled=True),
+        now,
+        cause='insufficient_balance',
+        db=object(),
+    )
+
+    assert reasons == ['Недостаточно средств на балансе']
 
 
-async def test_email_only_final_reminder_reason(monkeypatch):
-    """Email users get the distinct final-reminder wording when the cycle reaches the window."""
+async def test_email_only_reminder_is_one_per_cycle(monkeypatch):
+    """Email users also get at most one autopay-problem message per cycle."""
     from app.services import monitoring_service as ms
 
+    _install_cycle_markers(monkeypatch)
     svc = ms.MonitoringService(bot=None)
     reasons: list[str] = []
 
     async def fake_notify(*, user, reason):
         reasons.append(reason)
+        return True
 
     monkeypatch.setattr(ms.notification_delivery_service, 'notify_autopay_failed', fake_notify)
-    monkeypatch.setattr(ms.cache, 'get', AsyncMock(return_value=None))
-    monkeypatch.setattr(ms.cache, 'set', AsyncMock(return_value=True))
 
     now = datetime.now(UTC)
-    user = SimpleNamespace(id=1, telegram_id=None, balance_kopeks=0)
-    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=40))
+    user = SimpleNamespace(
+        id=1,
+        telegram_id=None,
+        balance_kopeks=0,
+        notification_settings={},
+    )
+    sub = SimpleNamespace(id=7, end_date=now + timedelta(hours=72), autopay_enabled=True)
 
-    await svc._maybe_notify_autopay_failure(user, 50000, sub, now)  # 'first'
-    # Same cycle (end_date unchanged) but the tick now lands inside the 3h window → 'final'.
-    await svc._maybe_notify_autopay_failure(user, 50000, sub, now + timedelta(hours=38))
+    await svc._maybe_notify_autopay_failure(user, 50000, sub, now, db=object())
+    # Later cycle tick on another configured warning day: the confirmed marker silences it.
+    await svc._maybe_notify_autopay_failure(user, 50000, sub, now + timedelta(hours=48), db=object())
 
-    assert reasons[0] == 'Недостаточно средств на балансе'
-    assert reasons[1].startswith('Последнее напоминание')
+    assert reasons == ['Недостаточно средств на балансе']

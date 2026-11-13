@@ -23,7 +23,7 @@ from app.database.crud.transaction import create_transaction
 from app.database.crud.user import subtract_user_balance
 from app.database.database import AsyncSessionLocal
 from app.database.models import Tariff, Transaction, TransactionType, User
-from app.keyboards.inline import pad_button_labels
+from app.keyboards.inline import discounted_period_button, pad_button_labels
 from app.localization.texts import Texts, get_texts
 from app.services.admin_notification_service import AdminNotificationService
 from app.services.panel_sync import should_create_panel_account
@@ -266,6 +266,13 @@ def get_tariffs_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
+def _period_best_value_badge(tariff: Tariff, period: int, texts) -> str | None:
+    """Отметка выгодного периода, если оператор выделил именно этот период."""
+    if tariff.highlight_period_days is not None and int(tariff.highlight_period_days) == period:
+        return texts.t('TARIFF_PERIOD_BEST_VALUE_BADGE', '⭐ выгодно')
+    return None
+
+
 def _period_button_text(tariff: Tariff, period: int, price_text: str, texts) -> str:
     """Единый текст кнопки периода: подпись, цена и отметка выгодного периода.
 
@@ -276,8 +283,9 @@ def _period_button_text(tariff: Tariff, period: int, price_text: str, texts) -> 
     текста: она видна до цены и не теряется среди остальных строк.
     """
     label = f'{format_period(period)} — {price_text}'
-    if tariff.highlight_period_days is not None and int(tariff.highlight_period_days) == period:
-        return f'{texts.t("TARIFF_PERIOD_BEST_VALUE_BADGE", "⭐ выгодно")} · {label}'
+    badge = _period_best_value_badge(tariff, period, texts)
+    if badge:
+        return f'{badge} · {label}'
     return label
 
 
@@ -297,25 +305,32 @@ def get_tariff_periods_keyboard(
         price = prices[period_str]
 
         # Получаем скидку для конкретного периода
-        group_pct, offer_pct, discount_percent = 0, 0, 0
+        group_pct, offer_pct = 0, 0
         if db_user:
-            group_pct, offer_pct, discount_percent = _get_user_period_discount(db_user, period)
+            group_pct, offer_pct, _ = _get_user_period_discount(db_user, period)
 
-        if discount_percent > 0:
-            price = _apply_promo_discount(price, group_pct, offer_pct)
-            price_text = f'{format_price_kopeks(price)} 🔥−{discount_percent}%'
-        else:
-            price_text = format_price_kopeks(price)
-
-        button_text = _period_button_text(tariff, period, price_text, texts)
+        final_price = _apply_promo_discount(price, group_pct, offer_pct)
         is_primary_period = period == PRIMARY_PERIOD_DAYS
+        discounted = discounted_period_button(
+            format_period(period),
+            format_price_kopeks(final_price),
+            price,
+            final_price,
+            badge=_period_best_value_badge(tariff, period, texts),
+        )
+        if discounted is not None:
+            button_text, button_icon = discounted
+        else:
+            button_text = _period_button_text(tariff, period, format_price_kopeks(price), texts)
+            button_icon = PERIOD_BUTTON_ICON_ID if is_primary_period else None
+
         buttons.append(
             [
                 InlineKeyboardButton(
                     text=button_text,
                     callback_data=f'tariff_period:{tariff.id}:{period}',
                     style='primary' if is_primary_period else None,
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID if is_primary_period else None,
+                    icon_custom_emoji_id=button_icon,
                 )
             ]
         )
@@ -341,18 +356,25 @@ def get_tariff_periods_keyboard_with_traffic(
         price = prices[period_str]
 
         # Получаем скидку для конкретного периода
-        group_pct, offer_pct, discount_percent = 0, 0, 0
+        group_pct, offer_pct = 0, 0
         if db_user:
-            group_pct, offer_pct, discount_percent = _get_user_period_discount(db_user, period)
+            group_pct, offer_pct, _ = _get_user_period_discount(db_user, period)
 
-        if discount_percent > 0:
-            price = _apply_promo_discount(price, group_pct, offer_pct)
-            price_text = f'{format_price_kopeks(price)} 🔥−{discount_percent}%'
-        else:
-            price_text = format_price_kopeks(price)
-
-        button_text = _period_button_text(tariff, period, price_text, texts)
+        final_price = _apply_promo_discount(price, group_pct, offer_pct)
         is_primary_period = period == PRIMARY_PERIOD_DAYS
+        discounted = discounted_period_button(
+            format_period(period),
+            format_price_kopeks(final_price),
+            price,
+            final_price,
+            badge=_period_best_value_badge(tariff, period, texts),
+        )
+        if discounted is not None:
+            button_text, button_icon = discounted
+        else:
+            button_text = _period_button_text(tariff, period, format_price_kopeks(price), texts)
+            button_icon = PERIOD_BUTTON_ICON_ID if is_primary_period else None
+
         # Используем другой callback для перехода к настройке трафика
         buttons.append(
             [
@@ -360,7 +382,7 @@ def get_tariff_periods_keyboard_with_traffic(
                     text=button_text,
                     callback_data=f'tariff_period_traffic:{tariff.id}:{period}',
                     style='primary' if is_primary_period else None,
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID if is_primary_period else None,
+                    icon_custom_emoji_id=button_icon,
                 )
             ]
         )
@@ -2602,18 +2624,23 @@ def get_tariff_extend_keyboard(
         subtotal = discounted_base + discounted_devices
         price = PricingEngine.apply_discount(subtotal, offer_pct)
 
-        # Combined display discount
+        # Effective discount counts the real subtotal (period + devices) before
+        # the sequential group/offer discounts and the final charged price.
         total_original = base_price + devices_cost
-        has_discount = price < total_original and total_original > 0
-        if has_discount:
-            combined_pct = round((1 - price / total_original) * 100)
-            price_text = f'{format_price_kopeks(price)} 🔥−{combined_pct}%'
-        else:
-            price_text = format_price_kopeks(price)
-
-        button_text = _period_button_text(tariff, period, price_text, texts)
+        discounted = discounted_period_button(
+            format_period(period),
+            format_price_kopeks(price),
+            total_original,
+            price,
+            badge=_period_best_value_badge(tariff, period, texts),
+        )
         # Только 30-дневный период выделяем: primary + кастомная иконка.
         is_primary_period = period == PRIMARY_PERIOD_DAYS
+        if discounted is not None:
+            button_text, button_icon = discounted
+        else:
+            button_text = _period_button_text(tariff, period, format_price_kopeks(price), texts)
+            button_icon = PERIOD_BUTTON_ICON_ID if is_primary_period else None
         # subscription_id ОБЯЗАН быть первым сегментом: иначе резолвер по callback
         # принял бы хвостовой {period} за subscription_id (см. issue #3012 —
         # период совпадал с id чужой подписки и продлевалась не та подписка).
@@ -2623,7 +2650,7 @@ def get_tariff_extend_keyboard(
                     text=button_text,
                     callback_data=f'tariff_extend:{subscription_id}:{tariff.id}:{period}',
                     style='primary' if is_primary_period else None,
-                    icon_custom_emoji_id=PERIOD_BUTTON_ICON_ID if is_primary_period else None,
+                    icon_custom_emoji_id=button_icon,
                 )
             ]
         )

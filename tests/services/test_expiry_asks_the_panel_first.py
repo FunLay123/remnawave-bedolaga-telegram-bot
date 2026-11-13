@@ -59,7 +59,7 @@ def _service(api) -> MonitoringService:
         yield api
 
     service.subscription_service = SimpleNamespace(is_configured=True, get_api_client=client)
-    service._send_subscription_expired_notification = AsyncMock()
+    service._send_initial_expired_notification = AsyncMock()
     service._log_monitoring_event = AsyncMock()
     return service
 
@@ -116,7 +116,7 @@ async def test_alive_in_the_panel_is_not_expired_and_takes_the_panel_date(monkey
     await service._check_expired_subscriptions(db)
 
     expire.assert_not_awaited()
-    service._send_subscription_expired_notification.assert_not_awaited()
+    service._send_initial_expired_notification.assert_not_awaited()
     assert subscription.status == SubscriptionStatus.ACTIVE.value
     assert subscription.end_date == NOW + timedelta(days=20), 'дата панели записана в бота'
     db.commit.assert_awaited()
@@ -140,7 +140,7 @@ async def test_expired_in_the_panel_is_expired_in_the_bot(monkeypatch) -> None:
     await service._check_expired_subscriptions(db)
 
     expire.assert_awaited_once_with(db, subscription)
-    service._send_subscription_expired_notification.assert_awaited_once()
+    service._send_initial_expired_notification.assert_awaited_once()
 
 
 @pytest.mark.asyncio

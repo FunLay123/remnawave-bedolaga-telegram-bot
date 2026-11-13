@@ -5,7 +5,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 
 import structlog
-from sqlalchemy import and_, case, delete, func, select, update
+from sqlalchemy import and_, case, delete, func, inspect as sa_inspect, select, update
 from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -13,6 +13,7 @@ from sqlalchemy.orm.exc import StaleDataError
 
 from app.config import settings
 from app.database.constants import ALIVE_SUBSCRIPTION_STATUSES as _ALIVE_SUBSCRIPTION_STATUSES
+from app.database.crud.discount_offer import deactivate_unclaimed_wave_offers
 from app.database.crud.notification import clear_notifications
 from app.database.models import (
     Subscription,
@@ -1562,6 +1563,16 @@ async def extend_subscription(
         await _housekeep_expired_purchases(db, subscription, now=current_time)
 
     subscription.updated_at = current_time
+
+    # A successful positive-day renewal makes outstanding expired-discount
+    # waves ineligible: their cards must no longer be claimable.  This runs after
+    # ``_lock_subscription_row`` above and inside the same transaction, so a
+    # rollback restores the offers.  Claimed user discounts are never revoked.
+    # Only ORM-mapped subscriptions can own offer rows; lightweight duck-typed
+    # stand-ins used by callers that finalize pricing without a persisted
+    # subscription have no offers to invalidate.
+    if days > 0 and subscription.id is not None and sa_inspect(subscription, raiseerr=False) is not None:
+        await deactivate_unclaimed_wave_offers(db, subscription.id, commit=False)
 
     if commit:
         await db.commit()
