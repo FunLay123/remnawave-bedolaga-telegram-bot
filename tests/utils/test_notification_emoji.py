@@ -9,6 +9,13 @@ def test_warning_emoji_uses_warning_icon():
     assert f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">⚠️</tg-emoji>' in styled
 
 
+def test_exclamation_uses_warning_icon():
+    styled = style_notification_text('❗️ <b>Платёж не прошёл</b>')
+
+    assert f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">❗️</tg-emoji>' in styled
+    assert f'<tg-emoji emoji-id="{MILL_EMOJI_ID}">❗️</tg-emoji>' not in styled
+
+
 def test_no_entry_emoji_uses_warning_icon():
     styled = style_notification_text('🚫 Доступ закрыт')
 

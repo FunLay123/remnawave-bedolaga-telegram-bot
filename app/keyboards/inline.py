@@ -1759,6 +1759,7 @@ def get_payment_methods_keyboard(
     *,
     back_callback: str = 'back_to_menu',
     exclude_methods: Collection[str] | None = None,
+    include_support: bool = True,
 ) -> InlineKeyboardMarkup:
     texts = get_texts(language)
     keyboard = []
@@ -2406,7 +2407,7 @@ def get_payment_methods_keyboard(
 
         keyboard[:] = [row for row in keyboard if _row_method(row) not in excluded]
 
-    if settings.is_support_topup_enabled():
+    if include_support and settings.is_support_topup_enabled():
         keyboard.append(
             [
                 InlineKeyboardButton(

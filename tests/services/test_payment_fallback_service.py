@@ -162,6 +162,24 @@ def test_build_payment_fallback_uses_amount_and_filters_only_failed_method(payme
     assert 'https://t.me/support_team' in _urls(markup)
 
 
+def test_build_payment_fallback_hides_internal_support(payment_methods: None) -> None:
+    from app.services.payment_fallback_service import build_payment_fallback
+
+    _, markup = build_payment_fallback(_user(), 50000, 'yookassa')
+
+    assert 'topup_support' not in _callbacks(markup)
+    assert 'https://t.me/support_team' in _urls(markup)
+    assert 'balance_topup' in _callbacks(markup)
+
+
+def test_build_payment_fallback_uses_custom_alert_emoji(payment_methods: None) -> None:
+    from app.services.payment_fallback_service import build_payment_fallback
+
+    text, _ = build_payment_fallback(_user(), 50000, 'yookassa')
+
+    assert '<tg-emoji emoji-id="5258382581375723416">❗️</tg-emoji>' in text
+
+
 # ---------------------------------------------------------------------------
 # Proactive sender cooldown and release on failure
 # ---------------------------------------------------------------------------

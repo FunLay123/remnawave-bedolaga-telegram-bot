@@ -19,6 +19,7 @@ from app.config import settings
 from app.keyboards.inline import get_payment_methods_keyboard
 from app.localization.texts import get_texts
 from app.utils.cache import cache
+from app.utils.notification_emoji import style_notification_text
 
 
 logger = structlog.get_logger(__name__)
@@ -93,6 +94,7 @@ def build_payment_fallback(
         language,
         back_callback='balance_topup',
         exclude_methods={failed_method} if failed_method else None,
+        include_support=False,
     )
 
     support_url = settings.get_support_contact_url()
@@ -111,7 +113,7 @@ def build_payment_fallback(
         method=html.escape(_method_label(failed_method)),
         amount=settings.format_price(max(0, int(amount_kopeks or 0))),
     )
-    return text, keyboard
+    return style_notification_text(text), keyboard
 
 
 async def send_payment_fallback_once(
