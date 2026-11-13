@@ -108,6 +108,27 @@ async def test_not_connected_after_first_connected_sends_nothing(monkeypatch):
     assert svc._notify_user.await_count == 1
 
 
+async def test_first_connected_marker_recorded_when_notification_not_delivered(monkeypatch):
+    """The marker means "the user connected", not "the message was sent".
+
+    When first-connected notifications are disabled (or delivery fails,
+    ``_notify_user`` returns False), the marker must still be recorded so a
+    later/reordered not-connected event cannot nudge an already-connected user.
+    """
+    store = _install_markers(monkeypatch)
+    svc = _service(notify_result=False)
+    db, user, sub = AsyncMock(), _user(), _sub()
+
+    await svc._handle_first_connected(db, user, sub, {})
+
+    assert (user.id, sub.id, FIRST_CONNECTED, None) in store.rows
+
+    await svc._handle_user_not_connected(db, user, sub, _not_connected_data(1))
+
+    # Only the first-connected attempt went out; the nudge was suppressed.
+    assert svc._notify_user.await_count == 1
+
+
 async def test_duplicate_first_connected_notifies_once(monkeypatch):
     store = _install_markers(monkeypatch)
     svc = _service()
