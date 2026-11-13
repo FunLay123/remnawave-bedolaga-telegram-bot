@@ -57,9 +57,9 @@ logger = structlog.get_logger(__name__)
 
 
 DEFAULT_INTERVAL_SECONDS = 300
-WARNING_THRESHOLD = 0.8
-# Второе, последнее предупреждение перед исчерпанием.
-SECOND_WARNING_THRESHOLD = 0.9
+# Единственное предупреждение перед исчерпанием. Отдельного сообщения на 80 %
+# нет: два подряд только шумели, а решение клиента всё равно наступает на 90 %.
+WARNING_THRESHOLD = 0.9
 # Ноды сквада меняются редко, а спрашивают их на каждом проходе по каждому
 # скваду. Кеш живёт дольше интервала воркера, чтобы не дёргать панель впустую.
 NODES_CACHE_TTL_SECONDS = 3600
@@ -846,22 +846,19 @@ class PremiumTrafficService:
             return 'restored' if await self._restore_squad(db, api, target, state) else None
 
         if not state.is_limited:
-            # Триалу не шлём предупреждения 80/90: это «мягкие» уведомления,
+            # Триалу не шлём предупреждение на 90 %: это «мягкое» уведомление,
             # а не факт отключения. Исчерпание ниже шлётся всем — человек должен
-            # узнать, что белые списки перестали работать. Флаги для триала не
+            # узнать, что белые списки перестали работать. Флаг для триала не
             # поднимаем: после покупки платной подписки предупреждение должно
             # прийти по текущему расходу, а не потеряться в уже отмеченном периоде.
             if not getattr(target.subscription, 'is_trial', False):
-                # 90 % проверяем раньше 80 %: если расход за один проход перескочил
-                # сразу за 90 %, клиент получит одно сообщение, а не два подряд, —
-                # поэтому здесь поднимаются оба флага.
-                if not state.notified_90 and self._crossed_warning(state, SECOND_WARNING_THRESHOLD):
+                # Одно предупреждение на 90 %. Порог проверяем один раз: если
+                # расход за проход перескочил сразу за него, сообщение всё равно
+                # одно, а `notified_90` не даёт повторить его на следующем проходе.
+                # `notified_80` заполняем синхронно для совместимости старого состояния.
+                if not state.notified_90 and self._crossed_warning(state, WARNING_THRESHOLD):
                     state.notified_80 = True
                     state.notified_90 = True
-                    await self._notify_warning(target, state)
-                    return 'warned'
-                if not state.notified_80 and self._crossed_warning(state, WARNING_THRESHOLD):
-                    state.notified_80 = True
                     await self._notify_warning(target, state)
                     return 'warned'
 
@@ -1189,6 +1186,7 @@ class PremiumTrafficService:
             return
 
         from app.localization.texts import get_texts
+        from app.utils.miniapp_buttons import build_notification_main_menu_keyboard
 
         texts = get_texts(getattr(user, 'language', 'ru'))
         # Без названия человек с несколькими премиум-серверами не поймёт, на
@@ -1200,8 +1198,9 @@ class PremiumTrafficService:
             limit=round(state.total_limit_bytes / BYTES_IN_GB, 1),
         )
         message = style_notification_text(message)
+        keyboard = build_notification_main_menu_keyboard(texts.t('MAIN_MENU_BUTTON', 'Главное меню'))
         try:
-            await self._bot.send_message(user.telegram_id, message, parse_mode='HTML')
+            await self._bot.send_message(user.telegram_id, message, parse_mode='HTML', reply_markup=keyboard)
         except Exception as error:
             logger.warning(
                 'Не удалось отправить уведомление о премиум-трафике',

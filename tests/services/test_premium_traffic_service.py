@@ -252,34 +252,38 @@ class TestDecisions:
         assert state.is_limited is False
         assert pushed == []
 
-    async def test_warning_is_sent_once_at_eighty_percent(self, monkeypatch):
+    async def test_no_warning_below_ninety_percent(self, monkeypatch):
+        """Отдельного предупреждения на 80 % больше нет — ждём 90 %."""
         service = PremiumTrafficService()
+        warnings = AsyncMock()
+        monkeypatch.setattr(service, '_notify_warning', warnings)
         state = _state(limit_gb=5)
 
         outcome, _ = await self._apply(service, _target(), state, 4 * BYTES_IN_GB, monkeypatch)
-        assert outcome == 'warned'
-        assert state.notified_80 is True
 
-        second, _ = await self._apply(service, _target(), state, 4 * BYTES_IN_GB, monkeypatch)
-        assert second is None
+        assert outcome is None
+        assert (state.notified_80, state.notified_90) == (False, False)
+        warnings.assert_not_awaited()
 
-    async def test_second_warning_is_sent_once_at_ninety_percent(self, monkeypatch):
+    async def test_warning_is_sent_once_at_ninety_percent(self, monkeypatch):
         service = PremiumTrafficService()
         warnings = AsyncMock()
         monkeypatch.setattr(service, '_notify_warning', warnings)
         state = _state(limit_gb=10)
 
         first, _ = await self._apply(service, _target(), state, 8 * BYTES_IN_GB, monkeypatch)
-        assert first == 'warned'
-        assert (state.notified_80, state.notified_90) == (True, False)
+        assert first is None
+        assert (state.notified_80, state.notified_90) == (False, False)
+        warnings.assert_not_awaited()
 
         second, _ = await self._apply(service, _target(), state, 9 * BYTES_IN_GB, monkeypatch)
         assert second == 'warned'
         assert state.notified_90 is True
+        warnings.assert_awaited_once()
 
         third, _ = await self._apply(service, _target(), state, 9 * BYTES_IN_GB + 1, monkeypatch)
         assert third is None
-        assert warnings.await_count == 2, 'одно на 80 % и одно на 90 %'
+        warnings.assert_awaited_once()
 
     async def test_jump_past_ninety_percent_sends_one_warning(self, monkeypatch):
         """Расход за проход перескочил сразу за 90 % — одно сообщение, а не два подряд."""
@@ -290,14 +294,14 @@ class TestDecisions:
 
         outcome, _ = await self._apply(service, _target(), state, int(9.5 * BYTES_IN_GB), monkeypatch)
         assert outcome == 'warned'
-        assert (state.notified_80, state.notified_90) == (True, True)
+        assert state.notified_90 is True
 
         again, _ = await self._apply(service, _target(), state, int(9.5 * BYTES_IN_GB), monkeypatch)
         assert again is None
         warnings.assert_awaited_once()
 
     async def test_trial_gets_no_premium_warning(self, monkeypatch):
-        """Триалу не шлём 80/90 %: мягкие предупреждения только для платных."""
+        """Триалу не шлём предупреждение на 90 %: мягкие уведомления только для платных."""
         service = PremiumTrafficService()
         warnings = AsyncMock()
         monkeypatch.setattr(service, '_notify_warning', warnings)
@@ -1343,6 +1347,32 @@ class TestNotifications:
 
         assert sent and sent[0][0] == 555
         assert '5' in sent[0][1]
+
+    async def test_warning_and_exhausted_share_the_main_menu_keyboard(self):
+        """Оба премиум-уведомления дают один и тот же primary-переход в меню."""
+        service = PremiumTrafficService()
+        sent = []
+
+        class _Bot:
+            async def send_message(self, chat_id, text, **kwargs):
+                sent.append(kwargs)
+
+        service.set_bot(_Bot())
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB)
+
+        await service._notify_warning(_target(), state)
+        await service._notify_exhausted(_target(), state)
+
+        assert len(sent) == 2
+        for kwargs in sent:
+            keyboard = kwargs['reply_markup']
+            assert len(keyboard.inline_keyboard) == 1
+            assert len(keyboard.inline_keyboard[0]) == 1
+            button = keyboard.inline_keyboard[0][0]
+            assert button.text == 'Главное меню'
+            assert button.callback_data == 'back_to_menu'
+            assert button.icon_custom_emoji_id == '5314310000531766389'
+            assert button.style == 'primary'
 
     async def test_delivery_failure_does_not_propagate(self, monkeypatch):
         """Упавшее уведомление не должно валить проход воркера."""

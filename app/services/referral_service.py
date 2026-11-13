@@ -591,6 +591,7 @@ async def send_referral_notification(
     notification_type: NotificationType = NotificationType.REFERRAL_BONUS,
     referrer_name: str = '',
     bonus_promise: str = '',
+    reply_markup=None,
 ):
     """
     Отправляет реферальное уведомление в Telegram или по email.
@@ -662,7 +663,10 @@ async def send_referral_notification(
         return
 
     try:
-        await bot.send_message(telegram_id, message, parse_mode='HTML')
+        if reply_markup is not None:
+            await bot.send_message(telegram_id, message, parse_mode='HTML', reply_markup=reply_markup)
+        else:
+            await bot.send_message(telegram_id, message, parse_mode='HTML')
         logger.info('✅ Уведомление отправлено пользователю', telegram_id=telegram_id)
     except Exception as e:
         logger.error(
@@ -884,6 +888,10 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                         f'вы получите +{first_purchase_referrer_days} '
                         f'{_pluralize_days_ru(first_purchase_referrer_days)}.'
                     )
+                from app.localization.texts import get_texts
+                from app.utils.miniapp_buttons import build_notification_main_menu_keyboard
+
+                referrer_texts = get_texts(getattr(referrer, 'language', 'ru'))
                 await send_referral_notification(
                     bot,
                     referrer.telegram_id,
@@ -891,6 +899,9 @@ async def process_referral_registration(db: AsyncSession, new_user_id: int, refe
                     user=referrer,
                     referral_name=new_user.full_name,
                     notification_type=NotificationType.REFERRAL_REGISTERED,
+                    reply_markup=build_notification_main_menu_keyboard(
+                        referrer_texts.t('MAIN_MENU_BUTTON', 'Главное меню')
+                    ),
                 )
 
             return True

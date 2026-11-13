@@ -126,6 +126,47 @@ async def test_registration_sends_days_only_notices_and_records_contest(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_registered_notice_has_main_menu_but_welcome_does_not(monkeypatch):
+    """Пригласивший получает переход в меню; приветствие новичка — без клавиатуры.
+
+    Сразу после приветствия пользователь видит либо экран регистрации со своей
+    клавиатурой, либо главное меню, поэтому вешать кнопку на REFERRAL_WELCOME
+    нельзя — она продублировала бы навигацию.
+    """
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'ENABLE_NOTIFICATIONS', True)
+    monkeypatch.setattr(settings, 'REFERRAL_NOTIFICATIONS_ENABLED', True)
+    monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 5)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_BONUS_DAYS', 7)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFEREE_DAYS', None)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFERRER_DAYS', None)
+    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS', 30)
+
+    contest_mock = AsyncMock()
+    monkeypatch.setattr(referral_contest_service, 'on_referral_registration', contest_mock)
+    bot = SimpleNamespace(send_message=AsyncMock())
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        db.add_all([_user(1), _user(2, referred_by_id=1)])
+        await db.commit()
+
+        assert await process_referral_registration(db, 2, 1, bot) is True
+
+    welcome_call, registered_call = bot.send_message.await_args_list
+    assert 'Добро пожаловать' in welcome_call.args[1]
+    assert 'reply_markup' not in welcome_call.kwargs
+
+    keyboard = registered_call.kwargs['reply_markup']
+    assert len(keyboard.inline_keyboard) == 1
+    assert len(keyboard.inline_keyboard[0]) == 1
+    button = keyboard.inline_keyboard[0][0]
+    assert button.text == 'Главное меню'
+    assert button.callback_data == 'back_to_menu'
+    assert button.icon_custom_emoji_id == '5314310000531766389'
+    assert button.style == 'primary'
+
+
+@pytest.mark.asyncio
 async def test_repeated_registration_does_not_duplicate_notices_or_contest(monkeypatch):
     """Повторная обработка (DELETED-restore) не шлёт сообщения и не задваивает конкурс."""
     monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')

@@ -1,7 +1,7 @@
 import re
 
 from aiogram import types
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from app.config import settings
 from app.utils.button_styles_cache import CALLBACK_TO_SECTION, get_cached_button_styles
@@ -140,6 +140,20 @@ def build_main_menu_button(text: str) -> InlineKeyboardButton:
     what callers should reach for to express intent.
     """
     return InlineKeyboardButton(text=text, callback_data='back_to_menu')
+
+
+def build_notification_main_menu_keyboard(text: str) -> InlineKeyboardMarkup:
+    """Единственная primary-кнопка «Главное меню» для одиночных уведомлений.
+
+    Иконка и стиль берутся из общего реестра кнопок, а не задаются здесь:
+    уведомление не должно расходиться с остальными экранами при следующей
+    правке дизайна. ``success:main_menu`` — та же пара «иконка + primary»,
+    что и на экране успешного пополнения.
+    """
+    from app.utils.payment_button_styles import apply_button_style
+
+    button = build_main_menu_button(text)
+    return InlineKeyboardMarkup(inline_keyboard=[[apply_button_style(button, 'success:main_menu')]])
 
 
 def _resolve_style(style: str | None) -> str | None:
