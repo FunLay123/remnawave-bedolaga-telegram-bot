@@ -346,6 +346,25 @@ class YooKassaPaymentMixin:
             if updated_payment:
                 payment = updated_payment
 
+        if getattr(self, 'bot', None) and payment.status in {'canceled', 'failed'}:
+            failed_method = 'yookassa_sbp' if (payment.payment_method_type or '').lower() == 'sbp' else 'yookassa'
+            try:
+                from app.services.payment_fallback_service import send_payment_fallback_once
+
+                await send_payment_fallback_once(
+                    self.bot,
+                    getattr(payment, 'user', None),
+                    payment.amount_kopeks,
+                    failed_method,
+                    getattr(payment, 'id', None),
+                )
+            except Exception as fallback_error:  # pragma: no cover - диагностический лог
+                logger.warning(
+                    'Не удалось предложить альтернативный способ оплаты после проверки статуса YooKassa',
+                    yookassa_payment_id=payment.yookassa_payment_id,
+                    error=fallback_error,
+                )
+
         transaction_id = getattr(payment, 'transaction_id', None)
 
         if payment.status == 'succeeded' and getattr(payment, 'is_paid', False):
@@ -1535,6 +1554,25 @@ class YooKassaPaymentMixin:
 
         await db.commit()
         await db.refresh(payment)
+
+        if getattr(self, 'bot', None) and payment.status in {'canceled', 'failed'}:
+            failed_method = 'yookassa_sbp' if (payment.payment_method_type or '').lower() == 'sbp' else 'yookassa'
+            try:
+                from app.services.payment_fallback_service import send_payment_fallback_once
+
+                await send_payment_fallback_once(
+                    self.bot,
+                    getattr(payment, 'user', None),
+                    payment.amount_kopeks,
+                    failed_method,
+                    getattr(payment, 'id', None),
+                )
+            except Exception as fallback_error:  # pragma: no cover - диагностический лог
+                logger.warning(
+                    'Не удалось предложить альтернативный способ оплаты YooKassa',
+                    yookassa_payment_id=yookassa_payment_id,
+                    error=fallback_error,
+                )
 
         if payment.status == 'succeeded' and payment.is_paid:
             return await self._process_successful_yookassa_payment(db, payment, event_object=event_object)

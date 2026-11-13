@@ -1,4 +1,5 @@
 import math
+from collections.abc import Collection
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1757,6 +1758,7 @@ def get_payment_methods_keyboard(
     language: str = DEFAULT_LANGUAGE,
     *,
     back_callback: str = 'back_to_menu',
+    exclude_methods: Collection[str] | None = None,
 ) -> InlineKeyboardMarkup:
     texts = get_texts(language)
     keyboard = []
@@ -2387,6 +2389,22 @@ def get_payment_methods_keyboard(
                 )
             ]
         )
+
+    if exclude_methods:
+        excluded = {str(method).strip() for method in exclude_methods}
+
+        def _row_method(row: list[InlineKeyboardButton]) -> str | None:
+            if len(row) != 1:
+                return None
+            callback_data = row[0].callback_data or ''
+            if callback_data.startswith('topup_amount|'):
+                parts = callback_data.split('|')
+                return parts[1] if len(parts) > 1 else None
+            if callback_data.startswith('topup_') and callback_data != 'topup_support':
+                return callback_data[len('topup_') :]
+            return None
+
+        keyboard[:] = [row for row in keyboard if _row_method(row) not in excluded]
 
     if settings.is_support_topup_enabled():
         keyboard.append(

@@ -297,6 +297,24 @@ class HeleketPaymentMixin:
             )
             return updated_payment
 
+        if status_normalized in {'cancel', 'fail', 'system_fail'} and getattr(self, 'bot', None):
+            try:
+                from app.services.payment_fallback_service import send_payment_fallback_once
+
+                await send_payment_fallback_once(
+                    self.bot,
+                    getattr(payment, 'user', None) or getattr(updated_payment, 'user', None),
+                    updated_payment.amount_kopeks,
+                    'heleket',
+                    getattr(updated_payment, 'id', None),
+                )
+            except Exception as fallback_error:  # pragma: no cover - диагностический лог
+                logger.warning(
+                    'Не удалось предложить альтернативный способ оплаты Heleket',
+                    uuid=updated_payment.uuid,
+                    error=fallback_error,
+                )
+
         if status_normalized not in {'paid', 'paid_over'}:
             logger.info('Heleket платёж в этом статусе зачисления не требует', uuid=updated_payment.uuid, status=status)
             return updated_payment

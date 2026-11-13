@@ -1404,6 +1404,8 @@
   "HELEKET_STATUS_REFUND_PAID": "✅ Возврат выполнен",
   "HELEKET_STATUS_LOCKED": "🔒 Средства заблокированы",
   "HELEKET_STATUS_UNKNOWN": "ℹ️ Статус платежа: {status}",
+  "PAYMENT_FALLBACK_SUPPORT_BUTTON": "🛠️ Написать в поддержку",
+  "PAYMENT_FALLBACK_TEXT": "❗️ <b>Платёж не прошёл</b>\n\nСпособ оплаты: {method}\nСумма: {amount}\n\nВыберите другой способ пополнения:",
   "PAYMENT_METHODS_FOOTER": "Выберите способ пополнения:",
   "PAYMENT_METHODS_ONLY_SUPPORT": "💳 <b>Способы пополнения баланса</b>\n\n⚠️ В данный момент автоматические способы оплаты временно недоступны.\nОбратитесь в техподдержку для пополнения баланса.\n\nВыберите способ пополнения:",
   "PAYMENT_METHODS_PROMPT": "Выберите удобный для вас способ оплаты:",

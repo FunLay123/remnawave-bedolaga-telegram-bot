@@ -1695,6 +1695,9 @@
 - `app/services/payment_alert_service.py` — Python-модуль
   Классы: `PaymentAlert`
   Функции: `build_pending_alert` — Return an alert for a payment pending at least the configured age., `build_check_error_alert` — Return an alert for a payment whose provider check failed., `format_payment_alerts_digest` — Build the admin digest, capped at the configured number of item lines., `dispatch_payment_alerts` — Claim cooldowns, format a digest and send it to the admin chat.
+- `app/services/payment_fallback_service.py` — Python-модуль
+  Классы: нет
+  Функции: `build_payment_fallback` — Build the Russian fallback text and a keyboard without ``failed_method``., `send_payment_fallback_once` — Send the fallback screen at most once per provider/payment in 24 hours.
 - `app/services/payment_method_config_service.py` — Python-модуль
   Классы: нет
   Функции: `refresh_display_name_overrides` — Reload the method_id -> display_name override cache from the DB., `get_display_name_override` — Sync read of a cabinet-set display name for a method, or None if not set., `normalize_quick_amounts`, `get_effective_quick_amounts`, `get_method_amount_limits` — Эффективные min/max метода: настройка кабинета, иначе дефолт из env., `get_methods_amount_limits` — Эффективные min/max для набора конфигов одним запросом., `ensure_payment_method_configs` — Initialize payment method configs if they don't exist yet., `get_all_configs` — Get all payment method configs ordered by sort_order., `get_config_by_method_id` — Get a single config by method_id., `update_config` — Update a payment method config., `update_sort_order` — Batch update sort order for all methods., `get_all_promo_groups` — Get all promo groups for the filter selector., `get_enabled_methods_for_user` — Get payment methods available for a specific user.
@@ -4366,6 +4369,9 @@
 - `tests/handlers/test_devices_screen_layout.py` — Python-модуль
   Классы: нет
   Функции: `test_each_device_is_a_full_width_button` — Устройство занимает весь ряд — в ряду ровно одна кнопка., `test_rename_button_is_gone` — Кнопки переименования в UI больше нет., `test_reset_all_button_is_gone` — Массовый сброс убран — функция не нужна., `test_no_pagination_row_within_the_limit` — 20 устройств — предел, страниц не появляется., `test_pagination_still_works_beyond_the_limit` — 21+ устройств (аномалия панели) — не крах, а вторая страница., `test_back_is_always_last`
+- `tests/handlers/test_failed_payment_fallback.py` — Python-модуль
+  Классы: нет
+  Функции: `test_yookassa_webhook_failure_sends_fallback`, `test_yookassa_failure_is_offered_once_per_payment`, `test_yookassa_non_failure_status_never_sends_fallback`, `test_yookassa_status_sync_failure_sends_fallback`, `test_heleket_payload_failure_sends_fallback_once`, `test_heleket_non_failure_status_never_sends_fallback`, `test_yookassa_manual_check_renders_fallback_after_proactive_message`, `test_yookassa_manual_check_does_not_render_for_pending`, `test_heleket_manual_check_renders_fallback`
 - `tests/handlers/test_gift_deeplink_activation.py` — Python-модуль
   Классы: `TestGiftDeeplinkActivation` (7 методов), `TestGiftSubscriptionActivationMultiTariff` (3 методов), `TestGiftSubscriptionActivationSingleTariff` (3 методов), `TestGiftProvisioningInvariants` (2 методов)
   Функции: нет
@@ -4939,6 +4945,9 @@
 - `tests/services/test_payment_common.py` — Python-модуль
   Классы: нет
   Функции: `anyio_backend`, `test_send_payment_success_notification_recovers_missing_greenlet`, `test_success_keyboard_reload_prefers_active_subscription` — Мультитариф: есть активная подписка — возврат к checkout не предлагаем., `test_success_keyboard_reload_offers_resume_for_expired_subscription`, `test_success_keyboard_reload_skips_pending_trial_like_normal_path` — Pending-триал не считается подпиской: кнопка возврата к checkout остаётся.
+- `tests/services/test_payment_fallback_service.py` — Python-модуль
+  Классы: нет
+  Функции: `payment_methods` — Enable exactly Stars, both YooKassa rails and Heleket for the keyboard., `test_excluding_yookassa_removes_only_the_card_rail`, `test_excluding_heleket_removes_only_heleket`, `test_no_alternative_methods_still_leave_support_and_back`, `test_existing_callers_keep_the_unfiltered_keyboard`, `test_build_payment_fallback_uses_amount_and_filters_only_failed_method`, `test_sender_claims_the_payment_for_24_hours`, `test_sender_cooldown_works_without_redis`, `test_failed_send_releases_the_claim_for_retry`, `test_sender_requires_a_telegram_user`
 - `tests/services/test_payment_method_amount_limits.py` — Python-модуль
   Классы: нет
   Функции: `test_missing_config_row_uses_method_defaults`, `test_cabinet_override_wins_over_defaults`, `test_none_fields_fall_back_individually`, `test_unknown_method_uses_base_defaults`

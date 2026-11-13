@@ -12,6 +12,7 @@ from app.database.models import User
 from app.keyboards.inline import get_back_keyboard
 from app.keyboards.topup_amounts import get_topup_amount_keyboard
 from app.localization.texts import get_texts
+from app.services.payment_fallback_service import build_payment_fallback
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
@@ -26,6 +27,23 @@ from app.utils.timezone import format_local_datetime
 
 
 logger = structlog.get_logger(__name__)
+
+
+async def _render_payment_fallback(callback: types.CallbackQuery, payment, failed_method: str) -> None:
+    message = getattr(callback, 'message', None)
+    if message is None:
+        return
+
+    text, keyboard = build_payment_fallback(
+        getattr(payment, 'user', None),
+        getattr(payment, 'amount_kopeks', 0) or 0,
+        failed_method,
+    )
+    try:
+        await message.edit_text(text, reply_markup=keyboard, parse_mode='HTML')
+    except Exception as edit_error:  # pragma: no cover - photo invoices cannot be edited to text
+        logger.warning('Не удалось заменить экран платежа на fallback', error=edit_error)
+        await message.answer(text, reply_markup=keyboard, parse_mode='HTML')
 
 
 @error_handler
@@ -497,6 +515,10 @@ async def check_yookassa_payment_status(callback: types.CallbackQuery, db: Async
             message_text += f'\n❌ Платеж не прошел. Обратитесь в {settings.get_support_contact_display()}'
 
         await callback.answer(message_text, show_alert=True)
+
+        if payment.is_failed:
+            failed_method = 'yookassa_sbp' if (payment.payment_method_type or '').lower() == 'sbp' else 'yookassa'
+            await _render_payment_fallback(callback, payment, failed_method)
 
     except Exception as e:
         logger.error('Ошибка проверки статуса платежа', error=e)
