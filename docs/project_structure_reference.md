@@ -90,7 +90,7 @@
   Функции: `create_bot` — Create a Bot instance with SOCKS5 proxy and/or custom Telegram API server.
 - `app/cabinet/`
 - `app/config.py` — Python-модуль
-  Классы: `Settings` (423 методов)
+  Классы: `Settings` (427 методов)
   Функции: `transliterate_cyrillic` — Заменяет кириллические буквы латинскими, сохраняя регистр («Шмель» → «Shmel»)., `set_period_prices_from_db` — Устанавливает периоды/цены из БД., `get_db_period_prices` — Возвращает периоды/цены из БД если они загружены., `clear_db_period_prices` — Очищает кеш цен из тарифов (при переключении в classic mode)., `refresh_period_prices` — Rebuild cached period price mapping., `refresh_classic_period_prices` — Rebuild CLASSIC_PERIOD_PRICES from current settings., `get_traffic_prices`, `refresh_traffic_prices`
 - `app/database/`
 - `app/external/`
@@ -647,7 +647,7 @@
   Классы: нет
   Функции: `run_alembic_upgrade` — Run ``alembic upgrade head``, handling fresh and legacy databases., `stamp_alembic_head` — Stamp the DB as being at head without running migrations (for existing DBs).
 - `app/database/models.py` — Python-модуль
-  Классы: `AwareDateTime` (2 методов), `UserStatus`, `SubscriptionStatus`, `TransactionType`, `PromoCodeType`, `PaymentMethod`, `MainMenuButtonActionType`, `MainMenuButtonVisibility`, `WheelPrizeType`, `WheelSpinPaymentType`, `YooKassaPayment` (6 методов), `SavedPaymentMethod` (1 методов), `CryptoBotPayment` (5 методов), `AppleTransaction` (2 методов), `AppleIAPAccount` (1 методов), `AppleNotification` (1 методов), `AppleIAPAbuseEvent` (1 методов), `HeleketPayment` (5 методов), `MulenPayPayment` (2 методов), `Pal24Payment` (3 методов), `WataPayment` (2 методов), `PlategaPayment` (2 методов), `PlategaSubscription` (1 методов), `LavaSubscription` (1 методов), `CasheraSubscription` (1 методов), `CloudPaymentsPayment` (5 методов), `FreekassaPayment` (5 методов), `KassaAiPayment` (5 методов), `RioPayPayment` (5 методов), `SeverPayPayment` (5 методов), `PayPearPayment` (5 методов), `RollyPayPayment` (5 методов), `OverpayPayment` (5 методов), `AuraPayPayment` (5 методов), `EtoplatezhiPayment` (5 методов), `AntilopayPayment` (5 методов), `JupiterPayment` (5 методов), `DonutPayment` (5 методов), `LavaPayment` (5 методов), `CisPayPayment` (5 методов), `CasheraPayment` (5 методов), `TabPayPayment` (5 методов), `ParityPayPayment` (5 методов), `PromoGroup` (3 методов), `UserPromoGroup` (1 методов), `Tariff` (21 методов), `PartnerStatus`, `User` (12 методов), `Subscription` (15 методов), `GraceAccessSessionModel`, `TrafficPurchase` (1 методов), `SubscriptionPremiumTraffic` (3 методов), `Transaction` (1 методов), `SubscriptionConversion` (2 методов), `PromoCode` (2 методов), `PromoCodeUse`, `CouponStatus`, `CouponBatch` (2 методов), `Coupon` (1 методов), `ReferralRewardType`, `ReferralRewardTrigger`, `ReferralRewardMode`, `ReferralRewardLevel` (1 методов), `ReferralEarning` (1 методов), `WithdrawalRequestStatus`, `WithdrawalRequest` (1 методов), `PartnerApplication`, `ReferralContest` (1 методов), `ReferralContestEvent` (1 методов), `ReferralContestVirtualParticipant` (1 методов), `ContestTemplate`, `ContestRound`, `ContestAttempt`, `Squad` (1 методов), `ServiceRule`, `PrivacyPolicy`, `PublicOffer`, `LegalConsent`, `RecurrentPayments`, `FaqSetting`, `FaqPage`, `SystemSetting`, `EmailTemplate`, `MonitoringLog`, `SentNotification`, `SubscriptionEvent`, `DiscountOffer`, `PromoOfferTemplate`, `SubscriptionTemporaryAccess`, `PromoOfferLog`, `BroadcastHistory`, `Poll`, `PollQuestion`, `PollOption`, `PollResponse`, `PollAnswer`, `ServerSquad` (3 методов), `SubscriptionServer`, `SupportAuditLog`, `UserMessage` (1 методов), `WelcomeText`, `PinnedMessage`, `AdvertisingCampaign` (4 методов), `AdvertisingCampaignRegistration` (1 методов), `TicketStatus`, `Ticket` (8 методов), `TicketMessage` (3 методов), `WebApiToken` (1 методов), `MainMenuButton` (3 методов), `MenuLayoutHistory` (1 методов), `ButtonClickLog` (1 методов), `Webhook` (1 методов), `WebhookDelivery` (1 методов), `CabinetRefreshToken` (4 методов), `WheelConfig` (1 методов), `WheelPrize` (1 методов), `WheelSpin` (3 методов), `TicketNotification` (1 методов), `PaymentMethodConfig` (1 методов), `RequiredChannel` (1 методов), `UserChannelSubscription` (1 методов), `AdminRole` (1 методов), `UserRole` (1 методов), `AccessPolicy` (1 методов), `AdminAuditLog` (1 методов), `LandingPage` (1 методов), `GuestPurchaseStatus`, `GuestPurchase` (1 методов), `NewsArticle` (1 методов), `NewsCategory` (1 методов), `NewsTag` (1 методов), `YandexClientIdMap`, `InfoPage`, `UserDeviceAlias`, `SystemErrorEvent`, `EmailQueueItem`, `ReachabilityBatch`, `ReachabilityJob`, `ReachabilityLeg`, `ReachabilityTargetPref`, `DpiCheckerAction`, `UserReminder` (1 методов), `UserReminderState`
+  Классы: `AwareDateTime` (2 методов), `UserStatus`, `SubscriptionStatus`, `TransactionType`, `PromoCodeType`, `PaymentMethod`, `MainMenuButtonActionType`, `MainMenuButtonVisibility`, `WheelPrizeType`, `WheelSpinPaymentType`, `YooKassaPayment` (6 методов), `SavedPaymentMethod` (1 методов), `CryptoBotPayment` (5 методов), `AppleTransaction` (2 методов), `AppleIAPAccount` (1 методов), `AppleNotification` (1 методов), `AppleIAPAbuseEvent` (1 методов), `HeleketPayment` (5 методов), `MulenPayPayment` (2 методов), `Pal24Payment` (3 методов), `WataPayment` (2 методов), `PlategaPayment` (2 методов), `PlategaSubscription` (1 методов), `LavaSubscription` (1 методов), `CasheraSubscription` (1 методов), `CloudPaymentsPayment` (5 методов), `FreekassaPayment` (5 методов), `KassaAiPayment` (5 методов), `RioPayPayment` (5 методов), `SeverPayPayment` (5 методов), `PayPearPayment` (5 методов), `RollyPayPayment` (5 методов), `OverpayPayment` (5 методов), `AuraPayPayment` (5 методов), `EtoplatezhiPayment` (5 методов), `AntilopayPayment` (5 методов), `JupiterPayment` (5 методов), `DonutPayment` (5 методов), `LavaPayment` (5 методов), `CisPayPayment` (5 методов), `CasheraPayment` (5 методов), `TabPayPayment` (5 методов), `ParityPayPayment` (5 методов), `PromoGroup` (3 методов), `UserPromoGroup` (1 методов), `Tariff` (21 методов), `PartnerStatus`, `User` (12 методов), `Subscription` (15 методов), `GraceAccessSessionModel`, `TrafficPurchase` (1 методов), `SubscriptionPremiumTraffic` (3 методов), `PasarguardDeleteIntent`, `Transaction` (1 методов), `SubscriptionConversion` (2 методов), `PromoCode` (2 методов), `PromoCodeUse`, `CouponStatus`, `CouponBatch` (2 методов), `Coupon` (1 методов), `ReferralRewardType`, `ReferralRewardTrigger`, `ReferralRewardMode`, `ReferralRewardLevel` (1 методов), `ReferralEarning` (1 методов), `WithdrawalRequestStatus`, `WithdrawalRequest` (1 методов), `PartnerApplication`, `ReferralContest` (1 методов), `ReferralContestEvent` (1 методов), `ReferralContestVirtualParticipant` (1 методов), `ContestTemplate`, `ContestRound`, `ContestAttempt`, `Squad` (1 методов), `ServiceRule`, `PrivacyPolicy`, `PublicOffer`, `LegalConsent`, `RecurrentPayments`, `FaqSetting`, `FaqPage`, `SystemSetting`, `EmailTemplate`, `MonitoringLog`, `SentNotification`, `SubscriptionEvent`, `DiscountOffer`, `PromoOfferTemplate`, `SubscriptionTemporaryAccess`, `PromoOfferLog`, `BroadcastHistory`, `Poll`, `PollQuestion`, `PollOption`, `PollResponse`, `PollAnswer`, `ServerSquad` (3 методов), `SubscriptionServer`, `SupportAuditLog`, `UserMessage` (1 методов), `WelcomeText`, `PinnedMessage`, `AdvertisingCampaign` (4 методов), `AdvertisingCampaignRegistration` (1 методов), `TicketStatus`, `Ticket` (8 методов), `TicketMessage` (3 методов), `WebApiToken` (1 методов), `MainMenuButton` (3 методов), `MenuLayoutHistory` (1 методов), `ButtonClickLog` (1 методов), `Webhook` (1 методов), `WebhookDelivery` (1 методов), `CabinetRefreshToken` (4 методов), `WheelConfig` (1 методов), `WheelPrize` (1 методов), `WheelSpin` (3 методов), `TicketNotification` (1 методов), `PaymentMethodConfig` (1 методов), `RequiredChannel` (1 методов), `UserChannelSubscription` (1 методов), `AdminRole` (1 методов), `UserRole` (1 методов), `AccessPolicy` (1 методов), `AdminAuditLog` (1 методов), `LandingPage` (1 методов), `GuestPurchaseStatus`, `GuestPurchase` (1 методов), `NewsArticle` (1 методов), `NewsCategory` (1 методов), `NewsTag` (1 методов), `YandexClientIdMap`, `InfoPage`, `UserDeviceAlias`, `SystemErrorEvent`, `EmailQueueItem`, `ReachabilityBatch`, `ReachabilityJob`, `ReachabilityLeg`, `ReachabilityTargetPref`, `DpiCheckerAction`, `UserReminder` (1 методов), `UserReminderState`
   Функции: нет
 
 #### app/database/crud
@@ -751,6 +751,9 @@
 - `app/database/crud/paritypay.py` — Python-модуль
   Классы: нет
   Функции: `create_paritypay_payment` — Создаёт запись о платеже ParityPay., `get_paritypay_payment_by_order_id` — Получает платеж по order_id (наш)., `get_paritypay_payment_by_invoice_id` — Получает платёж по идентификатору, выданному ParityPay., `get_paritypay_payment_by_id` — Получает платеж по локальному ID., `get_paritypay_payment_by_id_for_update` — Получает платёж с блокировкой FOR UPDATE., `update_paritypay_payment_status` — Обновляет статус платежа., `is_paritypay_event_processed` — Обрабатывалась ли уже пара (id, status) из вебхука., `remember_paritypay_event` — Помечает пару (id, status) обработанной., `get_pending_paritypay_payments` — Возвращает незавершённые платежи пользователя., `link_paritypay_payment_to_transaction` — Связывает платёж с транзакцией.
+- `app/database/crud/pasarguard.py` — Python-модуль
+  Классы: нет
+  Функции: `set_pasarguard_identity` — Запомнить личность пользователя PasarGuard, созданного для подписки., `clear_pasarguard_identity` — Стереть личность вместе с аудитом сверки и отложенным revoke., `add_delete_intent` — Поставить в очередь удаление пользователя PasarGuard для подписки., `list_delete_intents` — Старейшие интенты первыми: очередь разбирается в порядке поступления., `delete_intent` — Убрать исполненный интент из очереди.
 - `app/database/crud/payment_gateway_stats.py` — Python-модуль
   Классы: нет
   Функции: `get_gateway_success_rates` — Per-gateway {method, total, paid, success_rate} for gateways with activity.
@@ -924,6 +927,9 @@
   Функции: `create_heleket_app`, `start_heleket_webhook_server`
 - `app/external/pal24_client.py` — Python-модуль
   Классы: `Pal24APIError`, `Pal24Response` (2 методов), `Pal24Client` (14 методов)
+  Функции: нет
+- `app/external/pasarguard_api.py` — Python-модуль
+  Классы: `PasarguardUser`, `PasarguardAPIError` (1 методов), `PasarguardTransientError`, `PasarguardNotFoundError`, `PasarguardAPI` (13 методов)
   Функции: нет
 - `app/external/remnawave_api.py` — Python-модуль
   Классы: `UserStatus`, `TrafficLimitStrategy`, `UserTraffic`, `RemnaWaveUser` (4 методов), `RemnaWaveInbound`, `RemnaWaveInternalSquad`, `RemnaWaveAccessibleNode`, `RemnaWaveHost`, `RemnaWaveNode` (2 методов), `SubscriptionInfo`, `SubscriptionPageConfig`, `RemnaWaveExternalSquad`, `RemnaWaveTransientError`, `RemnaWaveAPI` (108 методов)
@@ -1691,6 +1697,9 @@
 - `app/services/partner_stats_service.py` — Python-модуль
   Классы: `PartnerStatsService` (12 методов)
   Функции: нет
+- `app/services/pasarguard_sync_service.py` — Python-модуль
+  Классы: `PremiumStateView`, `SyncSubject`, `DesiredState`, `PasarguardSyncService` (31 методов)
+  Функции: `subscription_allows_xdrive` — Даёт ли подписка вместе с пользователем право на xdrive сейчас., `premium_state_allows_xdrive` — Есть ровно один positive premium-сквад, и его пул не закрыт., `evaluate_desired_state` — Свести снимок подписки в желаемое состояние пользователя PasarGuard., `revoke_pasarguard_subscription` — Синхронный revoke на пути отзыва подписки., `enqueue_pasarguard_delete` — Записать намерение удалить пользователя панели до hard-delete подписки.
 - `app/services/payment/`
 - `app/services/payment_alert_service.py` — Python-модуль
   Классы: `PaymentAlert`
@@ -1735,7 +1744,7 @@
   Классы: `PremiumTopupError` (1 методов), `PremiumTopupQuote` (1 методов)
   Функции: `get_premium_topup_options` — Сквады подписки, где докупка премиум-трафика включена и есть пакеты., `quote_premium_topup` — Проверить возможность покупки и посчитать цену до скидок., `apply_premium_topup` — Начислить купленный объём.
 - `app/services/premium_traffic_service.py` — Python-модуль
-  Классы: `PremiumTrafficService` (40 методов)
+  Классы: `PremiumTrafficService` (42 методов)
   Функции: `panel_user_id_for_subscription` — Аккаунт в панели, к которому относятся расход и сквады подписки.
 - `app/services/pricing_engine.py` — Python-модуль
   Классы: `TariffBreakdown`, `ClassicBreakdown`, `RenewalPricing` (1 методов), `TariffSwitchResult` (2 методов), `PricingEngine` (20 методов)
@@ -1940,6 +1949,9 @@
 - `app/services/wheel_service.py` — Python-модуль
   Классы: `SpinResult`, `EligibleSubscription`, `SpinAvailability`, `FortuneWheelService` (14 методов)
   Функции: нет
+- `app/services/xdrive_service.py` — Python-модуль
+  Классы: `XdriveTarget`, `PasarguardConfigProvider` (3 методов)
+  Функции: `lookup_xdrive_target` — Найти подписку по shortUuid и решить, положен ли ей xdrive сейчас.
 - `app/services/yandex_offline_conv_service.py` — Python-модуль
   Классы: нет
   Функции: `spawn_bg` — Spawn a background Yandex conversion task with proper reference tracking., `fire_registration_bg` — Fire registration event in background with its own DB session., `fire_trial_bg` — Fire trial event in background with its own DB session., `fire_purchase_bg` — Fire purchase event in background with its own DB session., `store_cid` — Store Yandex ClientID (and optional yclid) for a user. Returns True if stored., `store_cid_and_fire_registration` — Store Yandex CID and fire registration conversion in background (best-effort)., `store_cid_and_fire_purchase` — Persist a freshly-provided CID, then fire a purchase event in background., `store_cid_only` — Persist a freshly-provided CID WITHOUT firing a purchase event., `store_cid_and_fire_trial` — Same as `store_cid_and_fire_purchase` but for trial activation (#558449)., `on_registration` — Fire registration event (once per user)., `on_trial` — Fire trial-add event (once per user)., `on_purchase` — Fire ecommerce purchase event (every payment)., `parse_cid_from_start_param` — Extract Yandex CID from bot start parameter.
@@ -2706,8 +2718,8 @@
   Классы: нет
   Функции: `create_remnawave_webhook_router` — Build the FastAPI router for RemnaWave webhooks.
 - `app/webserver/subscription_proxy.py` — Python-модуль
-  Классы: `SubscriptionProxyMiddleware` (7 методов)
-  Функции: `short_uuid_candidates`, `rewrite_userinfo` — Меняет upload/download/total, остальные поля (``expire``) оставляет., `premium_usage` — (израсходовано, лимит с докупленным) по премиум-сквадам подписки, в байтах., `lookup_premium_usage`, `lookup_adblock_enabled` — Включён ли adblock-DNS у подписки, найденной по shortUuid., `patch_adblock_dns` — Добавить adblock-DNS и правила в Xray JSON, не трогая остальное., `create_proxy_client`
+  Классы: `SubscriptionProxyMiddleware` (10 методов)
+  Функции: `short_uuid_candidates`, `rewrite_userinfo` — Меняет upload/download/total, остальные поля (``expire``) оставляет., `premium_usage` — (израсходовано, лимит с докупленным) по премиум-сквадам подписки, в байтах., `lookup_premium_usage`, `lookup_adblock_enabled` — Включён ли adblock-DNS у подписки, найденной по shortUuid., `patch_adblock_dns` — Добавить adblock-DNS и правила в Xray JSON, не трогая остальное., `merge_xdrive_configs` — Дописать конфиги PasarGuard к Xray JSON страницы подписок., `create_proxy_client`
 - `app/webserver/telegram.py` — Python-модуль
   Классы: `TelegramWebhookProcessorError`, `TelegramWebhookProcessorNotRunningError`, `TelegramWebhookOverloadedError`, `TelegramWebhookProcessor` (7 методов)
   Функции: `create_telegram_router`
@@ -2751,6 +2763,7 @@
 - `docs/web-admin-integration-guide.md` — файл
 - `docs/web-admin-integration.md` — файл
 - `docs/websocket-and-webhooks.md` — файл
+- `docs/xdrive-pasarguard.md` — файл
 
 ### docs/backlog
 
@@ -2775,12 +2788,15 @@
 - `docs/superpowers/plans/2026-11-12-referral-days-only-p0-p1.md` — файл
 - `docs/superpowers/plans/2026-11-13-trial-payment-resilience.md` — файл
 - `docs/superpowers/plans/2026-11-14-expiry-autopay-discount-notifications.md` — файл
+- `docs/superpowers/plans/2026-11-14-xdrive-pasarguard-handoff.md` — файл
+- `docs/superpowers/plans/2026-11-14-xdrive-pasarguard-subscription.md` — файл
 
 #### docs/superpowers/specs
 
 - `docs/superpowers/specs/2026-10-30-legal-documents-support-menu-design.md` — файл
 - `docs/superpowers/specs/2026-11-13-trial-payment-resilience-design.md` — файл
 - `docs/superpowers/specs/2026-11-14-expiry-autopay-discount-notifications-design.md` — файл
+- `docs/superpowers/specs/2026-11-14-xdrive-pasarguard-subscription-design.md` — файл
 
 ## migrations
 
@@ -3204,6 +3220,9 @@
 - `migrations/alembic/versions/0136_referral_first_purchase_marker_unique.py` — Python-модуль
   Классы: нет
   Функции: `upgrade`, `downgrade`
+- `migrations/alembic/versions/0137_xdrive_pasarguard.py` — Python-модуль
+  Классы: нет
+  Функции: `upgrade`, `downgrade`
 
 ## scripts
 
@@ -3249,6 +3268,9 @@
 - `tests/test_config_languages.py` — Python-модуль
   Классы: нет
   Функции: `test_available_languages_default_contains_fa`, `test_available_languages_normalizes_and_deduplicates`
+- `tests/test_config_xdrive.py` — Python-модуль
+  Классы: нет
+  Функции: `settings_with`, `test_xdrive_disabled_by_default`, `test_defaults_match_the_interface`, `test_pasarguard_configured_requires_url_key_and_group`, `test_is_xdrive_enabled_reads_only_the_flag`, `test_sync_interval_floor_is_sixty_seconds`, `test_instance_id_falls_back_to_hostname`, `test_env_example_documents_commented_defaults`
 - `tests/test_coupon_deeplink_pins.py` — Python-модуль
   Классы: нет
   Функции: `test_cmd_start_parses_coupon_deep_link`, `test_coupon_redeem_called_at_every_gift_activation_site`, `test_coupon_branch_only_swallows_existing_coupons` — `start_parameter = None` must sit INSIDE the is_coupon_token() guard AND, `test_redeem_flips_status_before_remnawave_sync`, `test_redeem_claims_under_row_lock_and_rechecks`, `test_redeem_aborts_when_remnawave_sync_returns_none`, `test_revoke_confirm_registered_before_revoke_prefix`, `test_create_confirm_is_guarded_against_stale_buttons_and_double_taps`, `test_admin_states_for_coupon_creation_exist`
@@ -3862,6 +3884,9 @@
 - `tests/crud/test_free_tariff_day_reset.py` — Python-модуль
   Классы: нет
   Функции: `test_is_free_paid_periodic`, `test_is_free_zero_periodic`, `test_is_free_mixed_is_not_free`, `test_is_free_empty_prices_not_free`, `test_is_free_daily_zero`, `test_is_free_daily_paid`, `test_paid_sub_carries_days`, `test_free_source_does_not_carry`, `test_trial_does_not_carry_by_default`, `test_trial_carries_only_when_add_on_and_reset_off`, `test_reset_free_days_overrides_trial_add` — Ядро фикса: TARIFF_SWITCH_RESET_FREE_DAYS=true перебивает, `test_carry_trial_helper_matrix`, `test_is_free_source_tariff_true`, `test_is_free_source_tariff_false_for_paid`, `test_is_free_source_tariff_handles_missing`, `test_is_free_source_tariff_safe_on_error` — Любая ошибка lookup → False (переносим дни как раньше, смена не падает).
+- `tests/crud/test_pasarguard_identity.py` — Python-модуль
+  Классы: нет
+  Функции: `test_set_and_clear_identity`, `test_delete_intent_round_trip`
 - `tests/crud/test_payment_crud_roundtrip.py` — Python-модуль
   Классы: нет
   Функции: `test_create_round_trip`, `test_lookup_by_order_id_and_invoice_id`, `test_order_id_is_unique_in_database` — Два платежа с одним order_id разошлись бы по одному уведомлению., `test_processed_events_survive_commit` — Главная проверка: список обработанных событий обязан долетать до БД., `test_second_event_appends_in_database` — Возврат после оплаты — второе событие, первое не должно пропасть., `test_update_status_persists`, `test_update_status_keeps_is_paid_when_not_given` — is_paid=None означает «не трогать»: возврат не должен обнулять факт оплаты., `test_link_to_transaction_persists`, `test_pending_list_excludes_paid`, `test_for_update_lock_is_not_verifiable_on_sqlite` — SQLite молча игнорирует FOR UPDATE — блокировка тут НЕ проверяется., `test_expires_at_round_trip` — Дата истечения должна возвращаться с часовым поясом, а не наивной.
@@ -4037,6 +4062,9 @@
 - `tests/database/test_users_statistics_blocked_count.py` — Python-модуль
   Классы: нет
   Функции: `test_blocked_counts_only_the_blocked_status`
+- `tests/database/test_xdrive_schema.py` — Python-модуль
+  Классы: нет
+  Функции: `test_subscription_has_pasarguard_columns`, `test_premium_traffic_has_pasarguard_baseline_columns`, `test_delete_intent_table_has_expected_columns`, `test_pasarguard_user_id_is_unique_when_set` — Два непустых одинаковых id запрещены, а непривязанных строк может быть много., `test_migration_adds_pasarguard_schema_to_existing_database`, `test_migration_is_idempotent_on_an_already_migrated_database`
 
 #### tests/database/crud
 
@@ -4064,6 +4092,9 @@
 - `tests/external/test_dpichecker_api.py` — Python-модуль
   Классы: нет
   Функции: `test_error_codes_come_from_body`, `test_rejected_inputs_are_kept`, `test_429_carries_retry_after`, `test_5xx_without_json_is_gateway`, `test_success_body_returned_as_is`, `test_idempotency_key_only_on_paid_post`, `test_key_sent_in_x_api_key_header`, `test_unknown_check_type_refused_before_network`, `test_methods_hit_expected_paths`, `test_wait_timeout_clamped_to_service_limit`, `test_cheremsha_joins_resources`, `test_long_poll_gets_its_own_longer_timeout`, `test_default_session_timeout_is_short`, `test_account_list_passes_only_given_filters`, `test_report_json_asks_json_format`, `test_deliveries_paged`
+- `tests/external/test_pasarguard_api.py` — Python-модуль
+  Классы: нет
+  Функции: `test_create_user_posts_to_api_user`, `test_get_user_by_id_uses_by_id_path`, `test_get_user_by_username_uses_by_username_path`, `test_disable_uses_by_id_disabled_and_toggle_body`, `test_revoke_uses_by_id_revoke_sub`, `test_delete_uses_delete_by_id`, `test_list_users_paginates_and_parses_lifetime`, `test_list_users_forwards_pagination`, `test_subscription_config_returns_raw_bytes`, `test_404_raises_not_found`, `test_other_4xx_raises_api_error`, `test_5xx_and_timeout_raise_transient`, `test_writes_are_not_retried`
 - `tests/external/test_remnawave_3_0_0.py` — Python-модуль
   Классы: нет
   Функции: `test_coerce_panel_user_id_accepts_ints_and_digit_strings`, `test_coerce_panel_user_id_rejects_everything_else` — Мусорный идентификатор обязан падать на границе клиента, а не уходить в панель:, `test_invalid_user_id_error_is_a_remnawave_api_error` — Вызывающий код ловит RemnaWaveAPIError — новый тип не должен пролетать мимо., `test_is_user_not_found_error_recognises_only_real_absence`, `test_is_user_not_found_error_never_true_for_invalid_local_id` — Битая ссылка в БД бота — это баг данных, а не «в панели нет пользователя»., `test_parsed_user_has_numeric_id_and_no_uuid_field` — 3.0.0 удалил ``uuid`` из UsersSchema — датакласс не должен его воскрешать., `test_get_user_by_id_uses_numeric_path`, `test_get_user_by_id_rejects_uuid_before_any_request`, `test_update_user_body_is_keyed_on_id_not_uuid` — UpdateUserCommand.RequestBodySchema в 3.0.0 не имеет поля ``uuid``: zod срежет, `test_update_user_coerces_digit_string_id_to_number`, `test_update_user_rejects_uuid_before_any_request`, `test_user_actions_are_addressed_by_numeric_id`, `test_resolve_user_sends_exactly_one_identifier`, `test_resolve_user_rejects_zero_or_multiple_identifiers` — Панель требует ровно одно поле — отсекаем локально, не тратя запрос на 400., `test_resolve_user_returns_none_when_panel_has_no_such_user`, `test_resolve_user_propagates_non_not_found_errors` — 400 — это отказ панели обработать запрос, а не «пользователя нет»:, `test_resolve_user_returns_none_on_empty_response_envelope`, `test_extend_user_expiration_sends_days_body`, `test_extend_user_expiration_requires_at_least_one_day` — days < 1 панель отвергнет валидацией — запрос не отправляем вовсе., `test_extend_user_expiration_rejects_uuid_before_any_request`, `test_remove_device_body_uses_numeric_user_id_not_user_uuid` — 2.8.0 переименовал ``userUuid`` -> ``userId`` в HWID-командах, 3.0.0 сделал его, `test_remove_device_coerces_digit_string_user_id`, `test_remove_device_with_uuid_fails_without_touching_panel` — Протухший uuid в БД бота: сообщаем о неудаче, но не шлём заведомо битый запрос., `test_reset_user_devices_uses_single_delete_all_call` — Раньше это был цикл из N удалений с эвристикой «успех, если упало меньше, `test_reset_user_devices_with_uuid_fails_without_touching_panel`, `test_get_user_devices_is_addressed_by_numeric_id`, `test_delete_user_returns_true_on_empty_body` — 3.0.0: DELETE отвечает 204 (синхронно) либо 202 (в очередь) — тела нет,, `test_empty_body_actions_return_true_without_reading_response` — Bulk-операции сквадов, удаление сквада и рестарт ноды выполняются в фоне:, `test_add_many_users_sends_numeric_ids`, `test_add_many_users_rejects_invalid_ids_before_request`, `test_bulk_squad_actions_skip_request_for_empty_id_list`, `test_restart_node_sends_force_restart_body_default_false`, `test_restart_node_forwards_force_restart_true`, `test_restart_all_nodes_sends_force_restart_body`, `test_users_page_stream_omits_cursor_on_first_page`, `test_users_page_stream_passes_cursor_when_given`, `test_users_page_stream_keeps_cursor_as_string` — Запрос коерсит курсор в число (z.coerce.number), а ответ отдаёт его строкой —, `test_users_page_stream_clamps_size_to_panel_contract` — Контракт панели (zod): size строго 1..1000, иначе 400 «Validation failed», `test_users_stream_follows_cursor_until_exhausted`, `test_users_stream_stops_when_next_cursor_is_null_even_if_has_more_true` — Defensive: a null nextCursor terminates the scan regardless of hasMore., `test_find_users_by_telegram_id_filters_in_query_string` — ``GET /api/users/by-telegram-id/{id}`` удалён — поиск живёт в query-фильтре, `test_find_users_by_email_filters_in_query_string` — ``GET /api/users/by-email/{email}`` удалён — тот же query-фильтр стрима., `test_find_users_passes_all_supported_filters`, `test_find_users_sends_no_filters_when_none_given`, `test_find_users_follows_cursor_and_honours_max_results`, `test_find_users_stops_early_once_max_results_reached`, `test_happ_encrypt_404_disables_panel_endpoint_and_falls_back` — 2.8.0 removed POST /api/system/tools/happ/encrypt → 404 must disable further, `test_happ_encrypt_non_404_error_keeps_endpoint_enabled` — A transient 5xx must NOT permanently disable happ-encrypt (only a 404 = removed)., `test_happ_api_fallback_caches_by_subscription_url` — The client is recreated per request — the crypt5 cache must live on the class, `test_happ_api_fallback_cooldown_after_failure` — A Happ API outage must not stall hot paths — one failure pauses further calls., `test_happ_api_fallback_rejects_unexpected_payload_per_url` — A non-happ:// body is a per-URL problem: never cached as a link, never retried,, `test_happ_api_fallback_4xx_does_not_poison_global_cooldown` — A 4xx rejection of one URL must not disable the fallback for everyone., `test_happ_api_fallback_429_arms_cooldown_not_per_url_ban` — 429 is service throttling: pause globally, but the URL must stay retryable., `test_enrich_uses_external_fallback_only_in_cryptolink_mode` — enrich runs on every get_user_by_*: subscription URLs must not go to the, `test_happ_api_fallback_disabled_by_setting` — HAPP_CRYPTOLINK_API_FALLBACK_ENABLED=false must skip the external service., `test_happ_local_encryption_roundtrip` — Локальное шифрование должно давать happ://crypt4/<base64>, расшифровываемый, `test_happ_local_encryption_real_key_single_rsa4096_block` — Со вшитым ключом Happ v4 (RSA-4096) шифртекст — один блок в 512 байт,, `test_happ_local_encryption_rejects_oversized_payload` — PKCS#1 v1.5 вмещает size_in_bytes()-11: слишком длинная ссылка -> None,, `test_happ_local_encryption_disabled_by_setting` — HAPP_CRYPTOLINK_LOCAL_ENCRYPTION_ENABLED=false должен пропустить локальный, `test_happ_local_encryption_stable_for_same_url` — Паддинг PKCS#1 v1.5 случайный, поэтому без кэша каждый вызов давал бы новую, `test_enrich_uses_local_encryption_without_network` — С локальным шифрованием enrich заполняет crypt-ссылку в любом режиме бота,, `test_delete_all_devices_reports_failure_when_devices_remain` — Панель может ответить 200, оставив устройства — это не успех., `test_delete_all_devices_reports_success_when_panel_is_empty`, `test_update_user_sends_null_tag_to_clear_it` — В контракте панели ``tag`` в PATCH — optional + nullable: не прислать = не, `test_update_user_leaves_tag_alone_when_not_given`
@@ -4551,6 +4582,9 @@
 - `tests/integration/test_promocode_promo_group_flow.py` — Python-модуль
   Классы: нет
   Функции: `test_promo_group_promocode_full_workflow` — Integration test: Full workflow of promo group promocode, `test_duplicate_promo_group_assignment_edge_case` — Edge case: User already has promo group from previous promocode, `test_missing_promo_group_graceful_failure` — Edge case: Promocode references deleted/non-existent promo group
+- `tests/integration/test_xdrive_lifecycle.py` — Python-модуль
+  Классы: `FakePasarguardAPI` (9 методов)
+  Функции: `test_purchase_creates_and_enables_user`, `test_renewal_updates_expire_and_keeps_uuid`, `test_tariff_switch_updates_expire_and_data_limit`, `test_remnawave_webhook_import_is_projected` — Импорт «панель — истина» меняет БД, проектор применяет новое состояние., `test_expiry_disables_user`, `test_general_traffic_limit_disables_user`, `test_ban_disables_and_unban_enables`, `test_premium_topup_reenables_user`, `test_premium_period_reset_resets_baseline` — Смена периода обнуляет xdrive-baseline — иначе расход прошлого периода, `test_closed_premium_access_disables_and_reopened_enables`, `test_grace_disables_user`, `test_trial_without_premium_squad_gets_no_xdrive`, `test_multi_squad_tariff_gets_no_xdrive`, `test_device_limit_change_does_not_touch_pasarguard`, `test_feature_flag_off_disables_all_known_users`
 
 ### tests/live
 
@@ -4959,6 +4993,15 @@
 - `tests/services/test_paritypay_signature.py` — Python-модуль
   Классы: нет
   Функции: `test_signature_payload_sorts_keys_and_joins_values`, `test_valid_signature_accepted`, `test_tampered_amount_breaks_signature`, `test_wrong_key_and_empty_signature_rejected`, `test_blank_secret_fails_closed`, `test_number_text_from_json_is_preserved` — Числа не должны переформатироваться: иначе подпись отправителя не сойдётся., `test_parse_rejects_non_object_and_broken_json`, `test_amount_to_kopeks`, `test_kopeks_to_amount`, `test_amount_roundtrip_has_no_float_drift` — Через float 0.1+0.2 ломается; здесь Decimal и обратный путь обязан сходиться.
+- `tests/services/test_pasarguard_desired_state.py` — Python-модуль
+  Классы: нет
+  Функции: `test_flag_off_disables_existing_user_and_creates_nothing`, `test_active_subscription_with_one_allowed_squad_is_enabled`, `test_trial_with_premium_squad_is_enabled`, `test_trial_without_premium_state_is_disabled`, `test_data_limit_is_absolute_not_remaining`, `test_expired_limited_disabled_pending_and_blocked_are_disabled`, `test_open_grace_is_disabled`, `test_missing_premium_state_is_disabled`, `test_two_premium_squads_are_disabled`, `test_closed_or_exhausted_premium_state_is_disabled`
+- `tests/services/test_pasarguard_sync_maintenance.py` — Python-модуль
+  Классы: `FakePasarguardAPI` (10 методов)
+  Функции: `test_backfill_creates_only_eligible_subscriptions`, `test_orphan_cleanup_deletes_only_prefixed_and_noted_users`, `test_delete_intent_is_drained_after_subscription_is_gone`, `test_pending_revoke_is_retried_and_cleared`, `test_pasarguard_down_leaves_intents_in_place`, `test_enqueue_pasarguard_delete_records_identity_before_hard_delete`, `test_revoke_pasarguard_subscription_marks_success_and_failure`
+- `tests/services/test_pasarguard_sync_service.py` — Python-модуль
+  Классы: `FakePasarguardAPI` (10 методов)
+  Функции: `test_creates_missing_user_with_group_expire_and_absolute_limit`, `test_manual_disable_is_overwritten_by_the_next_pass`, `test_manual_group_and_note_edits_are_overwritten`, `test_manual_user_deletion_is_recreated`, `test_equal_state_makes_no_write_calls`, `test_stale_limited_user_is_reenabled_with_active_status`, `test_ineligible_subscription_disables_an_existing_user`, `test_pasarguard_error_is_counted_and_does_not_raise`, `test_flag_off_disables_known_users_and_creates_nothing`, `test_pasarguard_api_error_on_create_is_counted`
 - `tests/services/test_payer_identity.py` — Python-модуль
   Классы: нет
   Функции: `test_telegram_user_is_identified_by_telegram_id_and_username`, `test_username_is_not_prefixed_twice`, `test_name_is_used_without_username`, `test_telegram_user_without_any_names_is_named_by_id`, `test_verified_email_is_the_contact`, `test_email_user_is_identified_by_internal_id`, `test_unverified_email_is_never_the_contact` — Адрес назначается до подтверждения, MulenPay фискализирует платёж — чек чужому ящику не нужен., `test_broken_telegram_name_does_not_reach_the_provider` — Обрезанный эмодзи (одинокий суррогат) и управляющие символы из имени не уходят в запрос., `test_whitespace_only_fields_fall_through`, `test_overlong_values_are_cut`, `test_platega_metadata_has_both_string_fields`, `test_guest_with_email_contact`, `test_guest_with_telegram_contact`, `test_guest_without_contact_is_still_filled`, `test_resolve_user_payer_reads_the_user`, `test_resolve_user_payer_without_the_user_is_still_filled`, `test_resolve_user_payer_survives_a_database_error` — Данные плательщика не имеют права сорвать создание платежа., `test_resolve_guest_payer_reads_the_purchase`, `test_resolve_guest_payer_without_the_purchase_is_still_filled`
@@ -5067,6 +5110,9 @@
 - `tests/services/test_premium_traffic_service.py` — Python-модуль
   Классы: `FakeRemnawaveApi` (4 методов), `TestUsageCollection` (6 методов), `TestDecisions` (24 методов), `TestRestoreVisibleToPanelGuard` (2 методов), `TestUsageDecisionRace` (1 методов), `TestNewStatePeriod` (6 методов), `TestOrphanedLimits` (10 методов), `TestPanelUserCache` (4 методов), `TestFirstDayCorrection` (5 методов), `TestIntervalSettings` (1 методов), `TestNotifications` (7 методов), `TestOrphanStates` (9 методов), `TestReopenReachesThePanel` (3 методов), `TestLimitPushRetry` (8 методов), `TestOpenGraceOverlay` (6 методов)
   Функции: `test_failed_target_rolls_back_and_pass_continues` — Сбой одной цели не валит проход и не оставляет сессию в failed-транзакции.
+- `tests/services/test_premium_traffic_xdrive.py` — Python-модуль
+  Классы: нет
+  Функции: `test_delta_is_lifetime_minus_baseline`, `test_first_observation_sets_baseline_and_returns_zero`, `test_identity_recreation_resets_baseline_once`, `test_lifetime_below_baseline_resets_baseline`, `test_absent_pasarguard_usage_returns_zero`, `test_period_reset_clears_pasarguard_baseline`, `test_apply_usage_adds_xdrive_delta_to_squad_usage`, `test_multi_squad_subscription_gets_zero_delta`, `test_fetch_maps_prefixed_usernames_and_paginates`
 - `tests/services/test_promo_group_assignment_releases_lock.py` — Python-модуль
   Классы: нет
   Функции: `test_zero_total_spent_commits_and_releases_the_lock`, `test_no_target_group_commits_and_releases_the_lock`
@@ -5343,6 +5389,12 @@
 - `tests/services/test_withdrawal_reminders.py` — Python-модуль
   Классы: нет
   Функции: `reminder_settings`, `sent`, `test_stale_pending_request_gets_reminder`, `test_fresh_request_waits_out_the_limit`, `test_decided_request_is_silent` — Любой статус, кроме pending, — решение принято, напоминать не о чем., `test_cooldown_gates_repeats`, `test_disabled_flag_silences_everything`, `test_failed_send_keeps_request_for_next_round` — Не ушло — отметку не ставим, следующий круг попробует снова., `plain_sender` — Rich-рендер выключен: проверяем классический send_message с thread_id., `test_reminder_goes_to_withdrawal_topic_when_configured`, `test_reminder_falls_back_to_partners_topic`, `test_reminder_buttons_match_the_original_notification`, `test_waiting_time_reads_naturally` — Двое суток ожидания — «2 д 1 ч», а не «49 ч 0 мин».
+- `tests/services/test_xdrive_lifecycle_wiring.py` — Python-модуль
+  Классы: нет
+  Функции: `test_revoke_calls_pasarguard_and_records_timestamp`, `test_revoke_failure_sets_pending_and_does_not_break_remnawave_revoke`, `test_malformed_pasarguard_url_never_breaks_the_user_facing_revoke` — `_make_api` падает на кривом URL — revoke обязан остаться безопасным., `test_delete_enqueues_intent_before_hard_delete`, `test_premium_limit_and_restore_nudge_the_projector`, `test_create_remnawave_user_nudges_the_projector`
+- `tests/services/test_xdrive_service.py` — Python-модуль
+  Классы: `FakePasarguardApi` (3 методов)
+  Функции: `test_provider_caches_by_user_and_revoke_version`, `test_provider_returns_none_on_api_error`, `test_provider_closes_wrapped_api`, `test_lookup_skips_grace_limited_closed_and_missing_state`, `test_lookup_returns_target_for_eligible_subscription`, `test_lookup_cache_version_changes_after_revoke`, `test_lookup_returns_none_when_feature_is_disabled`
 - `tests/services/test_yandex_purchase_hook.py` — Python-модуль
   Классы: нет
   Функции: `test_passes_cid_through_to_store_and_fires_purchase` — Frontend cached CID → backend stores it, then fires purchase event., `test_no_cid_still_fires_purchase_event` — If the separate /yandex-cid POST already completed, frontend may pass, `test_disabled_feature_skips_everything` — When offline conversions are off, neither store nor fire should run., `test_store_failure_does_not_block_purchase_event` — Even if persisting the CID throws, the purchase event must still fire —
@@ -5767,3 +5819,6 @@
 - `tests/webserver/test_webhook_bg_tasks_drain.py` — Python-модуль
   Классы: нет
   Функции: `test_spawned_task_is_held_until_it_finishes` — Ссылка на задачу живёт, пока та работает, и снимается после., `test_drain_waits_for_unfinished_processing` — Дренаж не отпускает остановку, пока платёж дорабатывается., `test_drain_returns_immediately_without_tasks` — Пустой набор — выкат не задерживается., `test_drain_gives_up_by_timeout_and_shouts` — Застрявшая задача не держит выкат вечно, но и не уходит молча., `test_drain_is_registered_before_the_other_shutdowns` — Дренаж обязан идти раньше остановки telegram-процессора и БД., `test_webhook_acks_before_processing_finishes` — Ответ 200 уходит НЕ дожидаясь обработки платежа.
+- `tests/webserver/test_xdrive_merge.py` — Python-модуль
+  Классы: `FakeProvider` (3 методов)
+  Функции: `test_appends_pasarguard_array_to_remnawave_array`, `test_single_remnawave_object_becomes_an_array`, `test_sing_box_body_is_untouched`, `test_base64_and_html_bodies_are_untouched`, `test_gzip_body_is_decompressed_and_merged`, `test_empty_pasarguard_config_returns_none`, `test_adblock_dns_returns_original_body_for_truncated_gzip` — Обрезанный gzip — EOFError, а не OSError: adblock не должен отдавать 500., `xdrive_env`, `test_middleware_returns_original_body_for_base64_upstream`, `test_middleware_returns_original_body_when_provider_fails`, `test_middleware_returns_original_body_for_corrupt_gzip_upstream`, `test_middleware_returns_original_body_for_malformed_pasarguard_payload`, `test_middleware_appends_config_and_drops_body_validators`, `test_middleware_respects_client_ua_regex`
