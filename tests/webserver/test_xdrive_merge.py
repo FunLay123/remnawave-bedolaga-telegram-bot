@@ -178,6 +178,35 @@ async def test_middleware_returns_original_body_when_provider_fails(xdrive_env):
     assert provider.targets == [TARGET]
 
 
+async def test_middleware_returns_original_body_for_corrupt_gzip_upstream(xdrive_env):
+    # gzip-магия есть, но поток обрезан: gzip.decompress бросает EOFError,
+    # и это не повод отдавать клиенту 500 вместо рабочей подписки.
+    body = gzip.compress(_body(_xray_entry('remnawave')))[:12]
+    provider = FakeProvider(payload=_body(_xray_entry('pasarguard')))
+
+    def upstream(request):
+        return _upstream({'content-type': 'application/json'}, body)
+
+    response = _client(upstream, provider=provider).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    assert response.status_code == 200
+    assert response.content == body
+
+
+async def test_middleware_returns_original_body_for_malformed_pasarguard_payload(xdrive_env):
+    body = _body(_xray_entry('remnawave'))
+    # Ответ панели тоже может быть обрезанным gzip: разбор не должен выходить наружу.
+    provider = FakeProvider(payload=gzip.compress(_body(_xray_entry('pasarguard')))[:12])
+
+    def upstream(request):
+        return _upstream({'content-type': 'application/json'}, body)
+
+    response = _client(upstream, provider=provider).get('/Ab3dEf9hJk', headers={'Host': SUB_HOST})
+
+    assert response.status_code == 200
+    assert response.content == body
+
+
 async def test_middleware_appends_config_and_drops_body_validators(xdrive_env):
     body = _body(_xray_entry('remnawave'))
     provider = FakeProvider(payload=_body(_xray_entry('pasarguard')))

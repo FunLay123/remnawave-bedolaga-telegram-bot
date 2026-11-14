@@ -10,8 +10,6 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
-import pytest
-
 from app.database.crud.premium_traffic import start_new_period
 from app.external.pasarguard_api import PasarguardUser
 from app.services import premium_traffic_service

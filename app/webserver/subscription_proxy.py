@@ -21,7 +21,6 @@ from __future__ import annotations
 import gzip
 import json
 import re
-import re
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -450,16 +449,21 @@ def patch_adblock_dns(
 
 
 def _decode_json_body(body: bytes) -> Any:
-    """Разобрать JSON, распаковав gzip по магическому заголовку."""
+    """Разобрать JSON, распаковав gzip по магическому заголовку.
+
+    Битое тело — не ошибка вызывающего: обрезанный поток даёт EOFError,
+    испорченный deflate — zlib.error, и любой из них обязан вернуть None,
+    а не уронить выдачу подписки.
+    """
     try:
         return json.loads(body)
-    except (TypeError, ValueError):
+    except Exception:
         pass
     if not body.startswith(b'\x1f\x8b'):
         return None
     try:
         return json.loads(gzip.decompress(body))
-    except (OSError, ValueError, TypeError):
+    except Exception:
         return None
 
 
@@ -664,20 +668,24 @@ class SubscriptionProxyMiddleware:
         body: bytes,
         drop_content_encoding: bool,
     ) -> tuple[bytes, bool, bool]:
-        """Дописать xdrive после adblock; при любом сбое вернуть тело как есть."""
-        if self.xdrive_config is None or not _is_xray_subscription_body(body):
-            return body, drop_content_encoding, False
+        """Дописать xdrive после adblock; при любом сбое вернуть тело как есть.
+
+        Разбор чужого тела — не точка отказа: обрезанный gzip, битый JSON
+        ответа панели и любой неожиданный сбой оставляют подписку рабочей.
+        """
         try:
+            if self.xdrive_config is None or not _is_xray_subscription_body(body):
+                return body, drop_content_encoding, False
             payload = await self.xdrive_config.get(target)
+            merged = merge_xdrive_configs(body, _parse_pasarguard_config(payload))
         except Exception as error:
             logger.warning(
-                'Не удалось получить xdrive-конфиг PasarGuard',
+                'Не удалось добавить xdrive-конфиг к подписке',
                 subscription_id=target.subscription_id,
                 error=str(error)[:200],
             )
             return body, drop_content_encoding, False
 
-        merged = merge_xdrive_configs(body, _parse_pasarguard_config(payload))
         if merged is None:
             return body, drop_content_encoding, False
         # На выходе несжатый JSON — Content-Encoding upstream больше не верен.
