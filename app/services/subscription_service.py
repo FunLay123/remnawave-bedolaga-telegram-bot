@@ -240,6 +240,12 @@ class SubscriptionService:
                     subscription.subscription_url = updated_user.subscription_url
                     subscription.subscription_crypto_link = updated_user.happ_crypto_link
                     await db.commit()
+
+                    # Ссылка на панельный аккаунт обновлена и на grace-ветке —
+                    # будим проектор, чтобы он увидел актуальную подписку.
+                    from app.services.pasarguard_sync_service import pasarguard_sync_service
+
+                    pasarguard_sync_service.nudge(subscription.id)
                     return updated_user
 
                 # Multi-tariff mode: each subscription has its own Remnawave user

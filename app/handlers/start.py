@@ -1220,6 +1220,29 @@ async def _continue_registration_after_language(
     logger.info('📄 LANGUAGE: Условия отправлены после выбора языка')
 
 
+async def _delete_user_subscriptions_with_intents(db: AsyncSession, subscriptions) -> None:
+    """Удалить подписки повторно регистрирующегося пользователя.
+
+    PasarGuard-интент пишется до hard-delete: строка исчезнет, а проектору
+    нужно знать, какого пользователя панели за ней удалять. Подписки без
+    идентичности панели интента не получают (фильтрует сам хелпер).
+    """
+    from sqlalchemy import delete
+
+    from app.database.models import SubscriptionServer
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+    for sub in subscriptions:
+        await decrement_subscription_server_counts(db, sub)
+        await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub.id))
+        logger.info('Deleted SubscriptionServer records', subscription_id=sub.id)
+
+    for sub in subscriptions:
+        await enqueue_pasarguard_delete(db, sub)
+        await db.delete(sub)
+        logger.info('Deleted user subscription', subscription_id=sub.id)
+
+
 async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession, db_user=None):
     logger.info('🚀 START: Обработка /start от', from_user_id=message.from_user.id)
 
@@ -1703,21 +1726,13 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
                 PlategaPayment,
                 PromoCodeUse,
                 ReferralEarning,
-                SubscriptionServer,
                 Transaction,
                 WataPayment,
                 YooKassaPayment,
             )
 
             user_subs = getattr(user, 'subscriptions', None) or []
-            for sub in user_subs:
-                await decrement_subscription_server_counts(db, sub)
-                await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub.id))
-                logger.info('Deleted SubscriptionServer records', subscription_id=sub.id)
-
-            for sub in user_subs:
-                await db.delete(sub)
-                logger.info('Deleted user subscription', subscription_id=sub.id)
+            await _delete_user_subscriptions_with_intents(db, user_subs)
 
             await db.execute(delete(PromoCodeUse).where(PromoCodeUse.user_id == user.id))
 

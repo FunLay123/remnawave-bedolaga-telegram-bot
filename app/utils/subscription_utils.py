@@ -30,7 +30,11 @@ async def cleanup_duplicate_subscriptions(db: AsyncSession) -> int:
         )
         subscriptions = subscriptions_result.scalars().all()
 
+        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
         for old_subscription in subscriptions[1:]:
+            # PasarGuard: строка удаляется ниже — интент пишется заранее.
+            await enqueue_pasarguard_delete(db, old_subscription)
             await db.delete(old_subscription)
             total_deleted += 1
             logger.info(

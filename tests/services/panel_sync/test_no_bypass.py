@@ -26,6 +26,9 @@ _ALLOWED = {
     # даты и «жива ли подписка» он берёт у сервиса, а запись оставляет себе:
     # push_subscription этим переходам не адрес.
     'app/services/grace_access_runtime.py',
+    # Проектор PasarGuard пишет во ВТОРУЮ панель (xdrive), а не в Remnawave;
+    # этот сторож охраняет только запись в Remnawave.
+    'app/services/pasarguard_sync_service.py',
 }
 
 

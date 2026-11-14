@@ -2788,15 +2788,12 @@
 - `docs/superpowers/plans/2026-11-12-referral-days-only-p0-p1.md` — файл
 - `docs/superpowers/plans/2026-11-13-trial-payment-resilience.md` — файл
 - `docs/superpowers/plans/2026-11-14-expiry-autopay-discount-notifications.md` — файл
-- `docs/superpowers/plans/2026-11-14-xdrive-pasarguard-handoff.md` — файл
-- `docs/superpowers/plans/2026-11-14-xdrive-pasarguard-subscription.md` — файл
 
 #### docs/superpowers/specs
 
 - `docs/superpowers/specs/2026-10-30-legal-documents-support-menu-design.md` — файл
 - `docs/superpowers/specs/2026-11-13-trial-payment-resilience-design.md` — файл
 - `docs/superpowers/specs/2026-11-14-expiry-autopay-discount-notifications-design.md` — файл
-- `docs/superpowers/specs/2026-11-14-xdrive-pasarguard-subscription-design.md` — файл
 
 ## migrations
 
@@ -5391,7 +5388,7 @@
   Функции: `reminder_settings`, `sent`, `test_stale_pending_request_gets_reminder`, `test_fresh_request_waits_out_the_limit`, `test_decided_request_is_silent` — Любой статус, кроме pending, — решение принято, напоминать не о чем., `test_cooldown_gates_repeats`, `test_disabled_flag_silences_everything`, `test_failed_send_keeps_request_for_next_round` — Не ушло — отметку не ставим, следующий круг попробует снова., `plain_sender` — Rich-рендер выключен: проверяем классический send_message с thread_id., `test_reminder_goes_to_withdrawal_topic_when_configured`, `test_reminder_falls_back_to_partners_topic`, `test_reminder_buttons_match_the_original_notification`, `test_waiting_time_reads_naturally` — Двое суток ожидания — «2 д 1 ч», а не «49 ч 0 мин».
 - `tests/services/test_xdrive_lifecycle_wiring.py` — Python-модуль
   Классы: нет
-  Функции: `test_revoke_calls_pasarguard_and_records_timestamp`, `test_revoke_failure_sets_pending_and_does_not_break_remnawave_revoke`, `test_malformed_pasarguard_url_never_breaks_the_user_facing_revoke` — `_make_api` падает на кривом URL — revoke обязан остаться безопасным., `test_delete_enqueues_intent_before_hard_delete`, `test_premium_limit_and_restore_nudge_the_projector`, `test_create_remnawave_user_nudges_the_projector`
+  Функции: `test_revoke_calls_pasarguard_and_records_timestamp`, `test_revoke_failure_sets_pending_and_does_not_break_remnawave_revoke`, `test_malformed_pasarguard_url_never_breaks_the_user_facing_revoke` — `_make_api` падает на кривом URL — revoke обязан остаться безопасным., `test_delete_enqueues_intent_before_hard_delete`, `test_premium_limit_and_restore_nudge_the_projector`, `test_create_remnawave_user_nudges_the_projector`, `test_grace_preserving_create_nudges_the_projector` — Grace-ветка тоже коммитит ссылку на панельный аккаунт — и тоже будит проектор., `test_start_reregistration_enqueues_intent_before_subscription_delete` — Повторная регистрация удалённого пользователя: интент до `db.delete`., `test_account_merge_enqueues_intent_for_discarded_subscription` — Мерж аккаунтов: интент пишется для удаляемой подписки, но не для оставленной.
 - `tests/services/test_xdrive_service.py` — Python-модуль
   Классы: `FakePasarguardApi` (3 методов)
   Функции: `test_provider_caches_by_user_and_revoke_version`, `test_provider_returns_none_on_api_error`, `test_provider_closes_wrapped_api`, `test_lookup_skips_grace_limited_closed_and_missing_state`, `test_lookup_returns_target_for_eligible_subscription`, `test_lookup_cache_version_changes_after_revoke`, `test_lookup_returns_none_when_feature_is_disabled`

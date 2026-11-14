@@ -659,6 +659,11 @@ async def _handle_subscription_merge(
         await cancel_platega_recurring_for_subscription_safe(db, primary_sub.id, commit=False)
         await cancel_lava_recurring_for_subscription_safe(db, primary_sub.id, commit=False)
         await cancel_cashera_recurring_for_subscription_safe(db, primary_sub.id, commit=False)
+        # PasarGuard: подписка удаляется ниже — интент пишется, пока её
+        # идентичность ещё читается.
+        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+        await enqueue_pasarguard_delete(db, primary_sub)
         # Явно удаляем subscription_servers перед подпиской (CASCADE настроен, но делаем явно для ясности)
         await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == primary_sub.id))
         # Удаляем запись подписки primary
@@ -693,6 +698,11 @@ async def _handle_subscription_merge(
         await cancel_platega_recurring_for_subscription_safe(db, secondary_sub.id, commit=False)
         await cancel_lava_recurring_for_subscription_safe(db, secondary_sub.id, commit=False)
         await cancel_cashera_recurring_for_subscription_safe(db, secondary_sub.id, commit=False)
+        # PasarGuard: подписка удаляется ниже — интент пишется, пока её
+        # идентичность ещё читается.
+        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+        await enqueue_pasarguard_delete(db, secondary_sub)
         # Явно удаляем subscription_servers перед подпиской (CASCADE настроен, но делаем явно для ясности)
         await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == secondary_sub.id))
         # Удаляем запись подписки secondary

@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select
@@ -419,3 +420,135 @@ async def test_create_remnawave_user_nudges_the_projector(monkeypatch):
     assert result.id == 77
     assert db.commits == 1
     assert nudges == [1]
+
+
+@pytest.mark.asyncio
+async def test_grace_preserving_create_nudges_the_projector(monkeypatch):
+    """Grace-ветка тоже коммитит ссылку на панельный аккаунт — и тоже будит проектор."""
+    nudges = _record_nudges(monkeypatch)
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda _self: False)
+    monkeypatch.setattr(subscription_service_module, 'get_user_by_id', _async_return(_user()))
+    monkeypatch.setattr(subscription_service_module, 'resolve_panel_user_tag', lambda _subscription: None)
+    monkeypatch.setattr(
+        subscription_service_module,
+        'resolve_hwid_device_limit_for_payload',
+        lambda _subscription: None,
+    )
+    # Открытый grace: id подписки в множестве, подписка считается expired.
+    monkeypatch.setattr(
+        'app.services.grace_access_runtime.lock_grace_sensitive_panel_updates',
+        _async_return({1}),
+    )
+    monkeypatch.setattr(SubscriptionService, 'validate_and_clean_subscription', _async_return(True))
+    monkeypatch.setattr(SubscriptionService, 'get_api_client', _remnawave_client(_FakeRemnaWaveAPI()))
+
+    async def _patch_account(_api, **_kwargs):
+        return SimpleNamespace(
+            short_uuid='short-uuid',
+            subscription_url='https://sub.example/new-link',
+            happ_crypto_link='happ-crypto',
+        )
+
+    monkeypatch.setattr(subscription_service_module, 'patch_panel_account', _patch_account)
+
+    subscription = _subscription(status='expired')
+    db = _Db()
+
+    result = await SubscriptionService().create_remnawave_user(db, subscription)
+
+    assert result is not None
+    assert db.commits == 1
+    assert nudges == [1]
+
+
+# ------------------------------------------------------- hard-delete sites ----
+
+
+@pytest.mark.asyncio
+async def test_start_reregistration_enqueues_intent_before_subscription_delete(monkeypatch):
+    """Повторная регистрация удалённого пользователя: интент до `db.delete`."""
+    import app.handlers.start as start_module
+
+    recorded: list[tuple] = []
+
+    async def _decrement(_db, sub):
+        recorded.append(('decrement', sub.id))
+
+    class _RecordingDb:
+        def add(self, intent):
+            recorded.append(('intent', intent.subscription_id, intent.pasarguard_user_id))
+
+        async def flush(self, *args, **kwargs):
+            return None
+
+        async def execute(self, _statement):
+            recorded.append(('server_delete',))
+
+        async def delete(self, sub):
+            recorded.append(('delete', sub.id))
+
+    monkeypatch.setattr(start_module, 'decrement_subscription_server_counts', _decrement)
+
+    identified = _subscription(pasarguard_identity=(42, 'bx1'))
+    plain = _subscription(pasarguard_identity=None)
+    plain.id = 2
+    plain.remnawave_short_id = 'short2'
+    db = _RecordingDb()
+
+    await start_module._delete_user_subscriptions_with_intents(db, [identified, plain])
+
+    intents = [operation for operation in recorded if operation[0] == 'intent']
+    assert intents == [('intent', 1, 42)]
+    assert recorded.index(('intent', 1, 42)) < recorded.index(('delete', 1))
+    assert ('delete', 2) in recorded
+
+
+@pytest.mark.asyncio
+async def test_account_merge_enqueues_intent_for_discarded_subscription(monkeypatch):
+    """Мерж аккаунтов: интент пишется для удаляемой подписки, но не для оставленной."""
+    import app.services.account_merge_service as merge_module
+
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda _self: False)
+
+    recorded: list[tuple] = []
+
+    class _MergeDb:
+        def __init__(self) -> None:
+            self.execute = AsyncMock()
+
+        def add(self, intent):
+            recorded.append(('intent', intent.subscription_id, intent.pasarguard_user_id))
+
+        async def flush(self, *args, **kwargs):
+            return None
+
+        async def delete(self, sub):
+            recorded.append(('delete', sub.id))
+
+    discarded = SimpleNamespace(
+        id=2,
+        user_id=2,
+        status='active',
+        tariff_id=None,
+        remnawave_id=None,
+        pasarguard_user_id=43,
+        pasarguard_username='bx2',
+    )
+    kept = SimpleNamespace(
+        id=1,
+        user_id=1,
+        status='active',
+        tariff_id=None,
+        remnawave_id=None,
+        pasarguard_user_id=42,
+        pasarguard_username='bx1',
+    )
+    primary = SimpleNamespace(id=1, remnawave_id=None, subscriptions=[kept])
+    secondary = SimpleNamespace(id=2, remnawave_id=None, subscriptions=[discarded])
+
+    await merge_module._handle_subscription_merge(_MergeDb(), primary, secondary, 'primary', [])
+
+    intents = [operation for operation in recorded if operation[0] == 'intent']
+    assert intents == [('intent', 2, 43)]
+    assert recorded.index(('intent', 2, 43)) < recorded.index(('delete', 2))
+    assert ('delete', 1) not in recorded
