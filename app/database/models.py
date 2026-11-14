@@ -2633,6 +2633,15 @@ class Subscription(Base):
             postgresql_where=text('remnawave_id IS NOT NULL'),
             sqlite_where=text('remnawave_id IS NOT NULL'),
         ),
+        # Та же частичная уникальность для PasarGuard: у подписки не больше
+        # одного пользователя xdrive, а непривязанных строк — сколько угодно.
+        Index(
+            'uq_subscriptions_pasarguard_user_id',
+            'pasarguard_user_id',
+            unique=True,
+            postgresql_where=text('pasarguard_user_id IS NOT NULL'),
+            sqlite_where=text('pasarguard_user_id IS NOT NULL'),
+        ),
         # shortUuid пережил 3.0.0 и остаётся единственным панельным ключом,
         # которым можно резолвить строку, потерявшую связь.
         Index('ix_subscriptions_remnawave_short_uuid', 'remnawave_short_uuid'),
@@ -2711,6 +2720,21 @@ class Subscription(Base):
     remnawave_short_id = Column(
         String(16), nullable=False, unique=True, server_default=''
     )  # Permanent short ID for username suffix
+
+    # PasarGuard (xdrive) identity: один пользователь панели на подписку.
+    # pasarguard_created_at — время создания текущей личности; её пересоздание
+    # сбрасывает baseline расхода xdrive в premium-состоянии.
+    pasarguard_user_id = Column(Integer, nullable=True)
+    pasarguard_username = Column(String(128), nullable=True)
+    pasarguard_created_at = Column(AwareDateTime(), nullable=True)
+    # Последний успешный/предпринятый revoke_sub. revoke_pending_at — durable
+    # намерение для проектора, если панель была недоступна синхронному пути.
+    pasarguard_last_revoke_at = Column(AwareDateTime(), nullable=True)
+    pasarguard_revoke_pending_at = Column(AwareDateTime(), nullable=True)
+    # Аудит последней успешной сверки. Не гейт записи: панель перечитывается
+    # каждым проходом, чтобы ручные правки не жили вечно.
+    pasarguard_synced_at = Column(AwareDateTime(), nullable=True)
+    pasarguard_synced_hash = Column(String(64), nullable=True)
 
     # Тариф (для режима продаж "Тарифы")
     tariff_id = Column(Integer, ForeignKey('tariffs.id', ondelete='RESTRICT'), nullable=True, index=True)
@@ -3068,6 +3092,12 @@ class SubscriptionPremiumTraffic(Base):
     # «ещё не замеряли» — величина снимается один раз, первой проверкой периода.
     baseline_bytes = Column(BigInteger, nullable=True)
 
+    # PasarGuard (xdrive): lifetime_used_traffic, снятый на старте текущего
+    # premium-периода, и личность, к которой baseline относится. Смена личности
+    # сбрасывает baseline ровно один раз, иначе delta навсегда осталась бы нулём.
+    pasarguard_baseline_bytes = Column(BigInteger, nullable=True)
+    pasarguard_identity_created_at = Column(AwareDateTime(), nullable=True)
+
     is_limited = Column(Boolean, nullable=False, default=False, server_default=text('false'))
     # Отдельно от is_limited: is_limited — следствие («сквад сейчас снят»),
     # closed_at — причина («админ закрыл доступ намеренно», а не «расход
@@ -3110,6 +3140,24 @@ class SubscriptionPremiumTraffic(Base):
         if self.total_limit_bytes <= 0:
             return False
         return (self.used_bytes or 0) >= self.total_limit_bytes
+
+
+class PasarguardDeleteIntent(Base):
+    """Отложенное удаление пользователя PasarGuard.
+
+    Подписку могут удалить, пока панель недоступна. Строка интента пишется в
+    той же транзакции, что и удаление подписки, и обязана его пережить:
+    внешнего ключа на ``subscriptions`` поэтому нет. Проектор разбирает очередь
+    каждым проходом, orphan-cleanup остаётся страховкой.
+    """
+
+    __tablename__ = 'pasarguard_delete_intents'
+
+    id = Column(Integer, primary_key=True, index=True)
+    subscription_id = Column(Integer, nullable=False)
+    pasarguard_user_id = Column(Integer, nullable=True)
+    pasarguard_username = Column(String(128), nullable=True)
+    created_at = Column(AwareDateTime(), default=func.now())
 
 
 class Transaction(Base):
