@@ -41,6 +41,7 @@ from app.database.crud.premium_traffic import (
 )
 from app.database.database import AsyncSessionLocal
 from app.database.models import Subscription, SubscriptionPremiumTraffic, SubscriptionStatus, Tariff
+from app.external.pasarguard_api import PasarguardAPI
 from app.services.remnawave_service import RemnaWaveService
 from app.utils.notification_emoji import style_notification_text
 from app.utils.panel_node_usage import normalize_node_usage
@@ -88,6 +89,24 @@ def panel_user_id_for_subscription(subscription: Any) -> int | None:
         return int(raw) if raw else None
     except (TypeError, ValueError):
         return None
+
+
+def _make_pasarguard_api() -> PasarguardAPI | None:
+    """Клиент панели для замера xdrive; без флага и настроек не создаётся."""
+    if not settings.is_xdrive_enabled() or not settings.is_pasarguard_configured():
+        return None
+    return PasarguardAPI(
+        base_url=settings.PASARGUARD_API_URL or '',
+        api_key=settings.PASARGUARD_API_KEY or '',
+        timeout=float(settings.PASARGUARD_API_TIMEOUT_SECONDS),
+    )
+
+
+def _pasarguard_batch_size() -> int:
+    try:
+        return max(1, int(settings.PASARGUARD_SYNC_BATCH_SIZE))
+    except (TypeError, ValueError):
+        return 200
 
 
 @dataclass
@@ -215,6 +234,19 @@ class PremiumTrafficService:
                 return stats
 
             now = datetime.now(UTC)
+            # Один список пользователей PasarGuard на весь проход: по одному
+            # запросу на подписчика при тысячах подписок панель бы не выдержала.
+            pasarguard_usage: dict[int, tuple[int, int]] = {}
+            pasarguard_api = _make_pasarguard_api() if targets else None
+            if pasarguard_api is not None:
+                try:
+                    pasarguard_usage = await self._fetch_pasarguard_usage(pasarguard_api)
+                finally:
+                    try:
+                        await pasarguard_api.close()
+                    except Exception:
+                        logger.warning('Не удалось закрыть клиент PasarGuard', exc_info=True)
+
             async with service.get_api_client() as api:
                 if orphans:
                     stats['cleaned'] += await self._clear_orphans(db, api, orphans)
@@ -295,6 +327,7 @@ class PremiumTrafficService:
                                 period_start=period_start,
                                 now=now,
                                 panel_user=self._cached_panel_user(panel_user_id),
+                                pasarguard_usage=pasarguard_usage.get(subscription_id),
                             )
                         except Exception as error:
                             # Сессия осталась в упавшей транзакции: без отката
@@ -778,6 +811,80 @@ class PremiumTrafficService:
                     totals[user_id] += item['total_bytes']
         return dict(totals)
 
+    async def _fetch_pasarguard_usage(self, api: PasarguardAPI) -> dict[int, tuple[int, int]]:
+        """Оба счётчика PasarGuard по бот-пользователям: {subscription_id: (...)}.
+
+        Панель отдаёт список страницами, и оба счётчика в нём уже есть:
+        по одному запросу на подписчика ходить не нужно. В пул попадают только
+        записи с префиксом бота и числовым id подписки. Любой сбой — пустой
+        словарь: монотонный ``record_usage`` оставит последний замер, а
+        следующий проход повторит запрос.
+        """
+        if not settings.is_xdrive_enabled() or not settings.is_pasarguard_configured():
+            return {}
+
+        prefix = (settings.PASARGUARD_USERNAME_PREFIX or 'bx').strip() or 'bx'
+        limit = _pasarguard_batch_size()
+        usage: dict[int, tuple[int, int]] = {}
+        offset = 0
+        try:
+            while True:
+                page = await api.list_users(offset=offset, limit=limit)
+                for user in page:
+                    username = user.username or ''
+                    if not username.startswith(prefix):
+                        continue
+                    subscription_id = username[len(prefix) :]
+                    if not subscription_id.isdigit():
+                        continue
+                    usage[int(subscription_id)] = (
+                        int(user.used_traffic),
+                        int(user.lifetime_used_traffic),
+                    )
+                if len(page) < limit:
+                    break
+                offset += len(page)
+        except Exception as error:
+            logger.warning(
+                'Не удалось получить расход PasarGuard, полоса остаётся прежней',
+                error=str(error)[:200],
+            )
+            return {}
+        return usage
+
+    def _xdrive_delta(
+        self,
+        state: Any,
+        subscription: Subscription,
+        usage: tuple[int, int] | None,
+    ) -> int:
+        """Прирост lifetime-счётчика PasarGuard с начала premium-периода.
+
+        Берём lifetime, а не ``used_traffic``: второй панель сбрасывает по
+        своему расписанию. Первый замер, пересоздание личности и панельный
+        сброс lifetime задают baseline и дают ноль ровно один раз; маркер
+        личности не даёт сбрасывать baseline на каждом проходе. Если в тарифе
+        больше одного premium-сквада, xdrive подписке не положен (проектор его
+        выключает), и дельта не должна прибавляться к каждому скваду.
+        """
+        if usage is None:
+            return 0
+        if len(get_premium_squads_for_tariff(getattr(subscription, 'tariff', None))) != 1:
+            return 0
+
+        lifetime_now = int(usage[1])
+        identity_created_at = subscription.pasarguard_created_at
+        baseline = state.pasarguard_baseline_bytes
+        if (
+            baseline is None
+            or state.pasarguard_identity_created_at != identity_created_at
+            or lifetime_now < baseline
+        ):
+            state.pasarguard_baseline_bytes = lifetime_now
+            state.pasarguard_identity_created_at = identity_created_at
+            return 0
+        return max(0, lifetime_now - baseline)
+
     # ------------------------------------------------------------ решение
 
     async def _lock_state_for_decision(self, db: AsyncSession, target: _Target, state: Any) -> Any:
@@ -820,6 +927,7 @@ class PremiumTrafficService:
         period_start: datetime,
         now: datetime,
         panel_user: Any = None,
+        pasarguard_usage: tuple[int, int] | None = None,
     ) -> str | None:
         from app.database.crud.premium_traffic import get_state
 
@@ -827,7 +935,14 @@ class PremiumTrafficService:
         if state is None:
             return None
 
-        record_usage(state, self._net_usage(state, used_bytes, period_start, now), checked_at=now)
+        # xdrive-дельта прибавляется после поправки на суточную гранулярность:
+        # lifetime-счётчик панели точный и второй поправки не требует.
+        xdrive_delta = self._xdrive_delta(state, target.subscription, pasarguard_usage)
+        record_usage(
+            state,
+            self._net_usage(state, used_bytes, period_start, now) + xdrive_delta,
+            checked_at=now,
+        )
 
         if state.is_exhausted and not state.is_limited:
             state = await self._lock_state_for_decision(db, target, state)

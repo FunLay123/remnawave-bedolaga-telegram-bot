@@ -147,6 +147,10 @@ def start_new_period(
     state.extra_bytes = 0
     # Поправку на первые сутки снимем заново: период новый.
     state.baseline_bytes = None
+    # xdrive считается от lifetime-счётчика PasarGuard: новый период — новый
+    # baseline, иначе в него попал бы расход прошлого периода.
+    state.pasarguard_baseline_bytes = None
+    state.pasarguard_identity_created_at = None
     state.notified_80 = False
     state.notified_90 = False
     if state.closed_at is not None:
