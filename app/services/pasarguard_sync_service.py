@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -23,7 +24,13 @@ import structlog
 from sqlalchemy import or_, select
 
 from app.config import settings
-from app.database.crud.pasarguard import set_pasarguard_identity
+from app.database.crud.pasarguard import (
+    add_delete_intent,
+    clear_pasarguard_identity,
+    delete_intent,
+    list_delete_intents,
+    set_pasarguard_identity,
+)
 from app.database.database import AsyncSessionLocal
 from app.database.models import (
     Subscription,
@@ -36,6 +43,7 @@ from app.database.models import (
 from app.external.pasarguard_api import (
     PasarguardAPI,
     PasarguardAPIError,
+    PasarguardNotFoundError,
     PasarguardUser,
 )
 from app.services.grace_access_runtime import get_open_grace_subscription_ids
@@ -229,8 +237,10 @@ STATS_KEYS = ('checked', 'created', 'updated', 'disabled', 'enabled', 'deleted',
 _EXPIRE_TOLERANCE_SECONDS = 1.0
 # Допуск на рассинхрон счётчиков панели и бота: 1 MiB или 1 %.
 _DATA_LIMIT_TOLERANCE_MIN_BYTES = 1024 * 1024
-# Между пачками создания пауза, чтобы старт не залил панель пачкой POST-ов.
+# Между пачками бэкфилла пауза, чтобы старт не залил панель пачкой POST-ов.
 _BACKFILL_BATCH_PAUSE_SECONDS = 0.05
+# Уборка сирот — страховка для очереди удалений, чаще раза в час не нужна.
+_ORPHAN_CLEANUP_INTERVAL_SECONDS = 3600.0
 _PANEL_STATUSES_NEEDING_ACTIVE = frozenset({'limited', 'expired'})
 
 
@@ -280,6 +290,84 @@ def _data_limit_close(actual: int | None, desired: int | None) -> bool:
     return abs(int(actual) - int(desired)) <= tolerance
 
 
+async def _revoke_identity(db: AsyncSession, api: PasarguardAPI, subscription: Subscription, now: datetime) -> bool:
+    """Ротировать креды панели; при отказе оставить durable-интент."""
+    user_id = subscription.pasarguard_user_id
+    if user_id is None:
+        return False
+    try:
+        await api.revoke_sub(user_id)
+    except PasarguardNotFoundError:
+        # Пользователя уже нет — ротировать нечего, личность устарела.
+        await clear_pasarguard_identity(db, subscription)
+        logger.warning(
+            'Пользователь PasarGuard исчез до revoke, личность стёрта',
+            subscription_id=subscription.id,
+        )
+        return True
+    except PasarguardAPIError as error:
+        subscription.pasarguard_revoke_pending_at = now
+        await db.flush()
+        logger.warning(
+            'PasarGuard revoke не удался, интент сохранён',
+            subscription_id=subscription.id,
+            error=str(error)[:200],
+        )
+        return False
+    subscription.pasarguard_last_revoke_at = now
+    subscription.pasarguard_revoke_pending_at = None
+    await db.flush()
+    return True
+
+
+async def revoke_pasarguard_subscription(subscription: Subscription, db: AsyncSession) -> bool:
+    """Синхронный revoke на пути отзыва подписки.
+
+    Панель может быть недоступна: тогда фиксируем pending и возвращаем False,
+    но никогда не бросаем — Remnawave-revoke уже закоммичен вызывающим.
+    """
+    if subscription.pasarguard_user_id is None:
+        return False
+    api = _make_api()
+    now = datetime.now(UTC)
+    if api is None:
+        subscription.pasarguard_revoke_pending_at = now
+        await db.flush()
+        return False
+    try:
+        return await _revoke_identity(db, api, subscription, now)
+    except Exception as error:
+        logger.warning(
+            'PasarGuard revoke упал, интент сохранён',
+            subscription_id=subscription.id,
+            error=str(error)[:200],
+        )
+        try:
+            subscription.pasarguard_revoke_pending_at = now
+            await db.flush()
+        except Exception:
+            # Сломанная сессия не должна уронить Remnawave-revoke вызывающего.
+            logger.warning('Не удалось сохранить интент revoke PasarGuard', subscription_id=subscription.id)
+        return False
+    finally:
+        try:
+            await api.close()
+        except Exception:
+            logger.warning('Не удалось закрыть клиент PasarGuard', exc_info=True)
+
+
+async def enqueue_pasarguard_delete(db: AsyncSession, subscription: Subscription) -> None:
+    """Записать намерение удалить пользователя панели до hard-delete подписки."""
+    if subscription.pasarguard_user_id is None and not subscription.pasarguard_username:
+        return
+    await add_delete_intent(
+        db,
+        subscription_id=subscription.id,
+        user_id=subscription.pasarguard_user_id,
+        username=subscription.pasarguard_username,
+    )
+
+
 class PasarguardSyncService:
     """Периодический проектор состояния бота в PasarGuard."""
 
@@ -290,6 +378,7 @@ class PasarguardSyncService:
         # Ошибки отдельных элементов прохода: методы обслуживания возвращают
         # только счётчики, а ``errors`` собирается здесь.
         self._pass_errors = 0
+        self._last_orphan_cleanup_at: float | None = None
 
     # ------------------------------------------------------------- интерфейс
 
@@ -330,7 +419,7 @@ class PasarguardSyncService:
     # --------------------------------------------------------------- главное
 
     async def process_once(self) -> dict[str, int]:
-        """Один проход: сверка известных личностей и создание недостающих."""
+        """Один проход: очередь, revoke, сироты, сверка и бэкфилл."""
         stats = _empty_stats()
         if not self.is_enabled():
             logger.debug('PasarGuard не настроен, проход проектора пропущен')
@@ -349,10 +438,15 @@ class PasarguardSyncService:
             async with AsyncSessionLocal() as db:
                 try:
                     panel_users = await self._load_panel_users(api)
+                    stats['deleted'] += await self._drain_delete_intents(db, api)
+                    stats['updated'] += await self._retry_pending_revokes(db, api)
+                    if self._orphan_cleanup_due():
+                        stats['deleted'] += await self._cleanup_orphans(db, api, panel_users)
+                        self._last_orphan_cleanup_at = asyncio.get_running_loop().time()
                     reconcile_stats = await self._reconcile(db, api, panel_users)
                     for key, value in reconcile_stats.items():
                         stats[key] += value
-                    stats['created'] += await self._create_missing_users(db, api, panel_users)
+                    stats['created'] += await self._backfill(db, api, panel_users)
                     stats['errors'] += self._pass_errors
                     await db.commit()
                 except Exception as error:
@@ -720,10 +814,10 @@ class PasarguardSyncService:
         subscription.pasarguard_synced_hash = _desired_hash(desired)
         await db.flush()
 
-    # ------------------------------------------------------------ создание
+    # ------------------------------------------------------------ бэкфилл
 
-    async def _create_missing_users(self, db: AsyncSession, api: PasarguardAPI, users: list[PasarguardUser]) -> int:
-        """Создать личности eligible-подпискам без неё (пачками)."""
+    async def _backfill(self, db: AsyncSession, api: PasarguardAPI, users: list[PasarguardUser]) -> int:
+        """Создать личности eligible-подпискам без неё (пачками, resumable)."""
         created = 0
         now = datetime.now(UTC)
         grace_ids = await get_open_grace_subscription_ids(db)
@@ -783,6 +877,126 @@ class PasarguardSyncService:
                 break
             await asyncio.sleep(_BACKFILL_BATCH_PAUSE_SECONDS)
         return created
+
+    # ------------------------------------------------------- обслуживание
+
+    def _orphan_cleanup_due(self) -> bool:
+        if self._last_orphan_cleanup_at is None:
+            return True
+        elapsed = asyncio.get_running_loop().time() - self._last_orphan_cleanup_at
+        return elapsed >= _ORPHAN_CLEANUP_INTERVAL_SECONDS
+
+    def _owned_panel_users(self, users: list[PasarguardUser]) -> dict[int, PasarguardUser]:
+        """Пользователи бота — только при совпадении префикса И note-маркера."""
+        pattern = re.compile(rf'^{re.escape(self._prefix())}(\d+)$')
+        marker = f'xdrive-bot:{self._instance_id()}:sub:'
+        owned: dict[int, PasarguardUser] = {}
+        for user in users:
+            match = pattern.match(user.username or '')
+            if match is None:
+                continue
+            subscription_id = int(match.group(1))
+            if user.note != f'{marker}{subscription_id}':
+                continue
+            owned[subscription_id] = user
+        return owned
+
+    async def _cleanup_orphans(self, db: AsyncSession, api: PasarguardAPI, users: list[PasarguardUser]) -> int:
+        """Удалить пользователей бота, чья подписка уже удалена."""
+        owned = self._owned_panel_users(users)
+        if not owned:
+            return 0
+        alive: set[int] = set()
+        subscription_ids = list(owned)
+        batch_size = self._batch_size()
+        for start in range(0, len(subscription_ids), batch_size):
+            chunk = subscription_ids[start : start + batch_size]
+            result = await db.execute(select(Subscription.id).where(Subscription.id.in_(chunk)))
+            alive.update(result.scalars().all())
+        deleted = 0
+        for subscription_id, user in owned.items():
+            if subscription_id in alive:
+                continue
+            try:
+                await api.delete_user(user.id)
+            except PasarguardNotFoundError:
+                pass
+            except Exception as error:
+                self._pass_errors += 1
+                logger.warning(
+                    'Не удалось удалить сироту PasarGuard',
+                    pasarguard_user_id=user.id,
+                    error=str(error)[:200],
+                )
+                continue
+            deleted += 1
+            logger.info(
+                'Удалён сирота PasarGuard',
+                pasarguard_user_id=user.id,
+                subscription_id=subscription_id,
+            )
+        return deleted
+
+    async def _drain_delete_intents(self, db: AsyncSession, api: PasarguardAPI) -> int:
+        """Разобрать очередь удалений; недоступная панель оставляет интент."""
+        intents = await list_delete_intents(db, limit=self._batch_size())
+        drained = 0
+        for intent in intents:
+            try:
+                await self._delete_panel_user(api, intent.pasarguard_user_id, intent.pasarguard_username)
+            except PasarguardNotFoundError:
+                pass
+            except Exception as error:
+                self._pass_errors += 1
+                logger.warning(
+                    'Не удалось разобрать интент удаления PasarGuard',
+                    subscription_id=intent.subscription_id,
+                    error=str(error)[:200],
+                )
+                continue
+            await delete_intent(db, intent)
+            drained += 1
+        return drained
+
+    @staticmethod
+    async def _delete_panel_user(api: PasarguardAPI, user_id: int | None, username: str | None) -> None:
+        if user_id is not None:
+            try:
+                await api.delete_user(user_id)
+            except PasarguardNotFoundError:
+                return
+            return
+        if username:
+            user = await api.get_user_by_username(username)
+            await api.delete_user(user.id)
+
+    async def _retry_pending_revokes(self, db: AsyncSession, api: PasarguardAPI) -> int:
+        """Повторить revoke, отложенный синхронным путём при недоступной панели."""
+        now = datetime.now(UTC)
+        result = await db.execute(
+            select(Subscription)
+            .where(
+                Subscription.pasarguard_revoke_pending_at.is_not(None),
+                Subscription.pasarguard_user_id.is_not(None),
+            )
+            .order_by(Subscription.id)
+            .limit(self._batch_size())
+        )
+        revoked = 0
+        for subscription in result.scalars().all():
+            try:
+                resolved = await _revoke_identity(db, api, subscription, now)
+            except Exception as error:
+                self._pass_errors += 1
+                logger.warning(
+                    'Не удалось повторить revoke PasarGuard',
+                    subscription_id=subscription.id,
+                    error=str(error)[:200],
+                )
+                continue
+            if resolved:
+                revoked += 1
+        return revoked
 
     # -------------------------------------------------------- настройки
 
