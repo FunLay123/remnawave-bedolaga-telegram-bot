@@ -22,13 +22,14 @@ NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 END = NOW + timedelta(days=30)
 
 
-def _state(*, is_limited=False, is_exhausted=False, closed_at=None, total=20, used=0):
+def _state(*, is_limited=False, is_exhausted=False, closed_at=None, total=20, used=0, squad_connected=True):
     return PremiumStateView(
         is_limited=is_limited,
         is_exhausted=is_exhausted,
         closed_at=closed_at,
         total_limit_bytes=total,
         used_bytes=used,
+        squad_connected=squad_connected,
     )
 
 
@@ -162,3 +163,16 @@ def test_closed_or_exhausted_premium_state_is_disabled(state):
     desired = _evaluate(_subject(premium_state=state))
 
     assert desired.enabled is False
+
+
+def test_premium_squad_removed_from_connected_squads_is_disabled():
+    """Сквад убрали из набора подписки: проектор обязан выключить xdrive.
+
+    Иначе остаётся устаревшая строка состояния, premium-воркер этот сквад не
+    замеряет, а проектор продолжает включать пользователя по старому остатку —
+    фактически безлимитный xdrive.
+    """
+    desired = _evaluate(_subject(premium_state=_state(squad_connected=False)))
+
+    assert desired.enabled is False
+    assert desired.reason == 'premium_ineligible'

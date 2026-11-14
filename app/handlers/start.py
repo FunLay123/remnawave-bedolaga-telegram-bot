@@ -1579,6 +1579,10 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
                 try:
                     await merge_phantom_into_user(db, phantom, user)
                     await db.commit()
+                    # Мерж мог удалить подписку и записать интент — будим проектор.
+                    from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+                    nudge_pasarguard_projector(None)
                     await db.refresh(user, ['subscriptions'])
                 except Exception:
                     await db.rollback()
@@ -1794,6 +1798,11 @@ async def cmd_start(message: types.Message, state: FSMContext, db: AsyncSession,
             user.referral_code = await generate_unique_referral_code(db, user.telegram_id)
 
             await db.commit()
+
+            # Подписки удалены, интенты PasarGuard закоммичены — будим проектор.
+            from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+            nudge_pasarguard_projector(None)
 
             logger.info('✅ Пользователь подготовлен к восстановлению', telegram_id=user.telegram_id)
 

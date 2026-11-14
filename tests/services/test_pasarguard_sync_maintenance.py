@@ -168,7 +168,7 @@ def _configure(monkeypatch, fake: FakePasarguardAPI) -> None:
     monkeypatch.setattr(settings, 'PASARGUARD_USERNAME_PREFIX', PREFIX)
     monkeypatch.setattr(settings, 'PASARGUARD_INSTANCE_ID', INSTANCE)
     monkeypatch.setattr(settings, 'PASARGUARD_SYNC_BATCH_SIZE', 200)
-    monkeypatch.setattr(sync_module, '_make_api', lambda: fake)
+    monkeypatch.setattr(sync_module, '_make_api', lambda **_kwargs: fake)
 
 
 def _seed_user(user_id: int = 1, status: str = UserStatus.ACTIVE.value) -> User:

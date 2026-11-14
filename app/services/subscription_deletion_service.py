@@ -97,7 +97,7 @@ async def delete_subscription_record(
     await ensure_no_open_grace_for_subscriptions(db, (subscription.id,))
 
     from app.services.cashera_recurring_cancel import cancel_cashera_recurring_for_subscription_safe
-    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete, nudge_pasarguard_projector
     from app.services.payment.lava import cancel_lava_recurring_for_subscription_safe
     from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
 
@@ -159,6 +159,10 @@ async def delete_subscription_record(
     await enqueue_pasarguard_delete(db, subscription)
     await db.delete(subscription)
     await db.commit()
+
+    # Интент уже в базе: будим проектор, иначе старый UUID PasarGuard живёт
+    # включённым до следующего планового прохода.
+    nudge_pasarguard_projector(None)
 
     logger.info(
         'Subscription deleted',

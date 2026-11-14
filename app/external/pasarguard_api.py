@@ -134,9 +134,14 @@ class PasarguardAPI:
         api_key: str,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         transport: httpx.AsyncBaseTransport | None = None,
+        get_attempts: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip('/')
         self._api_key = api_key
+        # Проектору повторы GET нужны для устойчивости к морганию панели, а
+        # горячему пути выдачи подписки — нет: три таймаута подряд задержали бы
+        # ответ клиенту. ``None`` сохраняет прежнее поведение.
+        self._get_attempts = GET_RETRY_ATTEMPTS if get_attempts is None else max(1, int(get_attempts))
         self._client = httpx.AsyncClient(
             base_url=self.base_url,
             timeout=timeout,
@@ -159,7 +164,7 @@ class PasarguardAPI:
 
         GET повторяется при 5xx/таймауте/обрыве связи; запись — ровно один раз.
         """
-        attempts = GET_RETRY_ATTEMPTS if method == 'GET' else 1
+        attempts = self._get_attempts if method == 'GET' else 1
         for attempt in range(attempts):
             last_attempt = attempt + 1 >= attempts
             try:

@@ -329,16 +329,17 @@ def create_unified_app(
 
         proxy_client = create_proxy_client()
         xdrive_kwargs: dict[str, Any] = {}
-        if settings.is_xdrive_enabled():
+        if settings.is_xdrive_enabled() and settings.has_pasarguard_credentials():
             from app.external.pasarguard_api import PasarguardAPI
             from app.services.xdrive_service import PasarguardConfigProvider, lookup_xdrive_target
 
             xdrive_api = PasarguardAPI(
                 base_url=settings.PASARGUARD_API_URL or '',
                 api_key=settings.PASARGUARD_API_KEY or '',
-                # GET повторяется до трёх раз: зависшая панель не должна
-                # задерживать выдачу подписки дольше нескольких секунд.
-                timeout=min(float(settings.PASARGUARD_API_TIMEOUT_SECONDS), 5.0),
+                # Горячий путь выдачи подписки: одна попытка и короткий
+                # таймаут. Зависшая панель не должна задерживать клиента.
+                timeout=min(float(settings.PASARGUARD_API_TIMEOUT_SECONDS), 1.5),
+                get_attempts=1,
             )
             xdrive_config = PasarguardConfigProvider(
                 xdrive_api,
@@ -347,6 +348,11 @@ def create_unified_app(
             shutdown_handlers.append(xdrive_config.aclose)
             xdrive_kwargs = {'xdrive_lookup': lookup_xdrive_target, 'xdrive_config': xdrive_config}
             logger.info('Слияние xdrive-конфигов PasarGuard включено')
+        elif settings.is_xdrive_enabled():
+            # Флаг включён, но панель не настроена: слияния нет, запросов нет.
+            logger.warning(
+                'XDRIVE_ENABLED включён, но PASARGUARD_API_URL/PASARGUARD_API_KEY не заданы — слияние xdrive выключено'
+            )
 
         app.add_middleware(
             SubscriptionProxyMiddleware,

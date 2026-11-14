@@ -36,7 +36,9 @@ class _State:
         baseline_bytes: int | None = None,
         pasarguard_baseline_bytes: int | None = None,
         pasarguard_identity_created_at: datetime | None = None,
+        squad_uuid: str = SQUAD,
     ) -> None:
+        self.squad_uuid = squad_uuid
         self.limit_bytes = limit_gb * BYTES_IN_GB
         self.extra_bytes = 0
         self.used_bytes = used_bytes
@@ -150,6 +152,23 @@ def test_lifetime_below_baseline_resets_baseline():
     assert state.pasarguard_identity_created_at == IDENTITY
 
     assert service._xdrive_delta(state, _subscription(), (20, 250)) == 50
+
+
+def test_disconnected_premium_squad_gets_zero_delta():
+    """Сквад убран из набора подписки — xdrive не измеряется и не учитывается.
+
+    Строка состояния могла остаться с прошлого периода; прибавлять её дельту
+    к пулу нельзя, пока сквад не вернут в ``connected_squads``.
+    """
+    service = PremiumTrafficService()
+    subscription = _subscription()
+    subscription.connected_squads = [OTHER_SQUAD]
+    state = _State(pasarguard_baseline_bytes=100, pasarguard_identity_created_at=IDENTITY)
+
+    assert service._xdrive_delta(state, subscription, (50, 250)) == 0
+    # Baseline не трогаем: расход по отключённому скваду не должен «сгорать».
+    assert state.pasarguard_baseline_bytes == 100
+    assert state.pasarguard_identity_created_at == IDENTITY
 
 
 def test_absent_pasarguard_usage_returns_zero():

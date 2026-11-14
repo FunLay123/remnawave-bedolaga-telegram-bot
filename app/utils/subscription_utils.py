@@ -30,7 +30,7 @@ async def cleanup_duplicate_subscriptions(db: AsyncSession) -> int:
         )
         subscriptions = subscriptions_result.scalars().all()
 
-        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete, nudge_pasarguard_projector
 
         for old_subscription in subscriptions[1:]:
             # PasarGuard: строка удаляется ниже — интент пишется заранее.
@@ -44,6 +44,8 @@ async def cleanup_duplicate_subscriptions(db: AsyncSession) -> int:
             )
 
     await db.commit()
+    # Интенты удаления закоммичены — проектор должен разобрать их сразу.
+    nudge_pasarguard_projector(None)
     logger.info('🧹 Очищено дублирующихся подписок', total_deleted=total_deleted)
 
     return total_deleted

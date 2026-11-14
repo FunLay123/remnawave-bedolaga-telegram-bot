@@ -210,11 +210,14 @@ async def rollback_trial_subscription_activation(
         )
 
     try:
-        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete, nudge_pasarguard_projector
 
         await enqueue_pasarguard_delete(db, subscription)
         await db.delete(subscription)
         await db.commit()
+        # Интент закоммичен — будим проектор, чтобы PasarGuard-пользователь
+        # откатившегося триала не остался включённым.
+        nudge_pasarguard_projector(None)
     except Exception as error:  # pragma: no cover - defensive logging
         logger.error(
             'Failed to remove trial subscription after charge failure',

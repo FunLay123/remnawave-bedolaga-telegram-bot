@@ -164,7 +164,7 @@ def _configure(monkeypatch, fake: FakePasarguardAPI, *, enabled: bool = True) ->
     monkeypatch.setattr(settings, 'PASARGUARD_USERNAME_PREFIX', PREFIX)
     monkeypatch.setattr(settings, 'PASARGUARD_INSTANCE_ID', INSTANCE)
     monkeypatch.setattr(settings, 'PASARGUARD_SYNC_BATCH_SIZE', 200)
-    monkeypatch.setattr(sync_module, '_make_api', lambda: fake)
+    monkeypatch.setattr(sync_module, '_make_api', lambda **_kwargs: fake)
 
 
 def _use_session(monkeypatch, db) -> None:

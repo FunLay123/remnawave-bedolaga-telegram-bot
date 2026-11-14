@@ -244,8 +244,12 @@ class SubscriptionService:
                     # Ссылка на панельный аккаунт обновлена и на grace-ветке —
                     # будим проектор, чтобы он увидел актуальную подписку.
                     from app.services.pasarguard_sync_service import pasarguard_sync_service
+                    from app.services.premium_traffic_service import premium_traffic_service
 
                     pasarguard_sync_service.nudge(subscription.id)
+                    # Покупка/триал: будим premium-воркер, чтобы строка
+                    # состояния появилась без ожидания планового прохода.
+                    premium_traffic_service.nudge(subscription.id)
                     return updated_user
 
                 # Multi-tariff mode: each subscription has its own Remnawave user
@@ -306,8 +310,12 @@ class SubscriptionService:
                 # Панель xdrive живёт отдельно: будим проектор, чтобы личность
                 # создалась/включилась без ожидания планового прохода.
                 from app.services.pasarguard_sync_service import pasarguard_sync_service
+                from app.services.premium_traffic_service import premium_traffic_service
 
                 pasarguard_sync_service.nudge(subscription.id)
+                # Покупка/триал: premium-воркер сразу создаёт строку состояния,
+                # без которой проектор не имеет права включать xdrive.
+                premium_traffic_service.nudge(subscription.id)
 
                 logger.info('✅ Создан/обновлен RemnaWave пользователь для подписки', subscription_id=subscription.id)
                 logger.info('🔗 Ссылка на подписку', subscription_url=updated_user.subscription_url)

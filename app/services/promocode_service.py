@@ -617,6 +617,12 @@ class PromoCodeService:
                     )
                     await db.delete(trial_subscription)
                     await db.commit()
+                    # Строка удалена; будим проектор, чтобы он не держал
+                    # включённую PasarGuard-личность, если успел её создать
+                    # в окне до отката (уборка сирот — страховка).
+                    from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+                    nudge_pasarguard_projector(None)
                     raise ValueError('trial_provisioning_failed')
 
                 effects.append(f'🎁 Активирована тестовая подписка на {trial_days} дней')

@@ -10,10 +10,12 @@ cache_version)``. Версия включает поколение личнос�
 revoke: после ротации кредов старый конфиг клиенту уже не подходит, и кеш
 обязан промахнуться, не дожидаясь TTL.
 
-Панель может быть недоступна, а клиент — ждать. Поэтому таймаут клиента
-панели ограничен несколькими секундами: GET повторяется, и три полных
-таймаута подряд задержали бы выдачу подписки. Тела конфигов (в них могут быть
-xdrive ``secrets`` и ``remoteFolder``) не логируются.
+Панель может быть недоступна, а клиент — ждать. Поэтому провайдер создаётся
+с коротким таймаутом и одной попыткой GET: проектору повторы нужны, а выдача
+подписки не должна ждать зависшую панель. Без URL и ключа панели провайдер не
+создаётся, а поиск цели сразу возвращает ``None`` — запросов в PasarGuard нет.
+Тела конфигов (в них могут быть xdrive ``secrets`` и ``remoteFolder``) не
+логируются.
 """
 
 from __future__ import annotations
@@ -60,7 +62,11 @@ class XdriveTarget:
     cache_version: str
 
 
-def _premium_view(state: SubscriptionPremiumTraffic | None) -> PremiumStateView | None:
+def _premium_view(
+    state: SubscriptionPremiumTraffic | None,
+    *,
+    squad_connected: bool,
+) -> PremiumStateView | None:
     if state is None:
         return None
     return PremiumStateView(
@@ -69,6 +75,7 @@ def _premium_view(state: SubscriptionPremiumTraffic | None) -> PremiumStateView 
         closed_at=state.closed_at,
         total_limit_bytes=int(state.total_limit_bytes or 0),
         used_bytes=int(state.used_bytes or 0),
+        squad_connected=squad_connected,
     )
 
 
@@ -88,6 +95,9 @@ async def lookup_xdrive_target(short_uuids: list[str]) -> XdriveTarget | None:
     грейс-трафика.
     """
     if not short_uuids or not settings.is_xdrive_enabled():
+        return None
+    # Без URL/ключа панели слиянию нечего запрашивать: не открываем даже БД.
+    if not settings.has_pasarguard_credentials():
         return None
 
     try:
@@ -122,8 +132,13 @@ async def lookup_xdrive_target(short_uuids: list[str]) -> XdriveTarget | None:
             if len(squads) != 1:
                 return None
 
-            state = await get_state(db, subscription.id, next(iter(squads)))
-            if not premium_state_allows_xdrive(state=_premium_view(state), squad_count=len(squads)):
+            squad_uuid = next(iter(squads))
+            squad_connected = squad_uuid in set(subscription.connected_squads or ())
+            state = await get_state(db, subscription.id, squad_uuid)
+            if not premium_state_allows_xdrive(
+                state=_premium_view(state, squad_connected=squad_connected),
+                squad_count=len(squads),
+            ):
                 return None
 
             return XdriveTarget(

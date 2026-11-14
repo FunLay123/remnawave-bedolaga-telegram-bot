@@ -149,7 +149,7 @@ def _configure(monkeypatch, fake: FakePasarguardAPI, *, enabled: bool = True) ->
     monkeypatch.setattr(settings, 'PASARGUARD_USERNAME_PREFIX', PREFIX)
     monkeypatch.setattr(settings, 'PASARGUARD_INSTANCE_ID', INSTANCE)
     monkeypatch.setattr(settings, 'PASARGUARD_SYNC_BATCH_SIZE', 200)
-    monkeypatch.setattr(sync_module, '_make_api', lambda: fake)
+    monkeypatch.setattr(sync_module, '_make_api', lambda **_kwargs: fake)
 
 
 def _use_session(monkeypatch, db) -> None:
@@ -466,6 +466,65 @@ async def test_premium_topup_reenables_user(monkeypatch):
         # Остаток пула после докупки: (5 + 2) - 5 = 2 GiB.
         assert fake.users[42].data_limit == 2 * GIB
         assert fake.users[42].id == 42
+
+
+@pytest.mark.asyncio
+async def test_disconnected_premium_squad_disables_and_restore_enables(monkeypatch):
+    """Premium-сквад убран из ``connected_squads`` — xdrive выключается.
+
+    Иначе проектор продолжал бы включать пользователя по устаревшей строке
+    состояния, которую premium-воркер уже не замеряет: расход xdrive перестал
+    бы попадать в пул.
+    """
+    fake = FakePasarguardAPI([_panel_user()])
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(
+            monkeypatch,
+            db,
+            [
+                _seed_user(),
+                _seed_tariff(),
+                _seed_subscription(identity=(42, 'bx1'), squads=[SQUAD2]),
+                _seed_state(),
+            ],
+        )
+
+        first = await _pass(monkeypatch, db, fake)
+        assert first['disabled'] == 1
+        assert fake.disabled_calls == [(42, True)]
+
+        subscription = await db.get(Subscription, 1)
+        subscription.connected_squads = [SQUAD]
+        await db.commit()
+
+        second = await _pass(monkeypatch, db, fake)
+
+        assert second['enabled'] == 1
+        assert fake.disabled_calls == [(42, True), (42, False)]
+        assert fake.users[42].id == 42
+
+
+@pytest.mark.asyncio
+async def test_missing_premium_state_blocks_creation_until_state_exists(monkeypatch):
+    """Покупка без строки premium-состояния: xdrive не создаётся до замера."""
+    fake = FakePasarguardAPI()
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(monkeypatch, db, [_seed_user(), _seed_tariff(), _seed_subscription()])
+
+        first = await _pass(monkeypatch, db, fake)
+
+        assert first['created'] == 0
+        assert fake.create_calls == []
+        assert (await db.get(Subscription, 1)).pasarguard_user_id is None
+
+        # Premium-воркер отработал (его будит покупка) и создал строку состояния.
+        db.add(_seed_state())
+        await db.commit()
+
+        second = await _pass(monkeypatch, db, fake)
+
+        assert second['created'] == 1
+        assert fake.create_calls[0]['username'] == 'bx1'
 
 
 @pytest.mark.asyncio

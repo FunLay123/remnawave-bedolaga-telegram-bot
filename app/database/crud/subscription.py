@@ -2398,6 +2398,11 @@ async def reset_trials_for_users_without_paid_subscription(db: AsyncSession) -> 
             logger.error('Ошибка сохранения сброса триалов', error=error)
             raise
 
+        # Удаления и PasarGuard-интенты закоммичены — разбудить проектор.
+        from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+        nudge_pasarguard_projector(None)
+
     logger.info('♻️ Сброшено триальных подписок (удалены из панели)', reset_count=reset_count)
     return reset_count
 
@@ -2601,6 +2606,12 @@ async def check_and_update_subscription_status(db: AsyncSession, subscription: S
 
         await db.commit()
         await db.refresh(subscription)
+
+        # xdrive выключается по статусу подписки: проектор должен узнать об
+        # истечении сразу, а не через плановый проход.
+        from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+        nudge_pasarguard_projector(None)
 
         logger.info("⏰ Статус подписки пользователя изменен на 'expired'", user_id=subscription.user_id)
     elif subscription.status == SubscriptionStatus.PENDING.value:

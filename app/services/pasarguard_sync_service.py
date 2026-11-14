@@ -67,13 +67,20 @@ ALLOWED_SUBSCRIPTION_STATUSES = frozenset(
 
 @dataclass(frozen=True)
 class PremiumStateView:
-    """Снимок premium-пула одной подписки без ORM-зависимости."""
+    """Снимок premium-пула одной подписки без ORM-зависимости.
+
+    ``squad_connected`` — premium-сквад всё ещё входит в
+    ``subscription.connected_squads``. Убранный из набора сквад панель и
+    premium-воркер не обслуживают, поэтому строка состояния могла устареть:
+    по ней нельзя ни включать xdrive, ни считать его расход.
+    """
 
     is_limited: bool
     is_exhausted: bool
     closed_at: datetime | None
     total_limit_bytes: int
     used_bytes: int
+    squad_connected: bool
 
 
 @dataclass(frozen=True)
@@ -142,7 +149,7 @@ def subscription_allows_xdrive(
 
 
 def premium_state_allows_xdrive(*, state: PremiumStateView | None, squad_count: int) -> bool:
-    """Есть ровно один positive premium-сквад, и его пул не закрыт.
+    """Есть ровно один positive premium-сквад, он подключён, и его пул не закрыт.
 
     ``squad_count`` — число premium-сквадов тарифа (с положительным лимитом).
     Больше одного — v1 выключает xdrive: непонятно, к какому пулу относить
@@ -150,6 +157,8 @@ def premium_state_allows_xdrive(*, state: PremiumStateView | None, squad_count: 
     а ноль в PasarGuard означает «без лимита».
     """
     if state is None or squad_count != 1:
+        return False
+    if not state.squad_connected:
         return False
     if state.is_limited or state.is_exhausted or state.closed_at is not None:
         return False
@@ -248,14 +257,15 @@ def _empty_stats() -> dict[str, int]:
     return dict.fromkeys(STATS_KEYS, 0)
 
 
-def _make_api() -> PasarguardAPI | None:
+def _make_api(*, timeout: float | None = None, get_attempts: int | None = None) -> PasarguardAPI | None:
     """Собрать клиент панели. Без URL, ключа и группы проектор молчит."""
     if not settings.is_pasarguard_configured():
         return None
     return PasarguardAPI(
         base_url=settings.PASARGUARD_API_URL or '',
         api_key=settings.PASARGUARD_API_KEY or '',
-        timeout=float(settings.PASARGUARD_API_TIMEOUT_SECONDS),
+        timeout=float(settings.PASARGUARD_API_TIMEOUT_SECONDS) if timeout is None else timeout,
+        get_attempts=get_attempts,
     )
 
 
@@ -332,7 +342,10 @@ async def revoke_pasarguard_subscription(subscription: Subscription, db: AsyncSe
     try:
         if getattr(subscription, 'pasarguard_user_id', None) is None:
             return False
-        api = _make_api()
+        # Пользователь ждёт новую ссылку: зависшая панель не должна задерживать
+        # ответ на полный настроенный таймаут. Запись (revoke — POST) не
+        # повторяется, так что одного короткого запроса достаточно.
+        api = _make_api(timeout=min(float(settings.PASARGUARD_API_TIMEOUT_SECONDS), 5.0))
         if api is None:
             subscription.pasarguard_revoke_pending_at = now
             await db.flush()
@@ -580,12 +593,14 @@ class PasarguardSyncService:
     def _premium_view(
         server_traffic_limits: dict | None,
         premium_states: dict[str, SubscriptionPremiumTraffic],
+        connected_squads: list[str] | None,
     ) -> tuple[PremiumStateView | None, int]:
         squads = get_premium_squads_for_tariff(SimpleNamespace(server_traffic_limits=server_traffic_limits))
         squad_count = len(squads)
         if squad_count != 1:
             return None, squad_count
-        state = premium_states.get(next(iter(squads)))
+        squad_uuid = next(iter(squads))
+        state = premium_states.get(squad_uuid)
         if state is None:
             return None, squad_count
         return (
@@ -595,6 +610,7 @@ class PasarguardSyncService:
                 closed_at=state.closed_at,
                 total_limit_bytes=int(state.total_limit_bytes),
                 used_bytes=int(state.used_bytes or 0),
+                squad_connected=squad_uuid in set(connected_squads or ()),
             ),
             squad_count,
         )
@@ -620,7 +636,11 @@ class PasarguardSyncService:
             candidate = subscription.pasarguard_username or f'{self._prefix()}{subscription.id}'
             existing = panel_by_username.get(candidate)
 
-        premium_state, squad_count = self._premium_view(server_traffic_limits, premium_states)
+        premium_state, squad_count = self._premium_view(
+            server_traffic_limits,
+            premium_states,
+            subscription.connected_squads,
+        )
         subject = SyncSubject(
             subscription_id=subscription.id,
             subscription_status=subscription.status,
@@ -1029,3 +1049,15 @@ class PasarguardSyncService:
 
 
 pasarguard_sync_service = PasarguardSyncService()
+
+
+def nudge_pasarguard_projector(subscription_id: int | None = None) -> None:
+    """Разбудить проектор из чужого горячего пути, никогда не роняя его.
+
+    Nudge — подсказка о задержке, а не часть корректности: плановый проход всё
+    равно сойдётся. Поэтому сбой импорта/вызова глушится с предупреждением.
+    """
+    try:
+        pasarguard_sync_service.nudge(subscription_id)
+    except Exception:
+        logger.warning('Не удалось разбудить проектор PasarGuard', subscription_id=subscription_id)

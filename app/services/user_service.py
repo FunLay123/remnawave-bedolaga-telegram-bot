@@ -1518,6 +1518,10 @@ class UserService:
                 await db.execute(update(AccessPolicy).where(AccessPolicy.created_by == user_id).values(created_by=None))
                 await db.execute(delete(User).where(User.id == user_id))
                 await db.commit()
+                # Подписки и PasarGuard-интенты закоммичены — будим проектор.
+                from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+                nudge_pasarguard_projector(None)
                 logger.info('✅ Пользователь окончательно удален из базы', user_id=user_id)
             except Exception as e:
                 logger.error('❌ Ошибка финального удаления пользователя', error=e)

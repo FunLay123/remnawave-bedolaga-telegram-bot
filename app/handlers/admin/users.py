@@ -3530,11 +3530,14 @@ async def confirm_subscription_deletion(callback: types.CallbackQuery, db_user: 
 
     await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
 
-    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete, nudge_pasarguard_projector
 
     await enqueue_pasarguard_delete(db, subscription)
     await db.delete(subscription)
     await db.commit()
+
+    # Интент закоммичен — проектор разберёт его без ожидания планового прохода.
+    nudge_pasarguard_projector(None)
 
     logger.info(
         'Админ удалил подписку пользователя',

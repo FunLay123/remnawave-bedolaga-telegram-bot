@@ -4736,9 +4736,13 @@ class Settings(BaseSettings):
         """
         return bool(self.XDRIVE_ENABLED)
 
+    def has_pasarguard_credentials(self) -> bool:
+        """Заданы URL и ключ панели — без них клиент PasarGuard не создать."""
+        return bool(self.PASARGUARD_API_URL and self.PASARGUARD_API_KEY)
+
     def is_pasarguard_configured(self) -> bool:
         """Заданы URL, ключ и группа xdrive — проектору есть что синхронизировать."""
-        return bool(self.PASARGUARD_API_URL and self.PASARGUARD_API_KEY and self.PASARGUARD_XDRIVE_GROUP_ID is not None)
+        return self.has_pasarguard_credentials() and self.PASARGUARD_XDRIVE_GROUP_ID is not None
 
     def get_pasarguard_instance_id(self) -> str:
         """PASARGUARD_INSTANCE_ID или hostname — метка инстанса в note пользователя."""

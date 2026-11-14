@@ -3068,6 +3068,11 @@ async def reset_user_trial(
     await db.commit()
     await db.refresh(user, ['subscriptions'])
 
+    # Снос триала мог записать PasarGuard-интенты — проектор будим после коммита.
+    from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+    nudge_pasarguard_projector(None)
+
     reason_text = f' (reason: {request.reason})' if request.reason else ''
     logger.info('Admin reset trial for user', admin_id=admin.id, user_id=user_id, reason_text=reason_text)
 
@@ -3203,7 +3208,7 @@ async def reset_user_subscription(
 
     # PasarGuard: за строками стоят пользователи панели, и после DELETE их
     # идентичность уже не прочитать — очередь удалений пишется заранее.
-    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete, nudge_pasarguard_projector
 
     for sub in subs:
         await enqueue_pasarguard_delete(db, sub)
@@ -3213,6 +3218,10 @@ async def reset_user_subscription(
 
     user.updated_at = datetime.now(UTC)
     await db.commit()
+
+    # Интенты закоммичены — будим проектор, чтобы PasarGuard-пользователи
+    # выключились/удалились без ожидания планового прохода.
+    nudge_pasarguard_projector(None)
 
     reason_text = f' (reason: {request.reason})' if request.reason else ''
     logger.info('Admin reset subscription for user', admin_id=admin.id, user_id=user_id, reason_text=reason_text)

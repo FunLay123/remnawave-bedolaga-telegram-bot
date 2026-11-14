@@ -8,6 +8,7 @@ UUID живёт до следующего прохода), удаление — 
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -17,8 +18,10 @@ import pytest
 from sqlalchemy import select
 
 import app.services.pasarguard_sync_service as sync_module
+import app.services.premium_traffic_service as premium_module
 import app.services.subscription_service as subscription_service_module
 from app.config import settings
+from app.database.crud.subscription import check_and_update_subscription_status
 from app.database.models import (
     CasheraSubscription,
     DiscountOffer,
@@ -209,13 +212,23 @@ def _record_nudges(monkeypatch) -> list[int | None]:
     return calls
 
 
+def _record_premium_nudges(monkeypatch) -> list[int | None]:
+    calls: list[int | None] = []
+
+    def _nudge(subscription_id: int | None = None) -> None:
+        calls.append(subscription_id)
+
+    monkeypatch.setattr(premium_module.premium_traffic_service, 'nudge', _nudge)
+    return calls
+
+
 # ---------------------------------------------------------------- revoke ----
 
 
 @pytest.mark.asyncio
 async def test_revoke_calls_pasarguard_and_records_timestamp(monkeypatch):
     fake_pg = _FakePasarguardAPI()
-    monkeypatch.setattr(sync_module, '_make_api', lambda: fake_pg)
+    monkeypatch.setattr(sync_module, '_make_api', lambda **_kwargs: fake_pg)
     fake_panel = _FakeRemnaWaveAPI()
     monkeypatch.setattr(SubscriptionService, 'get_api_client', _remnawave_client(fake_panel))
     monkeypatch.setattr(subscription_service_module, 'get_user_by_id', _async_return(_user()))
@@ -237,7 +250,7 @@ async def test_revoke_calls_pasarguard_and_records_timestamp(monkeypatch):
 @pytest.mark.asyncio
 async def test_revoke_failure_sets_pending_and_does_not_break_remnawave_revoke(monkeypatch):
     fake_pg = _FakePasarguardAPI(error=PasarguardAPIError('panel down', status_code=500))
-    monkeypatch.setattr(sync_module, '_make_api', lambda: fake_pg)
+    monkeypatch.setattr(sync_module, '_make_api', lambda **_kwargs: fake_pg)
     monkeypatch.setattr(SubscriptionService, 'get_api_client', _remnawave_client(_FakeRemnaWaveAPI()))
     monkeypatch.setattr(subscription_service_module, 'get_user_by_id', _async_return(_user()))
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda _self: False)
@@ -286,7 +299,26 @@ def _async_return(value):
 
 
 @pytest.mark.asyncio
+async def test_sync_revoke_uses_short_timeout(monkeypatch):
+    """Синхронный revoke не должен ждать панель полные 15 секунд: пользователь
+    в этот момент ждёт новую ссылку подписки."""
+    recorded: dict = {}
+    fake_pg = _FakePasarguardAPI()
+
+    def _make_api(**kwargs):
+        recorded.update(kwargs)
+        return fake_pg
+
+    monkeypatch.setattr(sync_module, '_make_api', _make_api)
+    monkeypatch.setattr(settings, 'PASARGUARD_API_TIMEOUT_SECONDS', 15)
+
+    assert await sync_module.revoke_pasarguard_subscription(_subscription(), _Db()) is True
+    assert recorded == {'timeout': 5.0}
+
+
+@pytest.mark.asyncio
 async def test_delete_enqueues_intent_before_hard_delete(monkeypatch):
+    nudges = _record_nudges(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda _self: False)
     monkeypatch.setattr(
         'app.services.grace_access_runtime.ensure_no_open_grace_for_subscriptions',
@@ -320,6 +352,25 @@ async def test_delete_enqueues_intent_before_hard_delete(monkeypatch):
     assert [(row.subscription_id, row.pasarguard_user_id, row.pasarguard_username) for row in intents] == [
         (1, 42, 'bx1')
     ]
+    # После коммита удаления проектор будится сразу, а не через 300 секунд.
+    assert nudges == [None]
+
+
+@pytest.mark.asyncio
+async def test_expiry_transition_nudges_the_projector(monkeypatch):
+    """ACTIVE→EXPIRED коммитится в crud — проектор должен узнать сразу."""
+    nudges = _record_nudges(monkeypatch)
+
+    async with memory_session(monkeypatch, (User.__table__, Subscription.__table__)) as db:
+        target = _subscription(status='active', end_date=NOW - timedelta(days=1))
+        db.add(target)
+        await db.commit()
+
+        result = await check_and_update_subscription_status(db, target)
+
+        assert result.status == 'expired'
+
+    assert nudges == [None]
 
 
 # --------------------------------------------------------------- premium ----
@@ -371,12 +422,52 @@ async def test_premium_limit_and_restore_nudge_the_projector(monkeypatch):
     assert nudges == [9, 9]
 
 
+@pytest.mark.asyncio
+async def test_premium_nudge_wakes_the_monitoring_loop(monkeypatch):
+    """nudge() должен будить цикл немедленно, а не ждать плановый интервал."""
+    service = PremiumTrafficService()
+    monkeypatch.setattr(service, 'get_check_interval_seconds', lambda: 3600)
+
+    passes: list[int] = []
+
+    async def _process_once():
+        passes.append(1)
+        if len(passes) == 1:
+            service.nudge()
+        else:
+            service.stop()
+        return {'checked': 0, 'limited': 0, 'restored': 0, 'warned': 0, 'cleaned': 0, 'errors': 0}
+
+    monkeypatch.setattr(service, 'process_once', _process_once)
+
+    await asyncio.wait_for(service.start_monitoring(), timeout=5)
+
+    assert passes == [1, 1]
+
+
+def test_process_once_nudges_projector_only_when_xdrive_is_configured(monkeypatch):
+    nudges = _record_nudges(monkeypatch)
+    service = PremiumTrafficService()
+
+    monkeypatch.setattr(settings, 'XDRIVE_ENABLED', True)
+    monkeypatch.setattr(settings, 'PASARGUARD_API_URL', 'https://panel.example')
+    monkeypatch.setattr(settings, 'PASARGUARD_API_KEY', 'test-key')
+    monkeypatch.setattr(settings, 'PASARGUARD_XDRIVE_GROUP_ID', 7)
+    service._nudge_projector_if_xdrive()
+    assert nudges == [None]
+
+    monkeypatch.setattr(settings, 'XDRIVE_ENABLED', False)
+    service._nudge_projector_if_xdrive()
+    assert nudges == [None]
+
+
 # ---------------------------------------------------------------- create ----
 
 
 @pytest.mark.asyncio
 async def test_create_remnawave_user_nudges_the_projector(monkeypatch):
     nudges = _record_nudges(monkeypatch)
+    premium_nudges = _record_premium_nudges(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda _self: False)
     monkeypatch.setattr(subscription_service_module, 'get_user_by_id', _async_return(_user(panel_user_id=None)))
     monkeypatch.setattr(subscription_service_module, 'resolve_panel_user_tag', lambda _subscription: None)
@@ -420,12 +511,16 @@ async def test_create_remnawave_user_nudges_the_projector(monkeypatch):
     assert result.id == 77
     assert db.commits == 1
     assert nudges == [1]
+    # Покупка/триал сразу будят premium-воркер: без строки состояния xdrive
+    # остаётся выключенным до следующего планового замера.
+    assert premium_nudges == [1]
 
 
 @pytest.mark.asyncio
 async def test_grace_preserving_create_nudges_the_projector(monkeypatch):
     """Grace-ветка тоже коммитит ссылку на панельный аккаунт — и тоже будит проектор."""
     nudges = _record_nudges(monkeypatch)
+    premium_nudges = _record_premium_nudges(monkeypatch)
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda _self: False)
     monkeypatch.setattr(subscription_service_module, 'get_user_by_id', _async_return(_user()))
     monkeypatch.setattr(subscription_service_module, 'resolve_panel_user_tag', lambda _subscription: None)
@@ -459,6 +554,7 @@ async def test_grace_preserving_create_nudges_the_projector(monkeypatch):
     assert result is not None
     assert db.commits == 1
     assert nudges == [1]
+    assert premium_nudges == [1]
 
 
 # ------------------------------------------------------- hard-delete sites ----

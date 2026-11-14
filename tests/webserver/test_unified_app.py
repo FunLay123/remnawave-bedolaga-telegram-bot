@@ -180,6 +180,89 @@ def test_unified_app_docs_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     assert '/doc' not in registered_paths
 
 
+def _build_unified_app_with_xdrive(monkeypatch: pytest.MonkeyPatch, *, url, key):
+    """Собрать приложение с прокси подписок и записать созданные PasarGuard-объекты."""
+    created_apis: list[dict] = []
+    created_providers: list[tuple] = []
+
+    class _RecordingAPI:
+        def __init__(self, **kwargs) -> None:
+            created_apis.append(kwargs)
+
+        async def close(self) -> None:
+            return None
+
+    class _RecordingProvider:
+        def __init__(self, api, cache_seconds) -> None:
+            created_providers.append((api, cache_seconds))
+
+        async def aclose(self) -> None:
+            return None
+
+    class _FakeProxyClient:
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr('app.external.pasarguard_api.PasarguardAPI', _RecordingAPI)
+    monkeypatch.setattr('app.services.xdrive_service.PasarguardConfigProvider', _RecordingProvider)
+    monkeypatch.setattr('app.webserver.subscription_proxy.create_proxy_client', lambda: _FakeProxyClient())
+
+    monkeypatch.setattr(settings, 'WEB_API_ENABLED', False, raising=False)
+    monkeypatch.setattr(settings, 'MINIAPP_STATIC_PATH', 'miniapp', raising=False)
+    monkeypatch.setattr(settings, 'SUBSCRIPTION_PROXY_HOSTS', 'sub.example', raising=False)
+    monkeypatch.setattr(settings, 'SUBSCRIPTION_PROXY_UPSTREAM', 'https://upstream.example', raising=False)
+    monkeypatch.setattr(settings, 'XDRIVE_ENABLED', True, raising=False)
+    monkeypatch.setattr(settings, 'PASARGUARD_API_URL', url, raising=False)
+    monkeypatch.setattr(settings, 'PASARGUARD_API_KEY', key, raising=False)
+    monkeypatch.setattr(settings, 'PASARGUARD_API_TIMEOUT_SECONDS', 15, raising=False)
+    monkeypatch.setattr(settings, 'XDRIVE_CONFIG_CACHE_SECONDS', 60, raising=False)
+
+    bot = AsyncMock()
+    dispatcher = SimpleNamespace(feed_update=AsyncMock())
+    payment_service = AsyncMock(spec=PaymentService)
+    create_unified_app(
+        bot,
+        dispatcher,  # type: ignore[arg-type]
+        payment_service,
+        enable_telegram_webhook=False,
+    )
+    return created_apis, created_providers
+
+
+def test_xdrive_merge_provider_uses_short_timeout_and_single_get_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_apis, created_providers = _build_unified_app_with_xdrive(
+        monkeypatch,
+        url='https://panel.example',
+        key='secret',
+    )
+
+    assert created_apis == [
+        {
+            'base_url': 'https://panel.example',
+            'api_key': 'secret',
+            'timeout': 1.5,
+            'get_attempts': 1,
+        }
+    ]
+    assert len(created_providers) == 1
+    assert created_providers[0][1] == 60
+
+
+def test_xdrive_merge_provider_is_not_built_without_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created_apis, created_providers = _build_unified_app_with_xdrive(
+        monkeypatch,
+        url='https://panel.example',
+        key=None,
+    )
+
+    assert created_apis == []
+    assert created_providers == []
+
+
 @pytest.mark.anyio
 async def test_unified_app_docs_enabled_with_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     app = _build_unified_app(monkeypatch, docs_enabled=True)

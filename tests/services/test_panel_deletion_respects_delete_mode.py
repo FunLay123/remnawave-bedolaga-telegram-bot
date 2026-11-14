@@ -26,6 +26,9 @@ DELIBERATE = {
     # Полное удаление пользователя: режим спрашивается, но ещё есть
     # force_panel_delete — явный выбор вызывающего.
     'services/user_service.py': 'режим спрашивается, force_panel_delete перекрывает',
+    # Проектор пишет во ВТОРУЮ панель (PasarGuard/xdrive). Режим удаления
+    # Remnawave к ней не применяется: у PasarGuard своя очередь intents.
+    'services/pasarguard_sync_service.py': 'PasarGuard — вторая панель; режим удаления Remnawave к ней не применяется',
 }
 
 MODE_GETTER = 'get_remnawave_user_delete_mode'
@@ -52,7 +55,8 @@ def _panel_deleting_files() -> list[tuple[str, str]]:
             continue
         tree = ast.parse(source)
         if _deletes_panel_user(tree):
-            found.append((str(path.relative_to(APP)), source))
+            # as_posix: ключи DELIBERATE записаны через «/» и на Windows тоже.
+            found.append((path.relative_to(APP).as_posix(), source))
     return found
 
 

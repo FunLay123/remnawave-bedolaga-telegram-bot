@@ -312,6 +312,44 @@ async def test_5xx_and_timeout_raise_transient():
 
 
 @pytest.mark.asyncio
+async def test_get_retries_are_capped_by_get_attempts():
+    """Прокси подписки задаёт одну попытку: зависшая панель не должна
+    задерживать выдачу на три таймаута с backoff."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(503)
+
+    api = PasarguardAPI(PANEL_URL, API_KEY, transport=httpx.MockTransport(handler), get_attempts=1)
+    try:
+        with pytest.raises(PasarguardTransientError):
+            await api.get_user_by_id(42)
+    finally:
+        await api.close()
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_retries_three_times_by_default():
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(503)
+
+    api = _api(handler)
+    try:
+        with pytest.raises(PasarguardTransientError):
+            await api.get_user_by_id(42)
+    finally:
+        await api.close()
+
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
 async def test_writes_are_not_retried():
     calls: list[httpx.Request] = []
 

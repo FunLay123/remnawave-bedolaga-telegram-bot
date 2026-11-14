@@ -412,6 +412,12 @@ async def apply_countries_changes(callback: types.CallbackQuery, db_user: User, 
         subscription.updated_at = datetime.now(UTC)
         await db.commit()
 
+        # Набор premium-сквадов мог измениться: если premium-сквад убран,
+        # проектор обязан выключить xdrive, а не жить по устаревшей строке.
+        from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+        nudge_pasarguard_projector(subscription.id)
+
         subscription_service = SubscriptionService()
         try:
             await subscription_service.update_remnawave_user(db, subscription, sync_squads=True)
@@ -934,6 +940,12 @@ async def confirm_add_countries_to_subscription(
         subscription.connected_squads = selected_countries
         subscription.updated_at = datetime.now(UTC)
         await db.commit()
+
+        # Набор premium-сквадов мог измениться: если premium-сквад убран,
+        # проектор обязан выключить xdrive, а не жить по устаревшей строке.
+        from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+        nudge_pasarguard_projector(subscription.id)
 
         subscription_service = SubscriptionService()
         await subscription_service.update_remnawave_user(db, subscription, sync_squads=True)

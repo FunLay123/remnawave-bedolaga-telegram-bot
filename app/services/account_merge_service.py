@@ -714,6 +714,13 @@ async def _handle_subscription_merge(
             secondary_id=secondary.id,
         )
 
+    # Обе ветки могли удалить подписку и записать PasarGuard-интенты. Транзакцией
+    # владеет вызывающий; nudge — подсказка о задержке, а плановый проход и
+    # уборка сирот остаются страховкой, если он отработает до коммита.
+    from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+    nudge_pasarguard_projector(None)
+
 
 async def execute_merge(
     db: AsyncSession,

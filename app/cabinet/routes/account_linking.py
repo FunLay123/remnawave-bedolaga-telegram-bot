@@ -966,6 +966,11 @@ async def execute_merge_endpoint(
             deferred_remnawave_deletions=deferred_deletions,
         )
         await db.commit()
+        # Мерж мог удалить подписку и записать PasarGuard-интенты — проектор
+        # будим после коммита, иначе старый пользователь панели живёт до прохода.
+        from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+        nudge_pasarguard_projector(None)
     except GraceAccessDeletionBlocked as exc:
         await db.rollback()
         await restore_merge_token(merge_token, consumed)

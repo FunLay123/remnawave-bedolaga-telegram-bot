@@ -170,6 +170,9 @@ class PremiumTrafficService:
         self._nodes_cache: dict[str, tuple[float, list[str]]] = {}
         # Живёт между проходами, а не внутри одного: см. PANEL_USER_CACHE_TTL_SECONDS.
         self._panel_users: dict[int, tuple[float, Any]] = {}
+        # Покупка/триал будят воркер, чтобы строка premium-состояния появилась
+        # сразу: без неё проектор не имеет права включать xdrive.
+        self._nudge_event = asyncio.Event()
 
     def set_bot(self, bot: Bot) -> None:
         self._bot = bot
@@ -189,6 +192,10 @@ class PremiumTrafficService:
 
     # ---------------------------------------------------------------- цикл
 
+    def nudge(self, subscription_id: int | None = None) -> None:
+        """Разбудить цикл; проход общий, поэтому id — только подсказка."""
+        self._nudge_event.set()
+
     async def start_monitoring(self) -> None:
         self._running = True
         interval = self.get_check_interval_seconds()
@@ -201,10 +208,18 @@ class PremiumTrafficService:
                     logger.info('📊 Проход по премиум-трафику', **stats)
             except Exception as error:
                 logger.error('Ошибка в цикле учёта премиум-трафика', error=error, exc_info=True)
-            await asyncio.sleep(interval)
+            try:
+                # nudge сокращает задержку после покупки/триала; плановый
+                # интервал остаётся таймаутом ожидания.
+                await asyncio.wait_for(self._nudge_event.wait(), timeout=interval)
+                self._nudge_event.clear()
+            except TimeoutError:
+                pass
 
     def stop(self) -> None:
         self._running = False
+        # Разбудить цикл, если он ждёт nudge/интервал.
+        self._nudge_event.set()
 
     # ------------------------------------------------------------- главное
 
@@ -351,6 +366,9 @@ class PremiumTrafficService:
 
             await db.commit()
 
+        # Проход мог создать строку premium-состояния. Проектор включать xdrive
+        # по ней должен сразу, не дожидаясь своего планового прохода.
+        self._nudge_projector_if_xdrive()
         return stats
 
     # ------------------------------------------------------------- сборка
@@ -811,6 +829,17 @@ class PremiumTrafficService:
                     totals[user_id] += item['total_bytes']
         return dict(totals)
 
+    def _nudge_projector_if_xdrive(self) -> None:
+        """Разбудить проектор: воркер только что обновил строку состояния."""
+        if not settings.is_xdrive_enabled() or not settings.is_pasarguard_configured():
+            return
+        try:
+            from app.services.pasarguard_sync_service import pasarguard_sync_service
+
+            pasarguard_sync_service.nudge(None)
+        except Exception:
+            logger.warning('Не удалось разбудить проектор PasarGuard', exc_info=True)
+
     async def _fetch_pasarguard_usage(self, api: PasarguardAPI) -> dict[int, tuple[int, int]]:
         """Оба счётчика PasarGuard по бот-пользователям: {subscription_id: (...)}.
 
@@ -870,6 +899,12 @@ class PremiumTrafficService:
         if usage is None:
             return 0
         if len(get_premium_squads_for_tariff(getattr(subscription, 'tariff', None))) != 1:
+            return 0
+        # Сквад убран из набора подписки: воркер его больше не замеряет и в
+        # панель не выкладывает. Дельта по устаревшей строке не должна
+        # попадать в пул (и не должна сдвигать baseline — вернут сквад,
+        # расход снова начнёт считаться).
+        if state.squad_uuid not in set(getattr(subscription, 'connected_squads', None) or ()):
             return 0
 
         lifetime_now = int(usage[1])

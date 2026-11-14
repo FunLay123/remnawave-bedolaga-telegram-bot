@@ -30,6 +30,7 @@ from tests.fixtures.sqlite_memory import memory_session
 NOW = datetime(2026, 11, 14, 12, 0, tzinfo=UTC)
 SHORT_UUID = 'Ab3dEf9hJk'
 SQUAD = 'e4f819ca-2cfd-4425-9354-16a262b180c1'
+OTHER_SQUAD = '82a12389-14d6-40c6-b320-4674f6bbb344'
 
 
 class FakePasarguardApi:
@@ -116,6 +117,11 @@ def _patch_grace(monkeypatch, subscription_ids: set[int]) -> None:
     monkeypatch.setattr(xdrive_service, 'get_open_grace_subscription_ids', get_open_grace_subscription_ids)
 
 
+def _patch_credentials(monkeypatch) -> None:
+    monkeypatch.setattr(xdrive_service.settings, 'PASARGUARD_API_URL', 'https://panel.example')
+    monkeypatch.setattr(xdrive_service.settings, 'PASARGUARD_API_KEY', 'test-key')
+
+
 async def _seed(db, *, case: str = 'eligible') -> None:
     db.add(User(id=1, telegram_id=1, status=UserStatus.ACTIVE.value))
     db.add(Tariff(id=1, name='T', server_traffic_limits={SQUAD: {'traffic_limit_gb': 10}}))
@@ -129,6 +135,7 @@ async def _seed(db, *, case: str = 'eligible') -> None:
             remnawave_short_id='short',
             status=SubscriptionStatus.ACTIVE.value,
             end_date=NOW + timedelta(days=30),
+            connected_squads=[OTHER_SQUAD] if case == 'disconnected' else [SQUAD],
             pasarguard_user_id=42,
             pasarguard_username='bx1',
             pasarguard_created_at=NOW,
@@ -153,12 +160,13 @@ TABLES = (
 )
 
 
-@pytest.mark.parametrize('case', ['grace', 'limited', 'closed', 'missing_state'])
+@pytest.mark.parametrize('case', ['grace', 'limited', 'closed', 'missing_state', 'disconnected'])
 async def test_lookup_skips_grace_limited_closed_and_missing_state(monkeypatch, case):
     async with memory_session(monkeypatch, TABLES) as db:
         await _seed(db, case=case)
         _patch_session(monkeypatch, db)
         _patch_grace(monkeypatch, {1} if case == 'grace' else set())
+        _patch_credentials(monkeypatch)
         monkeypatch.setattr(xdrive_service.settings, 'XDRIVE_ENABLED', True)
 
         assert await lookup_xdrive_target([SHORT_UUID]) is None
@@ -169,6 +177,7 @@ async def test_lookup_returns_target_for_eligible_subscription(monkeypatch):
         await _seed(db)
         _patch_session(monkeypatch, db)
         _patch_grace(monkeypatch, set())
+        _patch_credentials(monkeypatch)
         monkeypatch.setattr(xdrive_service.settings, 'XDRIVE_ENABLED', True)
 
         target = await lookup_xdrive_target([SHORT_UUID])
@@ -184,6 +193,7 @@ async def test_lookup_cache_version_changes_after_revoke(monkeypatch):
         await _seed(db)
         _patch_session(monkeypatch, db)
         _patch_grace(monkeypatch, set())
+        _patch_credentials(monkeypatch)
         monkeypatch.setattr(xdrive_service.settings, 'XDRIVE_ENABLED', True)
 
         before = await lookup_xdrive_target([SHORT_UUID])
@@ -206,3 +216,22 @@ async def test_lookup_returns_none_when_feature_is_disabled(monkeypatch):
     monkeypatch.setattr(xdrive_service, 'AsyncSessionLocal', explode)
 
     assert await lookup_xdrive_target([SHORT_UUID]) is None
+
+
+@pytest.mark.parametrize('url,key', [(None, 'test-key'), ('https://panel.example', None), ('', '')])
+async def test_lookup_returns_none_without_pasarguard_credentials(monkeypatch, url, key):
+    """Флаг включён, но URL/ключ не заданы — в панель не ходим и БД не трогаем."""
+    touched: list[bool] = []
+
+    def explode():
+        touched.append(True)
+        raise RuntimeError('DB must not be touched without panel credentials')
+
+    monkeypatch.setattr(xdrive_service.settings, 'XDRIVE_ENABLED', True)
+    monkeypatch.setattr(xdrive_service.settings, 'PASARGUARD_API_URL', url)
+    monkeypatch.setattr(xdrive_service.settings, 'PASARGUARD_API_KEY', key)
+    monkeypatch.setattr(xdrive_service, 'AsyncSessionLocal', explode)
+
+    assert await lookup_xdrive_target([SHORT_UUID]) is None
+    # Широкий except вокруг lookup не должен маскировать открытие сессии.
+    assert touched == []

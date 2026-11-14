@@ -233,6 +233,12 @@ async def update_countries(
     subscription.updated_at = datetime.now(UTC)
     await db.commit()
 
+    # Смена набора сквадов меняет право на xdrive: убранный premium-сквад
+    # должен выключить PasarGuard-пользователя сразу.
+    from app.services.pasarguard_sync_service import nudge_pasarguard_projector
+
+    nudge_pasarguard_projector(subscription.id)
+
     # Sync with RemnaWave
     try:
         from app.config import settings
