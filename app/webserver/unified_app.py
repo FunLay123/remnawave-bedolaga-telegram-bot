@@ -328,11 +328,32 @@ def create_unified_app(
         from app.webserver.subscription_proxy import SubscriptionProxyMiddleware, create_proxy_client
 
         proxy_client = create_proxy_client()
+        xdrive_kwargs: dict[str, Any] = {}
+        if settings.is_xdrive_enabled():
+            from app.external.pasarguard_api import PasarguardAPI
+            from app.services.xdrive_service import PasarguardConfigProvider, lookup_xdrive_target
+
+            xdrive_api = PasarguardAPI(
+                base_url=settings.PASARGUARD_API_URL or '',
+                api_key=settings.PASARGUARD_API_KEY or '',
+                # GET повторяется до трёх раз: зависшая панель не должна
+                # задерживать выдачу подписки дольше нескольких секунд.
+                timeout=min(float(settings.PASARGUARD_API_TIMEOUT_SECONDS), 5.0),
+            )
+            xdrive_config = PasarguardConfigProvider(
+                xdrive_api,
+                cache_seconds=int(settings.XDRIVE_CONFIG_CACHE_SECONDS),
+            )
+            shutdown_handlers.append(xdrive_config.aclose)
+            xdrive_kwargs = {'xdrive_lookup': lookup_xdrive_target, 'xdrive_config': xdrive_config}
+            logger.info('Слияние xdrive-конфигов PasarGuard включено')
+
         app.add_middleware(
             SubscriptionProxyMiddleware,
             hosts=settings.get_subscription_proxy_hosts(),
             upstream=settings.SUBSCRIPTION_PROXY_UPSTREAM.strip(),
             client=proxy_client,
+            **xdrive_kwargs,
         )
         shutdown_handlers.append(proxy_client.aclose)
         logger.info('Прокси страницы подписок включён', hosts=sorted(settings.get_subscription_proxy_hosts()))

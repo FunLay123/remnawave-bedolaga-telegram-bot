@@ -21,6 +21,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import re
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -38,6 +39,11 @@ from app.database.crud.premium_traffic import get_states_for_subscription
 from app.database.crud.tariff import get_tariff_by_id
 from app.database.database import AsyncSessionLocal
 from app.database.models import Subscription
+from app.services.xdrive_service import (
+    PasarguardConfigProvider,
+    XdriveTarget,
+    lookup_xdrive_target,
+)
 from app.utils.premium_traffic import get_premium_squads_for_tariff
 
 
@@ -67,6 +73,7 @@ _SHORT_UUID_RE = re.compile(r'^[A-Za-z0-9_-]{6,64}$')
 
 UsageLookup = Callable[[list[str]], Awaitable[tuple[int, int] | None]]
 AdblockLookup = Callable[[list[str]], Awaitable[bool]]
+XdriveLookup = Callable[[list[str]], Awaitable[XdriveTarget | None]]
 
 
 def short_uuid_candidates(path: str) -> list[str]:
@@ -442,6 +449,70 @@ def patch_adblock_dns(
     return json.dumps(patched, ensure_ascii=False, separators=(',', ':')).encode()
 
 
+def _decode_json_body(body: bytes) -> Any:
+    """Разобрать JSON, распаковав gzip по магическому заголовку."""
+    try:
+        return json.loads(body)
+    except (TypeError, ValueError):
+        pass
+    if not body.startswith(b'\x1f\x8b'):
+        return None
+    try:
+        return json.loads(gzip.decompress(body))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _config_entries(parsed: Any) -> list[Any] | None:
+    if isinstance(parsed, dict):
+        return [parsed]
+    if isinstance(parsed, list):
+        return parsed
+    return None
+
+
+def _is_xray_entry(entry: Any) -> bool:
+    """Структурная подпись Xray-конфига, а не sing-box/Clash."""
+    return (
+        isinstance(entry, dict)
+        and isinstance(entry.get('outbounds'), list)
+        and any(isinstance(outbound, dict) and 'protocol' in outbound for outbound in entry['outbounds'])
+    )
+
+
+def _is_xray_subscription_body(body: bytes) -> bool:
+    entries = _config_entries(_decode_json_body(body))
+    return entries is not None and any(_is_xray_entry(entry) for entry in entries)
+
+
+def merge_xdrive_configs(body: bytes, configs: list[Any]) -> bytes | None:
+    """Дописать конфиги PasarGuard к Xray JSON страницы подписок.
+
+    ``None`` — тело не в формате Xray (base64, HTML, Clash, sing-box) либо
+    добавлять нечего. На выходе всегда массив: одиночный объект страницы
+    подписок становится первым элементом. Слияние — только добавка, поэтому
+    любой неразобранный вход возвращается вызывающему без изменений.
+    """
+    additions = [config for config in configs if isinstance(config, dict)]
+    if not additions:
+        return None
+
+    entries = _config_entries(_decode_json_body(body))
+    if entries is None or not any(_is_xray_entry(entry) for entry in entries):
+        return None
+
+    entries.extend(additions)
+    return json.dumps(entries, ensure_ascii=False, separators=(',', ':')).encode()
+
+
+def _parse_pasarguard_config(payload: bytes | None) -> list[Any]:
+    """Сырой ответ панели — в список конфигов; мусор не роняет подписку."""
+    if not payload:
+        return []
+    parsed = _decode_json_body(payload)
+    return _config_entries(parsed) or []
+
+
 def create_proxy_client() -> httpx.AsyncClient:
     # Редиректы страницы подписок отдаются клиенту, а не проходятся здесь.
     return httpx.AsyncClient(timeout=TIMEOUT_SECONDS, follow_redirects=False)
@@ -459,6 +530,8 @@ class SubscriptionProxyMiddleware:
         client: httpx.AsyncClient,
         lookup: UsageLookup = lookup_premium_usage,
         adblock_lookup: AdblockLookup = lookup_adblock_enabled,
+        xdrive_lookup: XdriveLookup = lookup_xdrive_target,
+        xdrive_config: PasarguardConfigProvider | None = None,
     ) -> None:
         self.app = app
         self.hosts = {host.lower() for host in hosts}
@@ -466,6 +539,8 @@ class SubscriptionProxyMiddleware:
         self.client = client
         self.lookup = lookup
         self.adblock_lookup = adblock_lookup
+        self.xdrive_lookup = xdrive_lookup
+        self.xdrive_config = xdrive_config
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope['type'] != 'http' or not self._is_subscription_host(scope):
@@ -489,14 +564,21 @@ class SubscriptionProxyMiddleware:
             url += '?' + query.decode('latin-1')
 
         adblock = await self._adblock_enabled(request)
+        xdrive_target = await self._xdrive_target(request)
+        force_identity = adblock or xdrive_target is not None
         headers = [
             (name, value)
             for name, value in request.headers.raw
-            if name.decode('latin-1').lower() not in HOP_BY_HOP_HEADERS and name.lower() != b'content-length'
+            if name.decode('latin-1').lower() not in HOP_BY_HOP_HEADERS
+            and name.lower() != b'content-length'
+            and not (force_identity and name.decode('latin-1').lower() == 'accept-encoding')
+            and not (
+                xdrive_target is not None
+                and name.decode('latin-1').lower() in ('if-none-match', 'if-modified-since')
+            )
         ]
-        if adblock:
+        if force_identity:
             # Без распаковки нельзя разобрать JSON; upstream обычно уважает identity.
-            headers = [(name, value) for name, value in headers if name.decode('latin-1').lower() != 'accept-encoding']
             headers.append((b'accept-encoding', b'identity'))
         upstream_request = self.client.build_request(request.method, url, headers=headers, content=await request.body())
         try:
@@ -517,12 +599,21 @@ class SubscriptionProxyMiddleware:
             content_encoding = upstream_response.headers.get('content-encoding', '').lower()
             body, drop_content_encoding = self._with_adblock_dns(body, content_encoding)
 
+        merged = False
+        if xdrive_target is not None:
+            body, drop_content_encoding, merged = await self._merge_xdrive(
+                xdrive_target,
+                body,
+                drop_content_encoding,
+            )
+
         response_headers = [
             (name, value)
             for name, value in upstream_response.headers.raw
             if name.decode('latin-1').lower() not in HOP_BY_HOP_HEADERS
             and (request.method == 'HEAD' or name.lower() != b'content-length')
             and not (drop_content_encoding and name.lower() == b'content-encoding')
+            and not (merged and name.lower() in (b'etag', b'last-modified'))
         ]
         if request.method != 'HEAD':
             response_headers.append((b'content-length', str(len(body)).encode()))
@@ -544,6 +635,53 @@ class SubscriptionProxyMiddleware:
         except Exception as error:
             logger.warning('Не удалось проверить adblock-DNS для подписки', error=str(error))
             return False
+
+    async def _xdrive_target(self, request: Request) -> XdriveTarget | None:
+        """Цель для слияния; None — флаг off, не GET, чужой UA или сбой поиска."""
+        if self.xdrive_config is None or request.method != 'GET' or not settings.is_xdrive_enabled():
+            return None
+        if not self._xdrive_ua_allowed(request):
+            return None
+        try:
+            return await self.xdrive_lookup(short_uuid_candidates(request.url.path))
+        except Exception as error:
+            logger.warning('Не удалось проверить xdrive для подписки', error=str(error))
+            return None
+
+    def _xdrive_ua_allowed(self, request: Request) -> bool:
+        pattern = (settings.XDRIVE_CLIENT_UA_REGEX or '').strip()
+        if not pattern:
+            return True
+        try:
+            return re.search(pattern, request.headers.get('user-agent', '')) is not None
+        except re.error:
+            logger.warning('XDRIVE_CLIENT_UA_REGEX не является корректным регэкспом')
+            return False
+
+    async def _merge_xdrive(
+        self,
+        target: XdriveTarget,
+        body: bytes,
+        drop_content_encoding: bool,
+    ) -> tuple[bytes, bool, bool]:
+        """Дописать xdrive после adblock; при любом сбое вернуть тело как есть."""
+        if self.xdrive_config is None or not _is_xray_subscription_body(body):
+            return body, drop_content_encoding, False
+        try:
+            payload = await self.xdrive_config.get(target)
+        except Exception as error:
+            logger.warning(
+                'Не удалось получить xdrive-конфиг PasarGuard',
+                subscription_id=target.subscription_id,
+                error=str(error)[:200],
+            )
+            return body, drop_content_encoding, False
+
+        merged = merge_xdrive_configs(body, _parse_pasarguard_config(payload))
+        if merged is None:
+            return body, drop_content_encoding, False
+        # На выходе несжатый JSON — Content-Encoding upstream больше не верен.
+        return merged, True, True
 
     def _with_adblock_dns(self, body: bytes, content_encoding: str) -> tuple[bytes, bool]:
         """Пропатчить Xray JSON и сказать, надо ли снять Content-Encoding.
