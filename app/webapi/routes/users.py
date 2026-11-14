@@ -602,6 +602,9 @@ async def _delete_subscription_if_exists(db: AsyncSession, subscription_id: int)
     subscription = result.scalar_one_or_none()
     if not subscription:
         return
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+    await enqueue_pasarguard_delete(db, subscription)
     await db.delete(subscription)
     await db.commit()
 

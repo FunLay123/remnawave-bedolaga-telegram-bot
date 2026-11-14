@@ -3530,6 +3530,9 @@ async def confirm_subscription_deletion(callback: types.CallbackQuery, db_user: 
 
     await db.execute(sql_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == subscription.id))
 
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+    await enqueue_pasarguard_delete(db, subscription)
     await db.delete(subscription)
     await db.commit()
 

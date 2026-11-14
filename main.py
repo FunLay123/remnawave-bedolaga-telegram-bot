@@ -29,6 +29,7 @@ from app.services.log_rotation_service import log_rotation_service
 from app.services.maintenance_service import maintenance_service
 from app.services.monitoring_service import monitoring_service
 from app.services.nalogo_queue_service import nalogo_queue_service
+from app.services.pasarguard_sync_service import pasarguard_sync_service
 from app.services.payment_service import PaymentService
 from app.services.payment_verification_service import (
     PENDING_MAX_AGE,
@@ -200,6 +201,7 @@ async def main():
     traffic_monitoring_task = None
     daily_subscription_task = None
     premium_traffic_task = None
+    pasarguard_sync_task = None
     polling_task = None
     web_api_server = None
     telegram_webhook_enabled = False
@@ -770,6 +772,20 @@ async def main():
                 stage.skip('Учёт премиум-трафика отключен настройками')
 
         async with timeline.stage(
+            'Проектор PasarGuard',
+            '📡',
+            success_message='Проектор PasarGuard запущен',
+        ) as stage:
+            # Запускаем и при XDRIVE_ENABLED=false: первый проход обязан
+            # погасить известных пользователей панели (drain), а не оставить
+            # рабочие креды после выключения фичи.
+            if settings.is_pasarguard_configured():
+                pasarguard_sync_task = asyncio.create_task(pasarguard_sync_service.start_monitoring())
+                stage.log(f'Интервал синхронизации: {settings.get_xdrive_sync_interval_seconds()} с')
+            else:
+                stage.skip('PasarGuard не настроен')
+
+        async with timeline.stage(
             'Суточные подписки',
             '💳',
             success_message='Сервис суточных подписок запущен',
@@ -1043,6 +1059,15 @@ async def main():
             premium_traffic_task.cancel()
             try:
                 await premium_traffic_task
+            except asyncio.CancelledError:
+                pass
+
+        if pasarguard_sync_task and not pasarguard_sync_task.done():
+            logger.info('ℹ️ Остановка проектора PasarGuard...')
+            pasarguard_sync_service.stop()
+            pasarguard_sync_task.cancel()
+            try:
+                await pasarguard_sync_task
             except asyncio.CancelledError:
                 pass
 

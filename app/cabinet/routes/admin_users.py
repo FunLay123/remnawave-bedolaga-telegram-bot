@@ -3200,6 +3200,14 @@ async def reset_user_subscription(
 
     for sub in subs:
         await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub.id))
+
+    # PasarGuard: за строками стоят пользователи панели, и после DELETE их
+    # идентичность уже не прочитать — очередь удалений пишется заранее.
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+    for sub in subs:
+        await enqueue_pasarguard_delete(db, sub)
+
     await db.execute(delete(Subscription).where(Subscription.user_id == user_id))
     subscription_deleted = True
 

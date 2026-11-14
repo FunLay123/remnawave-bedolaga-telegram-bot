@@ -614,6 +614,9 @@ async def _do_delete_subscription(
             logger.warning('Failed to disable user in RemnaWave during subscription delete', error=e)
 
     # Delete related records then subscription
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+    await enqueue_pasarguard_delete(db, sub)
     await db.execute(sa_delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub.id))
     await db.execute(sa_delete(TrafficPurchase).where(TrafficPurchase.subscription_id == sub.id))
     await db.execute(sa_delete(Subscription).where(Subscription.id == sub.id))

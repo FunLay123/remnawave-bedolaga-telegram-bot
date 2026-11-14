@@ -297,6 +297,12 @@ class SubscriptionService:
 
                 await db.commit()
 
+                # Панель xdrive живёт отдельно: будим проектор, чтобы личность
+                # создалась/включилась без ожидания планового прохода.
+                from app.services.pasarguard_sync_service import pasarguard_sync_service
+
+                pasarguard_sync_service.nudge(subscription.id)
+
                 logger.info('✅ Создан/обновлен RemnaWave пользователь для подписки', subscription_id=subscription.id)
                 logger.info('🔗 Ссылка на подписку', subscription_url=updated_user.subscription_url)
                 strategy_name = settings.DEFAULT_TRAFFIC_RESET_STRATEGY
@@ -933,6 +939,13 @@ class SubscriptionService:
                 subscription.subscription_url = updated_user.subscription_url
                 subscription.subscription_crypto_link = updated_user.happ_crypto_link
                 await db.commit()
+
+                # Ремнавейв-revoke уже закоммичен, старый PasarGuard-UUID ещё
+                # жив. Синхронный revoke не бросает: при недоступной панели он
+                # оставит durable-интент, и проектор повторит.
+                from app.services.pasarguard_sync_service import revoke_pasarguard_subscription
+
+                await revoke_pasarguard_subscription(subscription, db)
 
                 logger.info('✅ Обновлена ссылка подписки', _format_user_log=self._format_user_log(user))
                 return updated_user.subscription_url

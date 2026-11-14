@@ -323,18 +323,20 @@ async def _revoke_identity(db: AsyncSession, api: PasarguardAPI, subscription: S
 async def revoke_pasarguard_subscription(subscription: Subscription, db: AsyncSession) -> bool:
     """Синхронный revoke на пути отзыва подписки.
 
-    Панель может быть недоступна: тогда фиксируем pending и возвращаем False,
-    но никогда не бросаем — Remnawave-revoke уже закоммичен вызывающим.
+    Панель может быть недоступна или настроена криво: тогда фиксируем pending
+    и возвращаем False, но никогда не бросаем — Remnawave-revoke уже
+    закоммичен вызывающим, и потерять из-за этого новую ссылку нельзя.
     """
-    if subscription.pasarguard_user_id is None:
-        return False
-    api = _make_api()
     now = datetime.now(UTC)
-    if api is None:
-        subscription.pasarguard_revoke_pending_at = now
-        await db.flush()
-        return False
+    api: PasarguardAPI | None = None
     try:
+        if getattr(subscription, 'pasarguard_user_id', None) is None:
+            return False
+        api = _make_api()
+        if api is None:
+            subscription.pasarguard_revoke_pending_at = now
+            await db.flush()
+            return False
         return await _revoke_identity(db, api, subscription, now)
     except Exception as error:
         logger.warning(
@@ -350,21 +352,24 @@ async def revoke_pasarguard_subscription(subscription: Subscription, db: AsyncSe
             logger.warning('Не удалось сохранить интент revoke PasarGuard', subscription_id=subscription.id)
         return False
     finally:
-        try:
-            await api.close()
-        except Exception:
-            logger.warning('Не удалось закрыть клиент PasarGuard', exc_info=True)
+        if api is not None:
+            try:
+                await api.close()
+            except Exception:
+                logger.warning('Не удалось закрыть клиент PasarGuard', exc_info=True)
 
 
 async def enqueue_pasarguard_delete(db: AsyncSession, subscription: Subscription) -> None:
     """Записать намерение удалить пользователя панели до hard-delete подписки."""
-    if subscription.pasarguard_user_id is None and not subscription.pasarguard_username:
+    pasarguard_user_id = getattr(subscription, 'pasarguard_user_id', None)
+    pasarguard_username = getattr(subscription, 'pasarguard_username', None)
+    if pasarguard_user_id is None and not pasarguard_username:
         return
     await add_delete_intent(
         db,
         subscription_id=subscription.id,
-        user_id=subscription.pasarguard_user_id,
-        username=subscription.pasarguard_username,
+        user_id=pasarguard_user_id,
+        username=pasarguard_username,
     )
 
 

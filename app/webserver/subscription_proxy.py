@@ -705,7 +705,10 @@ class SubscriptionProxyMiddleware:
         elif content_encoding == 'gzip':
             try:
                 decoded = gzip.decompress(body)
-            except OSError as error:
+            except Exception as error:
+                # Обрезанный поток даёт EOFError, испорченный deflate —
+                # zlib.error; оба обязаны вернуть исходное тело, как в
+                # `_decode_json_body`, а не уронить выдачу подписки.
                 logger.warning('Не удалось распаковать подписку для adblock-DNS', error=str(error))
                 return body, False
             drop_content_encoding = True

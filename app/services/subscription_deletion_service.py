@@ -97,6 +97,7 @@ async def delete_subscription_record(
     await ensure_no_open_grace_for_subscriptions(db, (subscription.id,))
 
     from app.services.cashera_recurring_cancel import cancel_cashera_recurring_for_subscription_safe
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
     from app.services.payment.lava import cancel_lava_recurring_for_subscription_safe
     from app.services.payment.platega import cancel_platega_recurring_for_subscription_safe
 
@@ -153,6 +154,9 @@ async def delete_subscription_record(
             update(User).where(User.id == user_id).values(has_had_paid_subscription=True, updated_at=datetime.now(UTC))
         )
 
+    # Интент пишется до hard-delete: строка подписки исчезнет, а проектор
+    # должен знать, какого пользователя панели за ней удалять.
+    await enqueue_pasarguard_delete(db, subscription)
     await db.delete(subscription)
     await db.commit()
 

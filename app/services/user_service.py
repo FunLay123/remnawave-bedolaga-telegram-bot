@@ -1466,6 +1466,14 @@ class UserService:
                                 delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub.id)
                             )
 
+                        # PasarGuard: строки исчезнут ниже, поэтому идентичность
+                        # снимаем заранее и оставляем durable-интент на
+                        # удаление пользователя панели.
+                        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+                        for sub in subs:
+                            await enqueue_pasarguard_delete(db, sub)
+
                         # Delete all subscriptions for this user
                         # Lock order: subscriptions -> server_squads (matches webhook order)
                         await db.execute(delete(Subscription).where(Subscription.user_id == user_id))

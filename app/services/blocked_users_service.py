@@ -358,8 +358,15 @@ class BlockedUsersService:
             await db.execute(delete(Transaction).where(Transaction.user_id == user.id))
 
             # 3. Подписки — cleanup ALL subscriptions' servers, then delete all subscriptions
-            for sub in getattr(user, 'subscriptions', None) or []:
+            from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+            subscriptions = getattr(user, 'subscriptions', None) or []
+            for sub in subscriptions:
                 await db.execute(delete(SubscriptionServer).where(SubscriptionServer.subscription_id == sub.id))
+                # PasarGuard: строки исчезнут ниже, поэтому идентичность снимаем
+                # заранее и оставляем durable-интент на удаление пользователя панели.
+                await enqueue_pasarguard_delete(db, sub)
+
             await db.execute(delete(Subscription).where(Subscription.user_id == user.id))
             await db.execute(delete(SubscriptionConversion).where(SubscriptionConversion.user_id == user.id))
             await db.execute(delete(SubscriptionEvent).where(SubscriptionEvent.user_id == user.id))

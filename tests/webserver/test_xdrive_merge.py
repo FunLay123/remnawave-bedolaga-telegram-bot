@@ -84,6 +84,17 @@ def test_empty_pasarguard_config_returns_none():
     assert merge_xdrive_configs(_body(_xray_entry('remnawave')), []) is None
 
 
+def test_adblock_dns_returns_original_body_for_truncated_gzip():
+    """Обрезанный gzip — EOFError, а не OSError: adblock не должен отдавать 500.
+
+    Тело уже пришло от Remnawave, и единственно верный ответ на неразборчивый
+    поток — исходные байты без патча (как в `_decode_json_body`).
+    """
+    body = gzip.compress(_body(_xray_entry('remnawave')))[:12]
+
+    assert SubscriptionProxyMiddleware._with_adblock_dns(None, body, 'gzip') == (body, False)
+
+
 # ---- middleware ------------------------------------------------------------
 
 

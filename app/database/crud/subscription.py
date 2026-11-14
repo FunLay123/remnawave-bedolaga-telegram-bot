@@ -2331,6 +2331,14 @@ async def wipe_trial_subscriptions(db: AsyncSession, subscriptions) -> int:
         logger.error('Ошибка удаления серверных связей триалов', subscription_ids=subscription_ids, error=error)
         raise
 
+    # PasarGuard: за строками стоят пользователи панели, и после DELETE их
+    # идентичность уже не прочитать — очередь удалений пишется заранее.
+    # `to_reset` — ровно те строки, которые удаляются ниже.
+    from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+    for subscription in to_reset:
+        await enqueue_pasarguard_delete(db, subscription)
+
     await db.execute(delete(Subscription).where(Subscription.id.in_(subscription_ids)))
 
     # single-tariff: панель-юзер на уровне пользователя — чистим устаревшую панельную

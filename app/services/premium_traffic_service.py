@@ -1127,6 +1127,11 @@ class PremiumTrafficService:
             return False
 
         await db.commit()
+        # Сквад снят — xdrive обязан погаснуть вместе с ним; будим проектор,
+        # чтобы это случилось до следующего планового прохода.
+        from app.services.pasarguard_sync_service import pasarguard_sync_service
+
+        pasarguard_sync_service.nudge(target.subscription.id)
         logger.info(
             'Премиум-сквад снят за перерасход',
             subscription_id=target.subscription.id,
@@ -1174,6 +1179,10 @@ class PremiumTrafficService:
             return False
 
         await db.commit()
+        # Доступ вернулся — проектор должен включить xdrive с тем же UUID.
+        from app.services.pasarguard_sync_service import pasarguard_sync_service
+
+        pasarguard_sync_service.nudge(target.subscription.id)
         logger.info(
             'Премиум-сквад возвращён',
             subscription_id=target.subscription.id,

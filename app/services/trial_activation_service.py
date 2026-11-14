@@ -210,6 +210,9 @@ async def rollback_trial_subscription_activation(
         )
 
     try:
+        from app.services.pasarguard_sync_service import enqueue_pasarguard_delete
+
+        await enqueue_pasarguard_delete(db, subscription)
         await db.delete(subscription)
         await db.commit()
     except Exception as error:  # pragma: no cover - defensive logging
