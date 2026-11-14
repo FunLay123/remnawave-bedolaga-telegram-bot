@@ -1,6 +1,7 @@
 import html
 import os
 import re
+import socket
 from collections import defaultdict
 from datetime import time
 from pathlib import Path
@@ -374,6 +375,26 @@ class Settings(BaseSettings):
     # поля. Домены — через запятую, адрес — страница подписок, как её видит бот.
     SUBSCRIPTION_PROXY_HOSTS: str = ''
     SUBSCRIPTION_PROXY_UPSTREAM: str = ''
+
+    # Xdrive через PasarGuard: бот — источник истины, панель — раб. По
+    # умолчанию всё выключено: без URL, ключа и группы проектор не запускается.
+    # XDRIVE_ENABLED=False — не no-op: известным пользователям xdrive
+    # выключается (disabled), создание и слияние форматов прекращаются.
+    XDRIVE_ENABLED: bool = False
+    PASARGUARD_API_URL: str | None = None
+    PASARGUARD_API_KEY: str | None = None
+    PASARGUARD_XDRIVE_GROUP_ID: int | None = None
+    # Имя пользователя панели: <префикс><id подписки>. Префикс даёт минимум
+    # 3 символа (требование PasarGuard) и помечает записи, созданные ботом.
+    PASARGUARD_USERNAME_PREFIX: str = 'bx'
+    # Метка инстанса в note (xdrive-bot:<id>:sub:<n>); пусто — hostname.
+    PASARGUARD_INSTANCE_ID: str = ''
+    PASARGUARD_SYNC_INTERVAL_SECONDS: int = 300
+    PASARGUARD_API_TIMEOUT_SECONDS: int = 15
+    PASARGUARD_SYNC_BATCH_SIZE: int = 200
+    XDRIVE_CONFIG_CACHE_SECONDS: int = 60
+    # Регэксп User-Agent клиентов, которым разрешено добавлять xdrive.
+    XDRIVE_CLIENT_UA_REGEX: str = ''
     # Adblock-DNS в клиентском Xray JSON подписки. Бот вставляет первым сервером
     # dns_adblock с адресом/портом ниже и правилом inboundTag → proxy. Адрес —
     # синтетический destination, который нода по своему routing отправляет в
@@ -4705,6 +4726,28 @@ class Settings(BaseSettings):
 
     def get_bschek_api_url(self) -> str:
         return (self.BSCHEK_API_URL or 'https://bsbord.com/v1').rstrip('/')
+
+    # Xdrive / PasarGuard helpers
+    def is_xdrive_enabled(self) -> bool:
+        """Пользовательский рубильник xdrive — только флаг XDRIVE_ENABLED.
+
+        Проектор отдельно проверяет is_pasarguard_configured(): при выключенном
+        флаге он всё равно обязан развести известных пользователей в disabled.
+        """
+        return bool(self.XDRIVE_ENABLED)
+
+    def is_pasarguard_configured(self) -> bool:
+        """Заданы URL, ключ и группа xdrive — проектору есть что синхронизировать."""
+        return bool(self.PASARGUARD_API_URL and self.PASARGUARD_API_KEY and self.PASARGUARD_XDRIVE_GROUP_ID is not None)
+
+    def get_pasarguard_instance_id(self) -> str:
+        """PASARGUARD_INSTANCE_ID или hostname — метка инстанса в note пользователя."""
+        configured = (self.PASARGUARD_INSTANCE_ID or '').strip()
+        return configured or socket.gethostname()
+
+    def get_xdrive_sync_interval_seconds(self) -> int:
+        """Интервал прохода проектора; чаще минуты нет смысла — панель агрегирует статистику с задержкой."""
+        return max(60, int(self.PASARGUARD_SYNC_INTERVAL_SECONDS))
 
     model_config = {'env_file': '.env', 'env_file_encoding': 'utf-8', 'extra': 'ignore'}
 
