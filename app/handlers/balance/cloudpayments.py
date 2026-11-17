@@ -20,6 +20,7 @@ from app.utils.payment_utils import (
     payment_amount_error_text,
     payment_amount_range_error,
     payment_amount_text,
+    payment_create_error_text,
     payment_invoice_keyboard,
     payment_invoice_text,
 )
@@ -45,7 +46,6 @@ async def _create_cloudpayments_payment_and_respond(
         amount_kopeks: Amount in kopeks
         edit_message: Whether to edit existing message or send new one
     """
-    texts = get_texts(db_user.language)
     amount_rub = amount_kopeks / 100
 
     # Create payment
@@ -66,10 +66,7 @@ async def _create_cloudpayments_payment_and_respond(
     )
 
     if not result:
-        error_text = texts.t(
-            'PAYMENT_CREATE_ERROR',
-            'Не удалось создать платёж. Попробуйте позже.',
-        )
+        error_text = payment_create_error_text(db_user.language)
         if edit_message:
             await message_or_callback.edit_text(
                 error_text,
@@ -239,7 +236,6 @@ async def process_cloudpayments_amount(
 
     Generates payment link and sends it to user.
     """
-    texts = get_texts(db_user.language)
 
     # Get state data
     state_data = await state.get_data()
@@ -296,10 +292,7 @@ async def process_cloudpayments_amount(
 
     if not result:
         await message.answer(
-            texts.t(
-                'PAYMENT_CREATE_ERROR',
-                'Не удалось создать платёж. Попробуйте позже.',
-            ),
+            payment_create_error_text(db_user.language),
             parse_mode='HTML',
         )
         return

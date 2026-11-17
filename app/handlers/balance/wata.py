@@ -15,6 +15,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService, get_user_by_id as fetch_user_by_id
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_utils import (
     format_whole_rubles,
     payment_amount_range_error,
@@ -136,9 +137,11 @@ async def process_wata_payment_amount(
 
     if not result or not result.get('payment_url'):
         await message.answer(
-            texts.t(
-                'WATA_PAYMENT_ERROR',
-                '❌ Ошибка создания платежа WATA. Попробуйте позже или обратитесь в поддержку.',
+            style_notification_text(
+                texts.t(
+                    'WATA_PAYMENT_ERROR',
+                    '❌ Ошибка создания платежа WATA. Попробуйте позже или обратитесь в поддержку.',
+                )
             )
         )
         await state.clear()

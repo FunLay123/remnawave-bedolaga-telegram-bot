@@ -20,6 +20,7 @@ from app.keyboards.inline import get_payment_methods_keyboard
 from app.localization.texts import get_texts
 from app.utils.cache import cache
 from app.utils.notification_emoji import style_notification_text
+from app.utils.payment_utils import PAYMENT_SUPPORT_ICON_ID
 
 
 logger = structlog.get_logger(__name__)
@@ -39,7 +40,7 @@ _METHOD_LABELS = {
 _DEFAULT_TEXT = (
     '❗️ <b>Платёж не прошёл</b>\n\nСпособ оплаты: {method}\nСумма: {amount}\n\nВыберите другой способ пополнения:'
 )
-_DEFAULT_SUPPORT_BUTTON = '🛠️ Написать в поддержку'
+_DEFAULT_SUPPORT_BUTTON = 'Написать в поддержку'
 
 
 def _language_of(user: Any) -> str:
@@ -105,6 +106,7 @@ def build_payment_fallback(
                 InlineKeyboardButton(
                     text=texts.t('PAYMENT_FALLBACK_SUPPORT_BUTTON', _DEFAULT_SUPPORT_BUTTON),
                     url=support_url,
+                    icon_custom_emoji_id=PAYMENT_SUPPORT_ICON_ID,
                 )
             ],
         )

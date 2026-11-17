@@ -20,6 +20,7 @@ from app.utils.payment_utils import (
     payment_amount_error_text,
     payment_amount_range_error,
     payment_amount_text,
+    payment_create_error_text,
     payment_invoice_keyboard,
     payment_invoice_text,
 )
@@ -63,7 +64,6 @@ async def _create_freekassa_payment_and_respond(
         edit_message: Whether to edit existing message or send new one
         payment_method: Sub-method key (freekassa_sbp, freekassa_card, or None for default)
     """
-    texts = get_texts(db_user.language)
     amount_rub = amount_kopeks / 100
 
     ps_id, display_name = _resolve_freekassa_params(payment_method)
@@ -88,10 +88,7 @@ async def _create_freekassa_payment_and_respond(
     )
 
     if not result:
-        error_text = texts.t(
-            'PAYMENT_CREATE_ERROR',
-            'Не удалось создать платёж. Попробуйте позже.',
-        )
+        error_text = payment_create_error_text(db_user.language)
         if edit_message:
             await message_or_callback.edit_text(
                 error_text,

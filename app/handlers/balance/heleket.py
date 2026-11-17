@@ -19,6 +19,7 @@ from app.utils.decorators import error_handler
 from app.utils.payment_utils import (
     payment_amount_range_error,
     payment_amount_text,
+    payment_create_error_text,
     payment_invoice_keyboard,
     payment_invoice_text,
 )
@@ -141,7 +142,7 @@ async def process_heleket_payment_amount(
     )
 
     if not result:
-        await message.answer('❌ Не удалось создать счёт в Heleket. Попробуйте позже или обратитесь в поддержку.')
+        await message.answer(payment_create_error_text(db_user.language, provider='Heleket'))
         await state.clear()
         return
 

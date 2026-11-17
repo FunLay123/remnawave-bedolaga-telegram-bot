@@ -18,6 +18,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_button_styles import apply_button_style, styled_button
 from app.utils.payment_utils import (
     PAYMENT_PAY_ICON_ID,
@@ -68,9 +69,11 @@ async def _send_pal24_payment_message(
 
         if not payment_result:
             await message.answer(
-                texts.t(
-                    'PAL24_PAYMENT_ERROR',
-                    '❌ Ошибка создания платежа PayPalych. Попробуйте позже или обратитесь в поддержку.',
+                style_notification_text(
+                    texts.t(
+                        'PAL24_PAYMENT_ERROR',
+                        '❌ Ошибка создания платежа PayPalych. Попробуйте позже или обратитесь в поддержку.',
+                    )
                 )
             )
             await state.clear()
@@ -82,9 +85,11 @@ async def _send_pal24_payment_message(
 
         if not (sbp_url or card_url or fallback_url):
             await message.answer(
-                texts.t(
-                    'PAL24_PAYMENT_ERROR',
-                    '❌ Ошибка создания платежа PayPalych. Попробуйте позже или обратитесь в поддержку.',
+                style_notification_text(
+                    texts.t(
+                        'PAL24_PAYMENT_ERROR',
+                        '❌ Ошибка создания платежа PayPalych. Попробуйте позже или обратитесь в поддержку.',
+                    )
                 )
             )
             await state.clear()
@@ -209,9 +214,11 @@ async def _send_pal24_payment_message(
     except Exception as error:
         logger.error('Ошибка создания PayPalych платежа', error=error)
         await message.answer(
-            texts.t(
-                'PAL24_PAYMENT_ERROR',
-                '❌ Ошибка создания платежа PayPalych. Попробуйте позже или обратитесь в поддержку.',
+            style_notification_text(
+                texts.t(
+                    'PAL24_PAYMENT_ERROR',
+                    '❌ Ошибка создания платежа PayPalych. Попробуйте позже или обратитесь в поддержку.',
+                )
             )
         )
         await state.clear()

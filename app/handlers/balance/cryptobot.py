@@ -13,6 +13,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_utils import (
     payment_amount_error_text,
     payment_amount_range_error,
@@ -148,7 +149,9 @@ async def process_cryptobot_payment_amount(
         )
 
         if not payment_result:
-            await message.answer('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+            await message.answer(
+                style_notification_text('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+            )
             await state.clear()
             return
 
@@ -212,7 +215,9 @@ async def process_cryptobot_payment_amount(
 
     except Exception as e:
         logger.error('Ошибка создания CryptoBot платежа', error=e)
-        await message.answer('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+        await message.answer(
+            style_notification_text('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+        )
         await state.clear()
 
 

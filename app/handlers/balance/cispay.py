@@ -19,6 +19,7 @@ from app.utils.decorators import error_handler
 from app.utils.payment_utils import (
     payment_amount_range_error,
     payment_amount_text,
+    payment_create_error_text,
     payment_invoice_keyboard,
     payment_invoice_text,
 )
@@ -70,7 +71,6 @@ async def _create_cispay_payment_and_respond(
     payment_method_type: str | None = None,
 ):
     """Создаёт платёж cisPay и отправляет ссылку на страницу оплаты пользователю."""
-    texts = get_texts(db_user.language)
     amount_rub = amount_kopeks / 100
 
     payment_service = PaymentService()
@@ -90,10 +90,7 @@ async def _create_cispay_payment_and_respond(
     )
 
     if not result:
-        error_text = texts.t(
-            'PAYMENT_CREATE_ERROR',
-            'Не удалось создать платёж. Попробуйте позже.',
-        )
+        error_text = payment_create_error_text(db_user.language)
         if edit_message:
             await message_or_callback.edit_text(
                 error_text,

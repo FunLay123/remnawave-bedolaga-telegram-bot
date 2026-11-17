@@ -13,6 +13,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_utils import (
     format_whole_rubles,
     payment_amount_range_error,
@@ -154,10 +155,12 @@ async def process_mulenpay_payment_amount(
 
         if not payment_result or not payment_result.get('payment_url'):
             await message.answer(
-                texts.t(
-                    'MULENPAY_PAYMENT_ERROR',
-                    '❌ Ошибка создания платежа {mulenpay_name}. Попробуйте позже или обратитесь в поддержку.',
-                ).format(mulenpay_name=mulenpay_name)
+                style_notification_text(
+                    texts.t(
+                        'MULENPAY_PAYMENT_ERROR',
+                        '❌ Ошибка создания платежа {mulenpay_name}. Попробуйте позже или обратитесь в поддержку.',
+                    ).format(mulenpay_name=mulenpay_name)
+                )
             )
             await state.clear()
             return
@@ -217,10 +220,12 @@ async def process_mulenpay_payment_amount(
     except Exception as e:
         logger.error('Ошибка создания платежа', mulenpay_name=mulenpay_name, error=e)
         await message.answer(
-            texts.t(
-                'MULENPAY_PAYMENT_ERROR',
-                '❌ Ошибка создания платежа {mulenpay_name}. Попробуйте позже или обратитесь в поддержку.',
-            ).format(mulenpay_name=mulenpay_name)
+            style_notification_text(
+                texts.t(
+                    'MULENPAY_PAYMENT_ERROR',
+                    '❌ Ошибка создания платежа {mulenpay_name}. Попробуйте позже или обратитесь в поддержку.',
+                ).format(mulenpay_name=mulenpay_name)
+            )
         )
         await state.clear()
 

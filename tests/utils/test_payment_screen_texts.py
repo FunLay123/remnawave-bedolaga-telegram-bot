@@ -12,6 +12,7 @@ from app.utils.payment_utils import (
     payment_amount_error_text,
     payment_amount_range_error,
     payment_amount_text,
+    payment_create_error_text,
     payment_invoice_keyboard,
     payment_invoice_text,
     payment_methods_text,
@@ -175,6 +176,25 @@ def test_support_screen_is_compact_and_escapes_user_id() -> None:
 def test_amount_error_is_a_compact_blockquote() -> None:
     text = payment_amount_error_text('Допустимая сумма: от 50 до 5000 ₽')
     assert '<blockquote>Допустимая сумма: от 50 до 5000 ₽</blockquote>' in text
+
+
+def test_create_error_uses_custom_cross_emoji() -> None:
+    from app.utils.notification_emoji import WARNING_EMOJI_ID
+
+    text = payment_create_error_text('ru')
+
+    assert text.startswith(f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">❌</tg-emoji>')
+    assert 'Не удалось создать платёж' in text
+
+
+def test_create_error_keeps_provider_name_and_has_no_plain_emoji() -> None:
+    from app.utils.notification_emoji import WARNING_EMOJI_ID
+
+    text = payment_create_error_text('ru', provider='Heleket')
+
+    assert text.startswith(f'<tg-emoji emoji-id="{WARNING_EMOJI_ID}">❌</tg-emoji>')
+    assert 'Heleket' in text
+    assert text.count('❌') == 1
 
 
 def test_invoice_keyboard_can_use_callback_pay_button() -> None:

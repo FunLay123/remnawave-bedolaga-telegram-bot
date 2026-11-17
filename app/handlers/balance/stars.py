@@ -18,6 +18,7 @@ from app.services.payment_method_config_service import get_method_amount_limits
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_utils import (
     DEFAULT_TOPUP_MAX_KOPEKS,
     DEFAULT_TOPUP_MIN_KOPEKS,
@@ -198,7 +199,7 @@ async def process_stars_payment_amount(message: types.Message, db_user: User, am
 
     except Exception as e:
         logger.error('Ошибка создания Stars invoice', error=e)
-        await message.answer('⚠️ Ошибка создания платежа')
+        await message.answer(style_notification_text('⚠️ Ошибка создания платежа'))
 
 
 @error_handler

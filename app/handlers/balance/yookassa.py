@@ -16,6 +16,7 @@ from app.services.payment_fallback_service import build_payment_fallback
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_utils import (
     format_whole_rubles,
     payment_amount_range_error,
@@ -190,7 +191,9 @@ async def process_yookassa_payment_amount(
         )
 
         if not payment_result:
-            await message.answer('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+            await message.answer(
+                style_notification_text('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+            )
             await state.clear()
             return
 
@@ -262,7 +265,9 @@ async def process_yookassa_payment_amount(
 
     except Exception as e:
         logger.error('Ошибка создания YooKassa платежа', error=e)
-        await message.answer('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+        await message.answer(
+            style_notification_text('❌ Ошибка создания платежа. Попробуйте позже или обратитесь в поддержку.')
+        )
         await state.clear()
 
 
@@ -322,7 +327,11 @@ async def process_yookassa_sbp_payment_amount(
         )
 
         if not payment_result:
-            await message.answer('❌ Ошибка создания платежа через СБП. Попробуйте позже или обратитесь в поддержку.')
+            await message.answer(
+                style_notification_text(
+                    '❌ Ошибка создания платежа через СБП. Попробуйте позже или обратитесь в поддержку.'
+                )
+            )
             await state.clear()
             return
 
@@ -463,7 +472,11 @@ async def process_yookassa_sbp_payment_amount(
 
     except Exception as e:
         logger.error('Ошибка создания YooKassa СБП платежа', error=e)
-        await message.answer('❌ Ошибка создания платежа через СБП. Попробуйте позже или обратитесь в поддержку.')
+        await message.answer(
+            style_notification_text(
+                '❌ Ошибка создания платежа через СБП. Попробуйте позже или обратитесь в поддержку.'
+            )
+        )
         await state.clear()
 
 

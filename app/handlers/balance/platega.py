@@ -15,6 +15,7 @@ from app.localization.texts import get_texts
 from app.services.payment_service import PaymentService
 from app.states import BalanceStates
 from app.utils.decorators import error_handler
+from app.utils.notification_emoji import style_notification_text
 from app.utils.payment_button_styles import styled_button
 from app.utils.payment_utils import (
     payment_amount_range_error,
@@ -305,9 +306,11 @@ async def process_platega_payment_amount(
 
     if not payment_result or not payment_result.get('redirect_url'):
         await message.answer(
-            texts.t(
-                'PLATEGA_PAYMENT_ERROR',
-                '❌ Ошибка создания платежа Platega. Попробуйте позже или обратитесь в поддержку.',
+            style_notification_text(
+                texts.t(
+                    'PLATEGA_PAYMENT_ERROR',
+                    '❌ Ошибка создания платежа Platega. Попробуйте позже или обратитесь в поддержку.',
+                )
             )
         )
         await state.clear()

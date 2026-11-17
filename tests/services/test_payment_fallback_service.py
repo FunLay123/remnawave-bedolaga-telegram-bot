@@ -180,6 +180,22 @@ def test_build_payment_fallback_uses_custom_alert_emoji(payment_methods: None) -
     assert '<tg-emoji emoji-id="5258382581375723416">❗️</tg-emoji>' in text
 
 
+def test_build_payment_fallback_support_button_uses_main_menu_custom_emoji(
+    payment_methods: None,
+) -> None:
+    from app.services.payment_fallback_service import build_payment_fallback
+    from app.utils.payment_utils import PAYMENT_SUPPORT_ICON_ID
+
+    _, markup = build_payment_fallback(_user(), 50000, 'yookassa')
+
+    support_button = next(
+        button for row in markup.inline_keyboard for button in row if button.url == 'https://t.me/support_team'
+    )
+    assert support_button.text == 'Написать в поддержку'
+    assert support_button.icon_custom_emoji_id == PAYMENT_SUPPORT_ICON_ID
+    assert '🛠' not in support_button.text
+
+
 # ---------------------------------------------------------------------------
 # Proactive sender cooldown and release on failure
 # ---------------------------------------------------------------------------

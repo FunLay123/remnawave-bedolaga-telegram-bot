@@ -150,6 +150,21 @@ def payment_amount_error_text(reason: str) -> str:
     return f'{PAYMENT_SCREEN_HEADER} <b>Сумма пополнения</b>\n\n<blockquote>{html.escape(reason)}</blockquote>'
 
 
+def payment_create_error_text(language: str = 'ru', *, provider: str | None = None) -> str:
+    """Ошибка создания платежа через общий гейт эмодзи.
+
+    Ведущий Unicode-❌ заменяется на кастомный эмодзи-предупреждение. Для
+    провайдера, у которого исторически своё сообщение про счёт, текст остаётся
+    провайдерским.
+    """
+    if provider:
+        text = f'❌ Не удалось создать счёт в {html.escape(provider)}. Попробуйте позже или обратитесь в поддержку.'
+    else:
+        texts = get_texts(language)
+        text = texts.t('PAYMENT_CREATE_ERROR', '❌ Не удалось создать платёж. Попробуйте позже.')
+    return style_notification_text(text)
+
+
 def payment_amount_range_error(min_amount_kopeks: int, max_amount_kopeks: int) -> str:
     """Компактная ошибка с границами, которые действительно пройдут валидацию.
 
