@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
-from aiogram.types import InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,27 +20,39 @@ from app.database.crud.user import get_user_by_telegram_id
 from app.database.database import get_db
 from app.localization.texts import get_texts
 from app.services.user_cart_service import user_cart_service
-from app.utils.miniapp_buttons import build_main_menu_button, build_subscription_extend_button
+from app.utils.miniapp_buttons import SUBSCRIPTION_EXTEND_CALLBACK, build_main_menu_button, strip_leading_emoji
 from app.utils.payment_button_styles import apply_button_style
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.payment_utils import payment_success_text
 
 
 def _pick_current_subscription(user: Any) -> Any | None:
-    """Активная подписка, а при её отсутствии — текущая по правилам модели пользователя."""
+    """Та же подписка, что в меню; в мультитарифе предпочитаем активную."""
     if user is None:
         return None
+
+    if not settings.is_multi_tariff_enabled():
+        return getattr(user, 'subscription', None)
 
     subscriptions = getattr(user, 'subscriptions', None) or []
     active = next((subscription for subscription in subscriptions if getattr(subscription, 'is_active', False)), None)
     return active if active is not None else getattr(user, 'subscription', None)
 
 
+def _can_offer_direct_renewal(subscription: Any | None) -> bool:
+    if subscription is None or getattr(subscription, 'is_trial', False):
+        return False
+    if not getattr(subscription, 'tariff_id', None):
+        return not settings.is_tariffs_mode()
+    tariff = getattr(subscription, 'tariff', None)
+    return tariff is not None and tariff.is_active and not tariff.is_daily
+
+
 class PaymentCommonMixin:
     """Mixin с базовой логикой, которую используют остальные платёжные блоки."""
 
     async def build_topup_success_keyboard(self, user: Any) -> InlineKeyboardMarkup:
-        """Главное меню и, при наличии подписки, переход к её продлению.
+        """Главное меню и, если доступно, прямое продление текущей подписки.
 
         Возврат к корзине/черновику оформления здесь намеренно не предлагается:
         в этой поставке сохранённая корзина, checkout-черновик и gift-корзина
@@ -57,6 +69,7 @@ class PaymentCommonMixin:
 
         try:
             subscription = _pick_current_subscription(user)
+            can_renew = _can_offer_direct_renewal(subscription)
         except Exception as error:
             # Недогруженная связь не должна мешать отправке подтверждения оплаты.
             logger.warning(
@@ -64,13 +77,16 @@ class PaymentCommonMixin:
                 user_id=getattr(user, 'id', None),
                 error_type=type(error).__name__,
             )
-            subscription = None
+            can_renew = False
 
-        if subscription is not None:
+        if can_renew:
+            callback_data = (
+                f'se:{subscription.id}' if settings.is_multi_tariff_enabled() else SUBSCRIPTION_EXTEND_CALLBACK
+            )
             buttons.append(
-                build_subscription_extend_button(
-                    text=texts.t('BTN_RENEW_SUBSCRIPTION', 'Продлить подписку'),
-                    subscription_id=getattr(subscription, 'id', None),
+                InlineKeyboardButton(
+                    text=strip_leading_emoji(texts.t('BTN_RENEW_SUBSCRIPTION', 'Продлить подписку')),
+                    callback_data=callback_data,
                     style='primary',
                     icon_custom_emoji_id='5334552404736104314',
                 )
@@ -177,11 +193,13 @@ class PaymentCommonMixin:
             subscription_snapshot = None
 
             if current_subscription is not None:
+                tariff = getattr(current_subscription, 'tariff', None)
                 subscription_snapshot = SimpleNamespace(
                     id=getattr(current_subscription, 'id', None),
                     is_trial=getattr(current_subscription, 'is_trial', False),
                     is_active=getattr(current_subscription, 'is_active', False),
-                    actual_status=getattr(current_subscription, 'actual_status', None),
+                    tariff_id=getattr(current_subscription, 'tariff_id', None),
+                    tariff=SimpleNamespace(is_active=tariff.is_active, is_daily=tariff.is_daily) if tariff else None,
                 )
 
             return SimpleNamespace(

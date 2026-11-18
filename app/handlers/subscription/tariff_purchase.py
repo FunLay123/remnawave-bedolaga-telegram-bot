@@ -2691,21 +2691,22 @@ async def show_tariff_extend(
 ):
     """Показывает экран продления по текущему тарифу.
 
-    ``subscription_id`` передаётся явно из кнопки «Назад» (где хвост callback —
-    это tariff_id, а не id подписки). Если не задан — берём из ``se:{id}`` (хвост
-    = реальный id подписки).
+    Если подписку уже выбрали, используем её ID в любом режиме. Это также
+    нужно для кнопки «Назад», у которой в хвосте callback находится ID тарифа.
+    Без явного ID в мультитарифе пробуем взять его из ``se:{id}``.
     """
     texts = get_texts(db_user.language)
 
-    if settings.is_multi_tariff_enabled():
-        sub_id = subscription_id
-        if sub_id is None:
-            parts = (callback.data or '').split(':')
-            if len(parts) >= 2:
-                try:
-                    sub_id = int(parts[-1])
-                except (ValueError, TypeError):
-                    pass
+    if subscription_id is not None:
+        subscription = await get_subscription_by_id_for_user(db, subscription_id, db_user.id)
+    elif settings.is_multi_tariff_enabled():
+        sub_id = None
+        parts = (callback.data or '').split(':')
+        if len(parts) >= 2:
+            try:
+                sub_id = int(parts[-1])
+            except (ValueError, TypeError):
+                pass
         if sub_id:
             subscription = await get_subscription_by_id_for_user(db, sub_id, db_user.id)
         else:
