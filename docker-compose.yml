@@ -114,7 +114,7 @@ networks:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
-          gateway: 172.20.0.1
+        - subnet: "${BOT_NETWORK_SUBNET:-172.20.0.0/16}"
+          gateway: "${BOT_NETWORK_GATEWAY:-172.20.0.1}"
     driver_opts:
       com.docker.network.driver.mtu: 1350
