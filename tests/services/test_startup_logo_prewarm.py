@@ -82,3 +82,20 @@ async def test_prewarm_is_best_effort_on_timeout(monkeypatch):
 
     ok = await asyncio.wait_for(_service(bot).prewarm_logo(), timeout=5)
     assert ok is False  # timed out, swallowed, never raises
+
+
+async def test_prewarm_skips_when_disabled_in_settings(monkeypatch):
+    monkeypatch.setattr(mp, '_logo_file_id', None, raising=False)
+    monkeypatch.setattr(settings, 'STARTUP_LOGO_PREWARM_ENABLED', False)
+
+    def _must_not_prepare():
+        raise AssertionError('logo must not be prepared when prewarm is disabled')
+
+    monkeypatch.setattr(mp, 'get_logo_media', _must_not_prepare)
+    bot = MagicMock()
+    bot.send_photo = AsyncMock()
+
+    ok = await _service(bot).prewarm_logo()
+
+    assert ok is False
+    bot.send_photo.assert_not_awaited()

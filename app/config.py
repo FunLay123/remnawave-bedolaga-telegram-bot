@@ -1406,6 +1406,9 @@ class Settings(BaseSettings):
     HIDE_SUBSCRIPTION_LINK: bool = False
     ENABLE_LOGO_MODE: bool = True
     LOGO_FILE: str = 'vpn_logo.png'
+    # Отправлять логотип в админ-чат на старте, чтобы закешировать его file_id.
+    # Выключить, если не нужно стартовое фото (оно сразу удаляется, но видно в чате/логах).
+    STARTUP_LOGO_PREWARM_ENABLED: bool = True
     SKIP_RULES_ACCEPT: bool = False
     # Показывать экран принятия оферты и правил уже зарегистрированным
     # пользователям при /start. Тестовый/временный флаг: при включении гейт

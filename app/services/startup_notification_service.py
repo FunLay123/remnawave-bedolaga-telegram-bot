@@ -416,6 +416,9 @@ class StartupNotificationService:
         админ-чат (или в ЛС первого админа), ловим file_id и сразу удаляем сообщение.
         Полностью best-effort: на любой ошибке тихо выходим, старт не блокируем.
         """
+        if not getattr(settings, 'STARTUP_LOGO_PREWARM_ENABLED', True):
+            logger.debug('prewarm_logo: прогрев логотипа отключён настройкой')
+            return False
         try:
             from app.utils.message_patch import _cache_logo_file_id, _logo_file_id, get_logo_media
 
