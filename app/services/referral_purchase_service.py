@@ -925,6 +925,7 @@ async def _post_commit_effects(
 
     from app.database.crud.user import get_user_by_id
     from app.localization.texts import get_texts
+    from app.utils.miniapp_buttons import strip_leading_emoji
     from app.utils.pricing_utils import _pluralize_days_ru
 
     async with AsyncSessionLocal() as db:
@@ -945,7 +946,7 @@ async def _post_commit_effects(
                             inline_keyboard=[
                                 [
                                     InlineKeyboardButton(
-                                        text=texts.t('MY_SUBSCRIPTION_BUTTON', 'Моя подписка'),
+                                        text=strip_leading_emoji(texts.t('MY_SUBSCRIPTION_BUTTON', 'Моя подписка')),
                                         callback_data='menu_subscription',
                                         icon_custom_emoji_id='5314310000531766389',
                                         style='primary',
@@ -974,7 +975,7 @@ async def _post_commit_effects(
                             inline_keyboard=[
                                 [
                                     InlineKeyboardButton(
-                                        text=texts.t('MAIN_MENU_BUTTON', 'Главное меню'),
+                                        text=strip_leading_emoji(texts.t('MAIN_MENU_BUTTON', 'Главное меню')),
                                         callback_data='back_to_menu',
                                         icon_custom_emoji_id='5314310000531766389',
                                         style='primary',

@@ -336,10 +336,6 @@ async def test_post_commit_notifies_with_actual_granted_days(monkeypatch):
 
     monkeypatch.setattr('app.database.database.AsyncSessionLocal', fake_session)
     monkeypatch.setattr('app.database.crud.user.get_user_by_id', fake_get_user_by_id)
-    monkeypatch.setattr(
-        'app.localization.texts.get_texts',
-        lambda language=None: SimpleNamespace(t=lambda key, default: default),
-    )
     bot = SimpleNamespace(send_message=AsyncMock())
 
     result = FirstPurchaseResult(
@@ -357,3 +353,15 @@ async def test_post_commit_notifies_with_actual_granted_days(monkeypatch):
     referrer_text = bot.send_message.await_args_list[1].kwargs['text']
     assert 'Вам +7 дней' in referee_text
     assert 'Вам +3 дня к текущей подписке.' in referrer_text
+    referee_button = bot.send_message.await_args_list[0].kwargs['reply_markup'].inline_keyboard[0][0]
+    referrer_button = bot.send_message.await_args_list[1].kwargs['reply_markup'].inline_keyboard[0][0]
+    assert (referee_button.text, referee_button.callback_data, referee_button.icon_custom_emoji_id) == (
+        'Моя подписка',
+        'menu_subscription',
+        '5314310000531766389',
+    )
+    assert (referrer_button.text, referrer_button.callback_data, referrer_button.icon_custom_emoji_id) == (
+        'Главное меню',
+        'back_to_menu',
+        '5314310000531766389',
+    )

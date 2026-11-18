@@ -14,6 +14,8 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
 from app.config import settings
 from app.localization.texts import get_texts
 from app.services.monitoring_service import (
@@ -670,14 +672,19 @@ async def test_trial_ending_falls_back_to_price_30_days_when_pricing_fails(monke
     assert '150 ₽ за 30 дней' in text
 
 
-def test_traffic_warning_keyboard_has_icons():
+@pytest.mark.parametrize(('multi_tariff', 'label'), [(False, 'Моя подписка'), (True, 'Мои подписки')])
+def test_traffic_warning_keyboard_has_icons(monkeypatch, multi_tariff, label):
     from app.services.monitoring_service import build_traffic_warning_keyboard
 
+    monkeypatch.setattr(settings, 'MAIN_MENU_MODE', 'default')
+    monkeypatch.setattr(settings, 'SALES_MODE', 'tariffs')
+    monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', multi_tariff)
     keyboard = build_traffic_warning_keyboard(get_texts('ru'))
     buttons = {button.callback_data: button for row in keyboard.inline_keyboard for button in row}
     assert buttons['buy_traffic'].style == 'primary'
     assert buttons['buy_traffic'].icon_custom_emoji_id == '5303396278179210513'
     assert buttons['menu_subscription'].icon_custom_emoji_id == '5431374840332302296'
+    assert buttons['menu_subscription'].text == label
 
 
 # ── Screens from audit item 5: trial + ordinary traffic top-up ─────────────
