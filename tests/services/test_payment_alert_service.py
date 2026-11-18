@@ -20,6 +20,7 @@ from app.services.payment_alert_service import (
     build_check_error_alert,
     build_pending_alert,
     dispatch_payment_alerts,
+    format_payment_alerts_digest,
 )
 from app.services.payment_verification_service import PendingPayment
 
@@ -239,8 +240,104 @@ async def test_digest_limits_item_lines_and_reports_overflow(monkeypatch: pytest
     text = sent[0]
     item_lines = [line for line in text.splitlines() if line.lstrip().startswith('•')]
     assert len(item_lines) == 20
-    assert text.count('… и ещё') == 1
     assert '… и ещё 5' in text
+
+
+@pytest.mark.asyncio
+async def test_cap_claims_only_delivered_items_and_delivers_the_rest_next_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(payment_alert_service, 'cache', _DisconnectedCache())
+    payment_alert_service._MEMORY_CLAIMS.clear()
+    monkeypatch.setattr(settings, 'PAYMENT_ALERT_MAX_PER_CYCLE', 20)
+    sent = _install_sender(monkeypatch)
+
+    alerts = [_alert(local_id=index) for index in range(25)]
+
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is False
+
+    assert len(sent) == 2
+    first_lines = [line for line in sent[0].splitlines() if line.lstrip().startswith('•')]
+    second_lines = [line for line in sent[1].splitlines() if line.lstrip().startswith('•')]
+    assert len(first_lines) == 20
+    assert len(second_lines) == 5
+    # The five hidden payments are not locked out by the first digest's cooldown.
+    assert 'pay-24' in sent[1]
+    assert 'pay-0' not in sent[1]
+    assert '… и ещё' not in sent[1]
+
+
+@pytest.mark.asyncio
+async def test_cap_keeps_hidden_items_unclaimed_with_redis(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_cache = _FakeCache()
+    monkeypatch.setattr(payment_alert_service, 'cache', fake_cache)
+    monkeypatch.setattr(settings, 'PAYMENT_ALERT_MAX_PER_CYCLE', 1)
+    sent = _install_sender(monkeypatch)
+
+    alerts = [_alert(local_id=1), _alert(local_id=2)]
+
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert 'pay-1' in sent[0]
+    assert 'pay-2' not in sent[0]
+    # Only the delivered payment holds a cooldown key.
+    assert list(fake_cache.values) == ['payment_alert:pending:yookassa:1']
+
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert 'pay-2' in sent[1]
+    assert 'pay-1' not in sent[1]
+
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is False
+    assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_cap_keeps_hidden_items_unclaimed_with_memory_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(payment_alert_service, 'cache', _DisconnectedCache())
+    payment_alert_service._MEMORY_CLAIMS.clear()
+    monkeypatch.setattr(settings, 'PAYMENT_ALERT_MAX_PER_CYCLE', 1)
+    sent = _install_sender(monkeypatch)
+
+    alerts = [_alert(local_id=1), _alert(local_id=2)]
+
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is False
+
+    assert len(sent) == 2
+    assert 'pay-1' in sent[0] and 'pay-2' not in sent[0]
+    assert 'pay-2' in sent[1] and 'pay-1' not in sent[1]
+
+
+@pytest.mark.asyncio
+async def test_failed_digest_does_not_claim_items_beyond_the_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_cache = _FakeCache()
+    monkeypatch.setattr(payment_alert_service, 'cache', fake_cache)
+    monkeypatch.setattr(settings, 'PAYMENT_ALERT_MAX_PER_CYCLE', 1)
+
+    _install_sender(monkeypatch, result=False)
+    alerts = [_alert(local_id=1), _alert(local_id=2)]
+
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is False
+    assert fake_cache.values == {}
+
+    sent = _install_sender(monkeypatch, result=True)
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert await dispatch_payment_alerts(MagicMock(), alerts) is True
+    assert len(sent) == 2
+    assert 'pay-1' in sent[0]
+    assert 'pay-2' in sent[1]
+
+
+def test_format_digest_still_caps_direct_callers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, 'PAYMENT_ALERT_MAX_PER_CYCLE', 2)
+
+    text = format_payment_alerts_digest([_alert(local_id=index) for index in range(5)])
+
+    item_lines = [line for line in text.splitlines() if line.lstrip().startswith('•')]
+    assert len(item_lines) == 2
+    assert '… и ещё 3' in text
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,11 @@ Repeated alerts are rate limited per ``kind/provider/local_id`` for
 ``PAYMENT_ALERT_REPEAT_HOURS`` hours. Redis ``SET NX`` is used when the cache
 is connected; otherwise a single-process, in-memory timestamp map provides the
 same behavior.
+
+``PAYMENT_ALERT_MAX_PER_CYCLE`` caps one digest. The cap is applied before the
+cooldown is claimed, so a payment that did not fit into the delivered message
+is reported by a following cycle instead of being silenced for the whole
+repeat window.
 """
 
 from __future__ import annotations
@@ -172,12 +177,21 @@ def _format_alert_line(alert: PaymentAlert) -> str:
 
 
 def format_payment_alerts_digest(alerts: list[PaymentAlert]) -> str:
-    """Build the admin digest, capped at the configured number of item lines."""
+    """Build the admin digest, capped at the configured number of item lines.
+
+    Direct callers get the truncation marker for extra alerts. The dispatcher
+    claims cooldowns only for the alerts that actually fit into the digest, so
+    the leftover lines are delivered by later cycles rather than being hidden.
+    """
 
     limit = _max_per_cycle()
     displayed = alerts[:limit]
     overflow = len(alerts) - len(displayed)
 
+    return _render_digest(displayed, overflow)
+
+
+def _render_digest(displayed: list[PaymentAlert], overflow: int) -> str:
     lines = ['<b>⚠️ Проблемы с платежами</b>', '']
     lines.extend(_format_alert_line(alert) for alert in displayed)
     if overflow > 0:
@@ -188,18 +202,21 @@ def format_payment_alerts_digest(alerts: list[PaymentAlert]) -> str:
 async def dispatch_payment_alerts(bot: object | None, alerts: list[PaymentAlert]) -> bool:
     """Claim cooldowns, format a digest and send it to the admin chat.
 
-    Returns ``True`` only when the digest was delivered. Claims are released
-    when delivery fails, so the next verification cycle can retry.
+    Returns ``True`` only when the digest was delivered. The per-cycle cap is
+    applied before claiming: only alerts that fit into the sent digest take a
+    cooldown slot, so the remaining payments are reported by the next cycles
+    instead of being suppressed for the whole repeat window. Claims are
+    released when delivery fails, so the next verification cycle can retry.
     """
 
     if bot is None or not alerts:
         return False
 
+    limit = _max_per_cycle()
     repeat_seconds = _repeat_seconds()
     use_redis = bool(getattr(cache, '_connected', False))
 
     unique_alerts: list[PaymentAlert] = []
-    claimed_keys: list[str] = []
     seen_keys: set[str] = set()
 
     for alert in alerts:
@@ -207,14 +224,27 @@ async def dispatch_payment_alerts(bot: object | None, alerts: list[PaymentAlert]
         if key in seen_keys:
             continue
         seen_keys.add(key)
+        unique_alerts.append(alert)
+
+    claimed_alerts: list[PaymentAlert] = []
+    claimed_keys: list[str] = []
+    processed = 0
+
+    for alert in unique_alerts:
+        if len(claimed_alerts) >= limit:
+            break
+        processed += 1
+        key = _cooldown_key(alert)
         if await _try_claim(key, repeat_seconds, use_redis=use_redis):
             claimed_keys.append(key)
-            unique_alerts.append(alert)
+            claimed_alerts.append(alert)
 
-    if not unique_alerts:
+    deferred = len(unique_alerts) - processed
+
+    if not claimed_alerts:
         return False
 
-    text = format_payment_alerts_digest(unique_alerts)
+    text = _render_digest(claimed_alerts, deferred)
     try:
         service = AdminNotificationService(bot)
         delivered = await service.send_payment_alert(text)
@@ -227,9 +257,13 @@ async def dispatch_payment_alerts(bot: object | None, alerts: list[PaymentAlert]
             await _release_claim(key, use_redis=use_redis)
         logger.warning(
             'Не удалось отправить алерт о проблемных платежах, повторим в следующем цикле',
-            alerts_count=len(unique_alerts),
+            alerts_count=len(claimed_alerts),
         )
         return False
 
-    logger.info('Алерт о проблемных платежах отправлен администраторам', alerts_count=len(unique_alerts))
+    logger.info(
+        'Алерт о проблемных платежах отправлен администраторам',
+        alerts_count=len(claimed_alerts),
+        deferred_count=deferred,
+    )
     return True

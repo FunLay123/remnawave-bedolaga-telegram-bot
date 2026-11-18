@@ -3,6 +3,7 @@
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.config import settings
+from app.services.payment.errors import PaymentStatusCheckError
 from app.services.payment_service import PaymentService
 
 
@@ -240,3 +242,176 @@ async def test_create_yookassa_sbp_payment_returns_none_on_error(monkeypatch: py
     )
     assert result is None
     assert called is False
+
+
+# ---------------------------------------------------------------------------
+# Strict status checks for the background verification worker
+# ---------------------------------------------------------------------------
+
+
+class StubYooKassaStatusService:
+    """Провайдерская граница: возвращает ответ SDK, пустоту или ошибку."""
+
+    def __init__(self, *, response: dict[str, Any] | None = None, error: Exception | None = None) -> None:
+        self.response = response
+        self.error = error
+        self.calls: list[str] = []
+
+    async def get_payment_info(self, payment_id: str) -> dict[str, Any] | None:
+        self.calls.append(payment_id)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+def _status_payment(**overrides: Any) -> Any:
+    values: dict[str, Any] = {
+        'id': 901,
+        'yookassa_payment_id': 'yk-status-901',
+        'status': 'pending',
+        'is_paid': False,
+        'payment_method_type': 'sbp',
+        'transaction_id': None,
+        'created_at': datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.anyio('asyncio')
+async def test_yookassa_strict_status_raises_when_provider_returns_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SDK отдаёт None и на транспортную ошибку, и на 404 — воркер обязан это увидеть."""
+
+    provider = StubYooKassaStatusService(response=None)
+    service = _make_service(provider)  # type: ignore[arg-type]
+    payment = _status_payment()
+
+    async def fake_get_payment(db: Any, local_id: int) -> Any:
+        return payment
+
+    monkeypatch.setattr(
+        'app.services.payment_service.get_yookassa_payment_by_local_id',
+        fake_get_payment,
+        raising=False,
+    )
+
+    with pytest.raises(PaymentStatusCheckError):
+        await service.get_yookassa_payment_status(DummySession(), payment.id, strict=True)
+
+    # Ручная проверка в админке остаётся прежней: неизменённая локальная запись.
+    result = await service.get_yookassa_payment_status(DummySession(), payment.id)
+    assert provider.calls == [payment.yookassa_payment_id, payment.yookassa_payment_id]
+    assert result is not None
+    assert result['payment'].id == payment.id
+    assert result['remote_data'] is None
+
+
+@pytest.mark.anyio('asyncio')
+async def test_yookassa_strict_status_propagates_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    secret = 'internal transport detail'
+    provider = StubYooKassaStatusService(error=OSError(secret))
+    service = _make_service(provider)  # type: ignore[arg-type]
+
+    payment = _status_payment()
+
+    async def fake_get_payment(db: Any, local_id: int) -> Any:
+        return payment
+
+    monkeypatch.setattr(
+        'app.services.payment_service.get_yookassa_payment_by_local_id',
+        fake_get_payment,
+        raising=False,
+    )
+
+    with pytest.raises(PaymentStatusCheckError) as excinfo:
+        await service.get_yookassa_payment_status(DummySession(), 901, strict=True)
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert secret not in str(excinfo.value)
+
+    # Manual/UI path keeps the old lenient behavior.
+    lenient = await service.get_yookassa_payment_status(DummySession(), 901)
+    assert lenient is not None
+    assert lenient['payment'] is payment
+    assert lenient['remote_data'] is None
+
+
+@pytest.mark.anyio('asyncio')
+async def test_yookassa_strict_status_keeps_unchanged_pending_payment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Провайдер ответил «всё ещё pending» — это не ошибка проверки."""
+
+    provider = StubYooKassaStatusService(
+        response={'status': 'pending', 'paid': False, 'payment_method_type': 'sbp', 'payment_method_saved': False}
+    )
+    service = _make_service(provider)  # type: ignore[arg-type]
+    payment = _status_payment()
+
+    async def fake_get_payment(db: Any, local_id: int) -> Any:
+        return payment
+
+    async def fake_update(db: Any, payment_id: str, **kwargs: Any) -> Any:
+        payment.status = kwargs['status']
+        payment.is_paid = kwargs['is_paid']
+        return payment
+
+    monkeypatch.setattr(
+        'app.services.payment_service.get_yookassa_payment_by_local_id',
+        fake_get_payment,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        'app.services.payment_service.update_yookassa_payment_status',
+        fake_update,
+        raising=False,
+    )
+
+    result = await service.get_yookassa_payment_status(DummySession(), payment.id, strict=True)
+
+    assert result is not None
+    assert result['status'] == 'pending'
+    assert result['remote_data'] is not None
+
+
+@pytest.mark.anyio('asyncio')
+async def test_yookassa_strict_status_still_processes_successful_payment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Строгий режим не трогает путь зачисления денег."""
+
+    provider = StubYooKassaStatusService(
+        response={'status': 'succeeded', 'paid': True, 'payment_method_type': 'sbp', 'payment_method_saved': False}
+    )
+    service = _make_service(provider)  # type: ignore[arg-type]
+    payment = _status_payment()
+
+    async def fake_get_payment(db: Any, local_id: int) -> Any:
+        return payment
+
+    async def fake_update(db: Any, payment_id: str, **kwargs: Any) -> Any:
+        payment.status = kwargs['status']
+        payment.is_paid = kwargs['is_paid']
+        return payment
+
+    processed: list[str] = []
+
+    async def fake_process(self: Any, db: Any, target: Any, event_object: Any = None) -> bool:
+        processed.append(target.yookassa_payment_id)
+        return True
+
+    monkeypatch.setattr(
+        'app.services.payment_service.get_yookassa_payment_by_local_id',
+        fake_get_payment,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        'app.services.payment_service.update_yookassa_payment_status',
+        fake_update,
+        raising=False,
+    )
+    monkeypatch.setattr(PaymentService, '_process_successful_yookassa_payment', fake_process, raising=False)
+
+    result = await service.get_yookassa_payment_status(DummySession(), payment.id, strict=True)
+
+    assert result is not None
+    assert result['status'] == 'succeeded'
+    assert processed == [payment.yookassa_payment_id]

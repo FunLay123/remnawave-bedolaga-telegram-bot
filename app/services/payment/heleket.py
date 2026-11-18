@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
+from app.services.payment.errors import PaymentStatusCheckError
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.payment_utils import payment_success_text
 from app.utils.user_utils import format_referrer_info
@@ -495,9 +496,23 @@ class HeleketPaymentMixin:
         db: AsyncSession,
         *,
         local_payment_id: int,
+        strict: bool = False,
     ) -> HeleketPayment | None:
-        if not getattr(self, 'heleket_service', None):
+        """Синхронизирует статус Heleket платежа с локальной записью.
+
+        ``strict=True`` (фоновая проверка) поднимает
+        :class:`PaymentStatusCheckError`, когда ни прямой запрос статуса, ни
+        резервный список платежей не дали данных: клиент Heleket возвращает
+        None и на сетевую ошибку, и на пустой ответ. Без флага, а также когда
+        платёж нашёлся в истории, поведение прежнее — ручная проверка получает
+        неизменённую запись. Зачисление денег идёт по тому же пути.
+        """
+
+        heleket_service = getattr(self, 'heleket_service', None)
+        if not heleket_service:
             logger.error('Heleket сервис не инициализирован')
+            if strict:
+                raise PaymentStatusCheckError('Heleket client is not configured')
             return None
 
         heleket_crud = import_module('app.database.crud.heleket')
@@ -508,12 +523,14 @@ class HeleketPaymentMixin:
             return None
 
         payload: dict[str, Any] | None = None
+        provider_error: Exception | None = None
         try:
-            response = await self.heleket_service.get_payment_info(  # type: ignore[union-attr]
+            response = await heleket_service.get_payment_info(
                 uuid=payment.uuid,
                 order_id=payment.order_id,
             )
-        except Exception as error:  # pragma: no cover - defensive
+        except Exception as error:
+            provider_error = error
             logger.exception('Ошибка получения статуса Heleket платежа', uuid=payment.uuid, error=error)
         else:
             if response:
@@ -521,13 +538,18 @@ class HeleketPaymentMixin:
                 if isinstance(result, dict):
                     payload = dict(result)
                 else:
+                    provider_error = PaymentStatusCheckError('Heleket returned an invalid payload')
                     logger.error(
                         'Некорректный ответ Heleket API при проверке платежа', uuid=payment.uuid, response=response
                     )
+            else:
+                provider_error = PaymentStatusCheckError('Heleket returned no payment data')
 
         if payload is None:
             fallback = await self._lookup_heleket_payment_history(payment)
             if not fallback:
+                if strict and provider_error is not None:
+                    raise PaymentStatusCheckError('Heleket status request failed') from provider_error
                 logger.warning('Heleket API не вернул информацию по платежу', uuid=payment.uuid)
                 return payment
             payload = dict(fallback)

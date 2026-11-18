@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import PaymentMethod, TransactionType
+from app.services.payment.errors import PaymentStatusCheckError
 from app.utils.payment_logger import payment_logger as logger
 from app.utils.user_utils import format_referrer_info
 
@@ -296,8 +297,18 @@ class YooKassaPaymentMixin:
         self,
         db: AsyncSession,
         local_payment_id: int,
+        *,
+        strict: bool = False,
     ) -> dict[str, Any] | None:
-        """Запрашивает статус платежа в YooKassa и синхронизирует локальные данные."""
+        """Запрашивает статус платежа в YooKassa и синхронизирует локальные данные.
+
+        ``strict=True`` (фоновая проверка) поднимает
+        :class:`PaymentStatusCheckError`, если YooKassa не вернула статус:
+        SDK отдаёт пустой ответ и на сетевую ошибку, и на неизвестный платёж.
+        Без флага поведение прежнее — возвращается неизменённая локальная
+        запись, как и ожидает ручная проверка в админке. Путь зачисления
+        денег при этом не меняется.
+        """
 
         payment_module = import_module('app.services.payment_service')
 
@@ -307,15 +318,25 @@ class YooKassaPaymentMixin:
 
         remote_data: dict[str, Any] | None = None
 
-        if getattr(self, 'yookassa_service', None):
+        yookassa_service = getattr(self, 'yookassa_service', None)
+        if yookassa_service:
             try:
-                remote_data = await self.yookassa_service.get_payment_info(  # type: ignore[union-attr]
+                remote_data = await yookassa_service.get_payment_info(  # type: ignore[union-attr]
                     payment.yookassa_payment_id
                 )
-            except Exception as error:  # pragma: no cover - defensive logging
+            except Exception as error:
                 logger.error(
                     'Ошибка получения статуса YooKassa', yookassa_payment_id=payment.yookassa_payment_id, error=error
                 )
+                if strict:
+                    raise PaymentStatusCheckError('YooKassa status request failed') from error
+        elif strict:
+            raise PaymentStatusCheckError('YooKassa client is not configured')
+
+        if strict and not remote_data:
+            # YooKassa SDK reports transport errors and unknown payments as an
+            # empty answer; there is no separate failure channel to inspect.
+            raise PaymentStatusCheckError('YooKassa returned no payment data')
 
         if remote_data:
             status = remote_data.get('status') or payment.status

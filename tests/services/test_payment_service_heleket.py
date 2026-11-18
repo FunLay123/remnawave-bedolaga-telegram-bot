@@ -12,6 +12,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from app.database.crud import heleket as heleket_crud
+from app.services.payment.errors import PaymentStatusCheckError
 from app.services.payment_service import PaymentService
 
 
@@ -46,13 +47,16 @@ class StubHeleketService:
         response: dict[str, Any] | None,
         *,
         info_response: dict[str, Any] | None = None,
+        info_error: Exception | None = None,
     ) -> None:
         self.response = response
         self.info_response = info_response
+        self.info_error = info_error
         self.calls: list[dict[str, Any]] = []
         self.info_calls: list[dict[str, str | None]] = []
         self.list_response: dict[str, Any] | None = None
         self.list_calls: list[dict[str, str | None]] = []
+        self.list_error: Exception | None = None
 
     async def create_payment(self, payload: dict[str, Any]) -> dict[str, Any] | None:
         self.calls.append(payload)
@@ -65,6 +69,8 @@ class StubHeleketService:
         order_id: str | None = None,
     ) -> dict[str, Any] | None:
         self.info_calls.append({'uuid': uuid, 'order_id': order_id})
+        if self.info_error is not None:
+            raise self.info_error
         return self.info_response
 
     async def list_payments(
@@ -75,6 +81,8 @@ class StubHeleketService:
         cursor: str | None = None,
     ) -> dict[str, Any] | None:
         self.list_calls.append({'date_from': date_from, 'date_to': date_to, 'cursor': cursor})
+        if self.list_error is not None:
+            raise self.list_error
         return self.list_response
 
 
@@ -312,3 +320,149 @@ async def test_sync_heleket_payment_status_history_fallback(monkeypatch: pytest.
     assert result is not None
     assert captured['payload']['status'] == 'paid'
     assert stub.list_calls
+
+
+# ---------------------------------------------------------------------------
+# Strict status checks for the background verification worker
+# ---------------------------------------------------------------------------
+
+
+def _heleket_status_payment(payment_id: int = 91) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=payment_id,
+        uuid='heleket-uuid',
+        order_id='order-123',
+        status='check',
+        user_id=5,
+    )
+
+
+def _patch_heleket_lookup(monkeypatch: pytest.MonkeyPatch, payment: SimpleNamespace | None) -> None:
+    async def fake_get_by_id(db: Any, payment_id: int) -> SimpleNamespace | None:
+        return payment
+
+    monkeypatch.setattr(heleket_crud, 'get_heleket_payment_by_id', fake_get_by_id, raising=False)
+
+
+@pytest.mark.anyio('asyncio')
+async def test_sync_heleket_strict_raises_when_provider_and_history_are_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = StubHeleketService(response=None, info_response=None)
+    service = _make_service(stub)
+    payment = _heleket_status_payment()
+    _patch_heleket_lookup(monkeypatch, payment)
+
+    with pytest.raises(PaymentStatusCheckError):
+        await service.sync_heleket_payment_status(DummySession(), local_payment_id=payment.id, strict=True)
+
+    assert stub.info_calls
+    assert stub.list_calls
+
+    # Ручная/админская проверка по-прежнему получает неизменённую запись.
+    result = await service.sync_heleket_payment_status(DummySession(), local_payment_id=payment.id)
+    assert result is payment
+
+
+@pytest.mark.anyio('asyncio')
+async def test_sync_heleket_strict_propagates_transport_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    stub = StubHeleketService(response=None, info_response=None, info_error=OSError('boom'))
+    service = _make_service(stub)
+    payment = _heleket_status_payment()
+    _patch_heleket_lookup(monkeypatch, payment)
+
+    with pytest.raises(PaymentStatusCheckError) as excinfo:
+        await service.sync_heleket_payment_status(DummySession(), local_payment_id=payment.id, strict=True)
+
+    assert isinstance(excinfo.value.__cause__, OSError)
+    assert 'boom' not in str(excinfo.value)
+
+    # Manual/UI path keeps the old lenient behavior.
+    lenient = await service.sync_heleket_payment_status(DummySession(), local_payment_id=payment.id)
+    assert lenient is payment
+
+
+@pytest.mark.anyio('asyncio')
+async def test_sync_heleket_strict_survives_history_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Резервный list-запрос нашёл платёж — проверка успешна, алерта нет."""
+
+    stub = StubHeleketService(response=None, info_response=None, info_error=OSError('info failed'))
+    stub.list_response = {
+        'state': 0,
+        'result': {
+            'items': [
+                {
+                    'uuid': 'heleket-uuid',
+                    'order_id': 'order-123',
+                    'status': 'paid',
+                    'payment_amount': '150.00',
+                }
+            ],
+            'paginate': {'nextCursor': None},
+        },
+    }
+    service = _make_service(stub)
+    payment = _heleket_status_payment()
+    _patch_heleket_lookup(monkeypatch, payment)
+
+    captured: dict[str, Any] = {}
+
+    async def fake_process(self: Any, db: Any, payload: dict[str, Any], *, metadata_key: str) -> SimpleNamespace:
+        captured['payload'] = payload
+        return SimpleNamespace(**payload)
+
+    monkeypatch.setattr(PaymentService, '_process_heleket_payload', fake_process, raising=False)
+
+    result = await service.sync_heleket_payment_status(DummySession(), local_payment_id=payment.id, strict=True)
+
+    assert result is not None
+    assert captured['payload']['status'] == 'paid'
+    assert stub.info_calls
+    assert stub.list_calls
+
+
+@pytest.mark.anyio('asyncio')
+async def test_sync_heleket_strict_missing_local_payment_is_not_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Нет локальной строки — это не сбой провайдера, и алерта быть не должно."""
+
+    stub = StubHeleketService(response=None, info_response=None)
+    service = _make_service(stub)
+    _patch_heleket_lookup(monkeypatch, None)
+
+    result = await service.sync_heleket_payment_status(DummySession(), local_payment_id=404, strict=True)
+
+    assert result is None
+    assert stub.info_calls == []
+
+
+@pytest.mark.anyio('asyncio')
+async def test_sync_heleket_strict_accepts_unchanged_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Провайдер ответил тем же статусом — проверка успешна, ошибки нет."""
+
+    stub = StubHeleketService(
+        response=None,
+        info_response={
+            'state': 0,
+            'result': {
+                'uuid': 'heleket-uuid',
+                'order_id': 'order-123',
+                'status': 'check',
+            },
+        },
+    )
+    service = _make_service(stub)
+    payment = _heleket_status_payment()
+    _patch_heleket_lookup(monkeypatch, payment)
+
+    async def fake_process(self: Any, db: Any, payload: dict[str, Any], *, metadata_key: str) -> None:
+        return None
+
+    monkeypatch.setattr(PaymentService, '_process_heleket_payload', fake_process, raising=False)
+
+    result = await service.sync_heleket_payment_status(DummySession(), local_payment_id=payment.id, strict=True)
+
+    assert result is payment
+    assert stub.info_calls
+    assert stub.list_calls == []

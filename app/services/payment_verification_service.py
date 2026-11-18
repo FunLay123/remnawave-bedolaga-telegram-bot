@@ -74,6 +74,20 @@ class PendingPayment:
         return (datetime.now(UTC) - self.created_at) <= max_age
 
 
+@dataclass(slots=True, frozen=True)
+class ManualCheckOutcome:
+    """Outcome of refreshing one pending payment with its provider.
+
+    ``failed`` separates "the provider check itself failed" from "the provider
+    answered and nothing changed" (``record is None``). Background alerting
+    needs the distinction: a swallowed adapter error used to look like a
+    merely stalled payment.
+    """
+
+    record: PendingPayment | None = None
+    failed: bool = False
+
+
 SUPPORTED_MANUAL_CHECK_METHODS: frozenset[PaymentMethod] = frozenset(
     {
         PaymentMethod.YOOKASSA,
@@ -352,13 +366,16 @@ class AutoPaymentVerificationService:
 
                 for record in candidates:
                     try:
-                        refreshed = await run_manual_check(
+                        outcome = await run_manual_check_outcome(
                             session,
                             record.method,
                             record.local_id,
                             self._payment_service,
+                            strict=True,
                         )
                     except Exception as check_error:
+                        # run_manual_check_outcome already reports adapter
+                        # failures; this guards the router itself.
                         logger.error(
                             'Ошибка проверки платежа, откатываем сессию',
                             method_display_name=method_display_name(record.method),
@@ -369,6 +386,19 @@ class AutoPaymentVerificationService:
                         if session.in_transaction():
                             await session.rollback()
                         continue
+
+                    if outcome.failed:
+                        # Explicit failure from the router: report it even when
+                        # the payment is younger than the pending threshold.
+                        logger.error(
+                            'Проверка платежа завершилась ошибкой',
+                            method_display_name=method_display_name(record.method),
+                            identifier=record.identifier,
+                        )
+                        alerts.append(build_check_error_alert(record, checked_at))
+                        continue
+
+                    refreshed = outcome.record
 
                     if not refreshed:
                         logger.debug(
@@ -1802,13 +1832,26 @@ async def get_payment_record(
     return None
 
 
-async def run_manual_check(
+async def run_manual_check_outcome(
     db: AsyncSession,
     method: PaymentMethod,
     local_payment_id: int,
     payment_service: PaymentService,
-) -> PendingPayment | None:
-    """Trigger provider specific status refresh and return the updated record."""
+    *,
+    strict: bool = False,
+) -> ManualCheckOutcome:
+    """Trigger provider specific status refresh and report what happened.
+
+    A provider/transport failure is reported as ``failed=True`` together with
+    ``record=None`` instead of being indistinguishable from "the payment did
+    not change". The exception text is logged only; it never leaves this
+    function.
+
+    ``strict=True`` is used by the background worker: for YooKassa and
+    Heleket it asks the live adapters to propagate a missing provider answer
+    instead of returning the unchanged local row. Other providers keep their
+    existing error semantics. The default keeps the manual/admin contract.
+    """
 
     try:
         if method == PaymentMethod.PAL24:
@@ -1824,9 +1867,17 @@ async def run_manual_check(
             result = await payment_service.get_platega_payment_status(db, local_payment_id)
             payment = result.get('payment') if result else None
         elif method == PaymentMethod.HELEKET:
-            payment = await payment_service.sync_heleket_payment_status(db, local_payment_id=local_payment_id)
+            if strict:
+                payment = await payment_service.sync_heleket_payment_status(
+                    db, local_payment_id=local_payment_id, strict=True
+                )
+            else:
+                payment = await payment_service.sync_heleket_payment_status(db, local_payment_id=local_payment_id)
         elif method == PaymentMethod.YOOKASSA:
-            result = await payment_service.get_yookassa_payment_status(db, local_payment_id)
+            if strict:
+                result = await payment_service.get_yookassa_payment_status(db, local_payment_id, strict=True)
+            else:
+                result = await payment_service.get_yookassa_payment_status(db, local_payment_id)
             payment = result.get('payment') if result else None
         elif method == PaymentMethod.CRYPTOBOT:
             result = await payment_service.get_cryptobot_payment_status(db, local_payment_id)
@@ -1905,14 +1956,17 @@ async def run_manual_check(
                 payment = None
         else:
             logger.warning('Manual check requested for unsupported method', method=method)
-            return None
+            return ManualCheckOutcome()
 
         if not payment:
-            return None
+            # The provider answered but there is nothing to refresh (missing
+            # local row or an adapter that turned its own error into an empty
+            # response). That is not a check failure.
+            return ManualCheckOutcome()
 
-        return await get_payment_record(db, method, local_payment_id)
+        return ManualCheckOutcome(record=await get_payment_record(db, method, local_payment_id))
 
-    except Exception as error:  # pragma: no cover - defensive logging
+    except Exception as error:  # defensive: adapters and the session may still raise
         logger.error(
             'Manual status check failed for payment',
             method_value=method.value,
@@ -1923,7 +1977,25 @@ async def run_manual_check(
         # Откатываем сессию чтобы не оставлять её в грязном состоянии
         if db.in_transaction():
             await db.rollback()
-        return None
+        return ManualCheckOutcome(failed=True)
+
+
+async def run_manual_check(
+    db: AsyncSession,
+    method: PaymentMethod,
+    local_payment_id: int,
+    payment_service: PaymentService,
+) -> PendingPayment | None:
+    """Trigger provider specific status refresh and return the updated record.
+
+    Kept for admin UI callers that only render the (possibly unchanged)
+    payment: a failed check also yields ``None`` here. Background callers that
+    must distinguish a failure from "nothing changed" use
+    :func:`run_manual_check_outcome` with ``strict=True``.
+    """
+
+    outcome = await run_manual_check_outcome(db, method, local_payment_id, payment_service)
+    return outcome.record
 
 
 if TYPE_CHECKING:  # pragma: no cover
