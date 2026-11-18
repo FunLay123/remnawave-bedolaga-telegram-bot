@@ -21,6 +21,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+import zlib
 from collections.abc import Awaitable, Callable, Iterable
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -447,6 +448,17 @@ def create_proxy_client() -> httpx.AsyncClient:
     return httpx.AsyncClient(timeout=TIMEOUT_SECONDS, follow_redirects=False)
 
 
+def _upstream_label(upstream: str) -> str:
+    """Имя upstream'а для лога: без пути, query и учётных данных."""
+    parsed = urlsplit(upstream)
+    if not parsed.hostname:
+        return upstream
+    host = parsed.hostname
+    if ':' in host:
+        host = f'[{host}]'
+    return f'{host}:{parsed.port}' if parsed.port else host
+
+
 class SubscriptionProxyMiddleware:
     """Перехватывает запросы на домен подписок, остальное пропускает в приложение."""
 
@@ -463,6 +475,7 @@ class SubscriptionProxyMiddleware:
         self.app = app
         self.hosts = {host.lower() for host in hosts}
         self.upstream = upstream.rstrip('/')
+        self.upstream_label = _upstream_label(self.upstream)
         self.client = client
         self.lookup = lookup
         self.adblock_lookup = adblock_lookup
@@ -509,7 +522,14 @@ class SubscriptionProxyMiddleware:
                 await upstream_response.aclose()
         except httpx.HTTPError as error:
             # 502 — сигнал nginx'у перейти на запасной сервер.
-            logger.warning('Страница подписок не ответила', url=url, error=str(error))
+            # В лог — только имя upstream'а: в url есть shortUuid и query подписки,
+            # а текст исключения httpx может содержать этот url целиком.
+            logger.warning(
+                'Страница подписок не ответила',
+                upstream=self.upstream_label,
+                route='subscription_proxy',
+                error_type=type(error).__name__,
+            )
             return Response(status_code=502)
 
         drop_content_encoding = False
@@ -557,10 +577,15 @@ class SubscriptionProxyMiddleware:
         if content_encoding in ('', 'identity'):
             pass
         elif content_encoding == 'gzip':
+            # Обрезанное тело даёт EOFError, битый deflate внутри gzip — zlib.error;
+            # это не OSError, и раньше исключение вылетало из прокси как 500.
             try:
                 decoded = gzip.decompress(body)
-            except OSError as error:
-                logger.warning('Не удалось распаковать подписку для adblock-DNS', error=str(error))
+            except (OSError, EOFError, zlib.error) as error:
+                logger.warning(
+                    'Не удалось распаковать подписку для adblock-DNS',
+                    error_type=type(error).__name__,
+                )
                 return body, False
             drop_content_encoding = True
         else:

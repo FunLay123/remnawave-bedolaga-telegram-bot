@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import structlog
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -365,6 +366,128 @@ def test_adblock_on_gzip_body_is_patched_and_encoding_dropped(adblock_env):
     config = json.loads(response.content)[0]
     assert config['dns']['servers'][0]['tag'] == 'dns_adblock'
     assert response.headers['content-length'] == str(len(response.content))
+
+
+# ---- битый gzip и логи без ссылки подписки -------------------------------------------------
+
+
+def _bare_middleware(upstream_handler, lookup, *, adblock_lookup=None) -> SubscriptionProxyMiddleware:
+    """Middleware без FastAPI: тело читается сырым, битый gzip нельзя декодировать."""
+
+    async def inner_app(scope, receive, send):
+        raise AssertionError(f'запрос {scope["path"]} ушёл мимо прокси')
+
+    middleware_kwargs = {}
+    if adblock_lookup is not None:
+        middleware_kwargs['adblock_lookup'] = adblock_lookup
+
+    return SubscriptionProxyMiddleware(
+        inner_app,
+        hosts={SUB_HOST},
+        upstream='http://sub-page:3010/',
+        client=httpx.AsyncClient(transport=httpx.MockTransport(upstream_handler)),
+        lookup=lookup,
+        **middleware_kwargs,
+    )
+
+
+async def _raw_get(middleware: SubscriptionProxyMiddleware, path: str) -> tuple[httpx.Response, bytes]:
+    """GET через ASGI с телом до распаковки: aiter_raw не трогает Content-Encoding."""
+    transport = httpx.ASGITransport(app=middleware)
+    async with httpx.AsyncClient(transport=transport) as client:
+        request = client.build_request('GET', f'http://{SUB_HOST}{path}', headers={'Host': SUB_HOST})
+        response = await client.send(request, stream=True)
+        try:
+            raw = b''.join([chunk async for chunk in response.aiter_raw()])
+        finally:
+            await response.aclose()
+    return response, raw
+
+
+def _broken_gzip(damage: str) -> bytes:
+    plain = json.dumps([_xray_config()], separators=(',', ':')).encode()
+    compressed = gzip.compress(plain)
+    if damage == 'truncated':
+        return compressed[:-3]
+    # Заголовок gzip цел, а deflate-блок объявляет LEN/NLEN, которые не сходятся:
+    # zlib.error, а не EOFError.
+    return compressed[:10] + b'\x01\xff\xff\xff\xff' + compressed[-8:]
+
+
+def _gzip_upstream(body: bytes):
+    def upstream(request):
+        return _upstream(
+            {
+                'subscription-userinfo': PANEL_USERINFO,
+                'content-type': 'application/json',
+                'content-encoding': 'gzip',
+            },
+            body,
+        )
+
+    return upstream
+
+
+@pytest.mark.parametrize('damage', ['truncated', 'corrupt'])
+async def test_adblock_on_broken_gzip_returns_upstream_body_untouched(adblock_env, damage):
+    """Повреждённый gzip — не ошибка бота: ответ уходит как от upstream, без мутации."""
+    broken = _broken_gzip(damage)
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(True)
+
+    with structlog.testing.capture_logs() as logs:
+        response, raw = await _raw_get(
+            _bare_middleware(_gzip_upstream(broken), usage, adblock_lookup=adblock), '/Ab3dEf9hJk'
+        )
+
+    assert response.status_code == 200
+    assert raw == broken
+    assert response.headers['content-encoding'] == 'gzip'
+    assert response.headers['content-length'] == str(len(broken))
+    assert any('распаковать' in entry.get('event', '') for entry in logs)
+
+
+async def test_broken_gzip_without_adblock_still_passes_through(adblock_env):
+    """Без adblock тело не разбирается вообще, но и тогда ответ не ломается."""
+    broken = _broken_gzip('truncated')
+    usage, _ = _usage(None)
+    adblock, _ = _adblock(False)
+
+    response, raw = await _raw_get(
+        _bare_middleware(_gzip_upstream(broken), usage, adblock_lookup=adblock), '/Ab3dEf9hJk'
+    )
+
+    assert response.status_code == 200
+    assert raw == broken
+
+
+async def test_upstream_error_log_keeps_path_and_query_out():
+    """Сбой сети: 502 остаётся, а в лог не попадают shortUuid и query подписки."""
+
+    def down(request):
+        raise httpx.ConnectError(f'не удалось подключиться: {request.url}', request=request)
+
+    usage, _ = _usage(None)
+    middleware = _bare_middleware(down, usage)
+
+    with structlog.testing.capture_logs() as logs:
+        response, raw = await _raw_get(middleware, '/Ab3dEf9hJk/json?token=s3cret-value')
+
+    assert response.status_code == 502
+    assert raw == b''
+
+    [entry] = [item for item in logs if item.get('upstream') == 'sub-page:3010']
+    assert entry['log_level'] == 'warning'
+    assert entry['route'] == 'subscription_proxy'
+    assert entry['error_type'] == 'ConnectError'
+    # Ни полного url, ни текста исключения: httpx дописывает в него url запроса.
+    assert 'url' not in entry
+    assert 'error' not in entry
+
+    serialized = json.dumps(logs, ensure_ascii=False, default=str)
+    assert 'Ab3dEf9hJk' not in serialized
+    assert 's3cret-value' not in serialized
+    assert 'не удалось подключиться' not in serialized
 
 
 # ---- premium_usage -------------------------------------------------------------------------
