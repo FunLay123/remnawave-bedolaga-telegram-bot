@@ -662,11 +662,14 @@ async def _sync_subscription_from_panel_by_email(db: AsyncSession, user: User) -
                     await db.refresh(existing_sub, list(GRACE_MARKER_FIELDS))
                     # Вход по почте усыновляет уже существующий аккаунт панели:
                     # здесь панель — источник истины целиком, включая лимиты.
+                    from app.database.crud.premium_traffic import get_entitlement_squad_uuids
+
                     project_onto_subscription(
                         existing_sub,
                         snapshot,
                         policy=ADMIN_PULL,
                         now=current_time,
+                        entitled_squads=await get_entitlement_squad_uuids(db, existing_sub),
                     )
                     existing_sub.is_trial = False
                     await link_subscription_panel_identity(db, existing_sub, panel_user.id)

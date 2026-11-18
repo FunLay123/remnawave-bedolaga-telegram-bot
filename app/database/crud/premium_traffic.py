@@ -9,11 +9,15 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import structlog
 from sqlalchemy import and_, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models import SubscriptionPremiumTraffic
+from app.database.models import SubscriptionPremiumTraffic, Tariff
+
+
+logger = structlog.get_logger(__name__)
 
 
 async def get_state(
@@ -72,6 +76,72 @@ async def get_limited_squad_uuids(db: AsyncSession, subscription_id: int) -> set
         )
     )
     return set(result.scalars().all())
+
+
+async def get_entitlement_squad_uuids(db: AsyncSession, subscription) -> list[str]:
+    """Премиум-сквады, право на которые нельзя терять при чтении панели.
+
+    Строка ``subscription_premium_traffic`` — единственное доказательство того,
+    что сквад выдавался подписке как премиум: её заводит учёт на первой же
+    встрече с парой «подписка + сквад из тарифа». Пока строка есть, сквад
+    считается правом подписки, даже если сейчас он снят за перерасход (или
+    только что возвращён сбросом периода, а панель ещё не подтвердила запись).
+
+    Право сверяем с текущим тарифом подписки: сквад, убранный из премиального
+    списка или из ``allowed_squads`` тарифа, возвращать нельзя — его строку
+    затем снимает ``_collect_orphans``/``_drop_orphan_premium_states``. Пустой
+    ``allowed_squads`` значит «все серверы», как и в
+    ``get_effective_tariff_squad_uuids``.
+
+    Это только кандидаты в право: проекция сохраняет сквад, лишь пока он есть
+    и в текущем ``connected_squads`` подписки. Локальный набор — происхождение
+    права, и ручное снятие сквада выводит его из него, а не из учётной строки.
+
+    Список отсортирован ради устойчивого порядка и логов: проекция берёт из
+    него только те сквады, что уже есть в локальном наборе, и сохраняет их
+    локальный порядок.
+    """
+    from app.utils.premium_traffic import parse_premium_squads
+
+    subscription_id = getattr(subscription, 'id', None)
+    tariff_id = getattr(subscription, 'tariff_id', None)
+    if subscription_id is None or tariff_id is None:
+        return []
+
+    try:
+        result = await db.execute(
+            select(SubscriptionPremiumTraffic.squad_uuid).where(
+                SubscriptionPremiumTraffic.subscription_id == subscription_id
+            )
+        )
+        tracked = set(result.scalars().all())
+        if not tracked:
+            return []
+
+        result = await db.execute(
+            select(Tariff.server_traffic_limits, Tariff.allowed_squads).where(Tariff.id == tariff_id)
+        )
+        row = result.first()
+    except Exception:
+        # Чтение панели не должно падать из-за вспомогательного запроса: без
+        # права проекция просто берёт набор панели, как раньше. Тот же выбор,
+        # что и в `effective_panel_squads` при отказе БД.
+        logger.warning(
+            'Не удалось прочитать право на премиум-сквады, синхронизация идёт без него',
+            subscription_id=subscription_id,
+            exc_info=True,
+        )
+        return []
+
+    if row is None:
+        return []
+    server_traffic_limits, allowed_squads = row
+
+    premium = parse_premium_squads(server_traffic_limits)
+    allowed = {str(squad_uuid) for squad_uuid in (allowed_squads or []) if squad_uuid}
+    return sorted(
+        squad_uuid for squad_uuid in tracked if squad_uuid in premium and (not allowed or squad_uuid in allowed)
+    )
 
 
 async def get_or_create_state(

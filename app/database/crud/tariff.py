@@ -1,7 +1,8 @@
 from datetime import UTC, datetime
 
 import structlog
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -648,6 +649,34 @@ async def sync_default_tariff_from_config(db: AsyncSession) -> Tariff | None:
     return None
 
 
+#: Насколько подпись тарифом важна для строки этого статуса. Активную строку
+#: человек видит в меню первой (``User.subscription``), поэтому именно ей метка
+#: нужна в первую очередь; остальные — запасной вариант для истории.
+_LEGACY_TARIFF_STATUS_PRIORITY = {
+    SubscriptionStatus.ACTIVE.value: 0,
+    SubscriptionStatus.LIMITED.value: 1,
+    SubscriptionStatus.EXPIRED.value: 2,
+    SubscriptionStatus.DISABLED.value: 3,
+}
+
+
+def _better_legacy_candidate(candidate: Subscription, current: Subscription) -> bool:
+    """Какая из строк одного пользователя достойна единственной метки тарифа."""
+    candidate_status = (candidate.status or '').lower()
+    current_status = (current.status or '').lower()
+    candidate_rank = _LEGACY_TARIFF_STATUS_PRIORITY.get(candidate_status, len(_LEGACY_TARIFF_STATUS_PRIORITY))
+    current_rank = _LEGACY_TARIFF_STATUS_PRIORITY.get(current_status, len(_LEGACY_TARIFF_STATUS_PRIORITY))
+    if candidate_rank != current_rank:
+        return candidate_rank < current_rank
+
+    moment = datetime(1970, 1, 1, tzinfo=UTC)
+    candidate_created = candidate.created_at or moment
+    current_created = current.created_at or moment
+    if candidate_created != current_created:
+        return candidate_created > current_created
+    return (candidate.id or 0) > (current.id or 0)
+
+
 async def assign_single_tariff_to_legacy_subscriptions(db: AsyncSession) -> int:
     """Помечает старые платные подписки единственным активным тарифом.
 
@@ -657,9 +686,26 @@ async def assign_single_tariff_to_legacy_subscriptions(db: AsyncSession) -> int:
 
     Меняем только метку тарифа. Текущие лимиты, сквады и срок подписки не
     трогаем: иначе импорт мог бы молча урезать уже оплаченный доступ.
+
+    Кого считаем старой подпиской:
+
+    * только режим ``tariffs`` — в classic тариф не участвует в продаже, и метка
+      там не значит ничего;
+    * не триал и не ``pending``: ``is_trial=false`` не доказывает оплату, а
+      неоплаченный черновик (классический режим, брошенная покупка) получил бы
+      тариф, которого не покупал;
+    * одна строка на пользователя. Частичный уникальный индекс
+      ``uq_subscriptions_user_tariff_active`` не даёт двум активным подпискам
+      одного человека ссылаться на один тариф: при PostgreSQL пачка таких строк
+      откатила бы весь коммит вместе с уже назначенными;
+    * повторный прогон идемпотентен: пользователя, у которого уже есть строка с
+      этим тарифом, или живая подписка на другой тариф, пропускаем целиком —
+      иначе каждый запуск помечал бы следующую строку того же человека.
     """
     from app.config import settings
 
+    if not settings.is_tariffs_mode():
+        return 0
     if settings.is_multi_tariff_enabled():
         return 0
 
@@ -672,30 +718,77 @@ async def assign_single_tariff_to_legacy_subscriptions(db: AsyncSession) -> int:
         # Суточный тариф — другой способ списания; не переносим на него
         # старые периодические подписки автоматически.
         return 0
+    # Скаляры снимаем до коммита: после `rollback()` объекты сессии истекают, и
+    # обращение к `tariff.id` в логе упало бы на ленивой загрузке (MissingGreenlet).
+    tariff_id = tariff.id
+    tariff_name = tariff.name
 
+    # Кого нельзя трогать вообще. «Уже подписан» — строка с ЭТИМ тарифом:
+    # повторный прогон иначе выбрал бы следующую непустую строку того же
+    # пользователя, и с каждым запуском меток становилось бы больше. «Занятый
+    # активной строкой» — у человека уже есть живая подписка на какой-то тариф;
+    # вторая метка там создала бы две активные подписки в одноботарном режиме.
+    constrained_statuses = [
+        SubscriptionStatus.ACTIVE.value,
+        SubscriptionStatus.TRIAL.value,
+        SubscriptionStatus.LIMITED.value,
+    ]
     result = await db.execute(
-        select(Subscription).where(
-            Subscription.tariff_id.is_(None),
-            Subscription.is_trial.is_(False),
+        select(Subscription.user_id).where(
+            Subscription.tariff_id.is_not(None),
+            or_(
+                Subscription.tariff_id == tariff_id,
+                Subscription.status.in_(constrained_statuses),
+            ),
         )
     )
-    subscriptions = result.scalars().all()
-    if not subscriptions:
+    taken_user_ids = {user_id for user_id in result.scalars().all() if user_id is not None}
+
+    result = await db.execute(
+        select(Subscription)
+        .where(
+            Subscription.tariff_id.is_(None),
+            Subscription.is_trial.is_(False),
+            # NULL-статус старых строк не должен внезапно оказаться черновиком:
+            # coalesce оставляет его в выборке.
+            func.coalesce(Subscription.status, '') != SubscriptionStatus.PENDING.value,
+        )
+        .order_by(Subscription.user_id, Subscription.id)
+    )
+    candidates = [subscription for subscription in result.scalars().all() if subscription.user_id not in taken_user_ids]
+    if not candidates:
         return 0
 
+    chosen: dict[int, Subscription] = {}
+    for subscription in candidates:
+        current = chosen.get(subscription.user_id)
+        if current is None or _better_legacy_candidate(subscription, current):
+            chosen[subscription.user_id] = subscription
+
     now = datetime.now(UTC)
-    for subscription in subscriptions:
-        subscription.tariff_id = tariff.id
+    for subscription in chosen.values():
+        subscription.tariff_id = tariff_id
         subscription.updated_at = now
 
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Гонка с параллельным назначением или ручной правкой: метка — удобство,
+        # а не оплата, и ронять из-за неё старт или синхронизацию нельзя.
+        await db.rollback()
+        logger.warning(
+            'Не удалось назначить единственный тариф старым подпискам: конфликт уникальности',
+            tariff_id=tariff_id,
+        )
+        return 0
+
     logger.info(
         'Автоназначен единственный тариф старым подпискам',
-        tariff_id=tariff.id,
-        tariff_name=tariff.name,
-        subscriptions_count=len(subscriptions),
+        tariff_id=tariff_id,
+        tariff_name=tariff_name,
+        subscriptions_count=len(chosen),
     )
-    return len(subscriptions)
+    return len(chosen)
 
 
 async def load_period_prices_from_db(db: AsyncSession) -> None:

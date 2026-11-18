@@ -1372,6 +1372,7 @@ class RemnaWaveWebhookService:
         if snapshot.crypto_link and not self._is_valid_link(snapshot.crypto_link):
             snapshot = replace(snapshot, crypto_link=None)
 
+        from app.database.crud.premium_traffic import get_entitlement_squad_uuids
         from app.database.crud.transaction import get_last_subscription_payment_at
 
         paid_at = await get_last_subscription_payment_at(db, user.id)
@@ -1381,6 +1382,7 @@ class RemnaWaveWebhookService:
             policy=WEBHOOK,
             grace_open=grace_open,
             paid_at=paid_at,
+            entitled_squads=await get_entitlement_squad_uuids(db, subscription),
         )
         changed = bool(changed_fields)
         if panel_date_behind_paid_renewal(subscription, snapshot, paid_at=paid_at):

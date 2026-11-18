@@ -267,6 +267,92 @@ def test_empty_squad_list_means_the_panel_does_not_know():
     assert subscription.connected_squads == ['squad-a']
 
 
+def test_entitled_squad_survives_the_panel_answer():
+    """Снятый за перерасход премиум-сквад панель не отдаёт, но право на него остаётся.
+
+    Синхронизация не должна вычёркивать его из подписки, пока он есть в
+    локальном наборе: иначе после сброса периода возвращать было бы нечего, и
+    клиент остался бы без сервера, за который платит.
+    """
+    subscription = _sub()
+    subscription.connected_squads = ['squad-a', 'squad-lim']
+
+    changed = project_onto_subscription(
+        subscription,
+        PanelSnapshot(status='ACTIVE', squads=('squad-x',)),
+        now=NOW,
+        entitled_squads=('squad-lim',),
+    )
+
+    assert subscription.connected_squads == ['squad-x', 'squad-lim']
+    assert 'connected_squads' in changed
+
+
+def test_entitled_squad_missing_from_the_local_list_is_not_readded():
+    """Локальный набор — происхождение права: пропал оттуда, значит снят вручную.
+
+    Учётная строка и тариф может всё ещё разрешать сквад, но синхронизация не
+    имеет права выводить из них право заново: иначе ручное снятие отменялось бы
+    первым же чтением панели.
+    """
+    subscription = _sub()
+    subscription.connected_squads = []
+
+    project_onto_subscription(
+        subscription,
+        PanelSnapshot(status='ACTIVE', squads=('squad-x',)),
+        now=NOW,
+        entitled_squads=('squad-lim',),
+    )
+
+    assert subscription.connected_squads == ['squad-x']
+
+
+def test_empty_panel_list_does_not_drop_the_local_entitlement():
+    subscription = _sub()
+    subscription.connected_squads = ['squad-a', 'squad-lim']
+
+    project_onto_subscription(
+        subscription,
+        PanelSnapshot(status='ACTIVE', squads=()),
+        now=NOW,
+        entitled_squads=('squad-lim',),
+    )
+
+    assert subscription.connected_squads == ['squad-a', 'squad-lim']
+
+
+def test_entitled_squad_that_the_panel_still_lists_is_not_duplicated():
+    subscription = _sub()
+    subscription.connected_squads = ['squad-a', 'squad-lim']
+
+    changed = project_onto_subscription(
+        subscription,
+        PanelSnapshot(status='ACTIVE', squads=('squad-x', 'squad-lim')),
+        now=NOW,
+        entitled_squads=('squad-lim',),
+    )
+
+    assert subscription.connected_squads == ['squad-x', 'squad-lim']
+    assert 'connected_squads' in changed
+
+
+def test_entitled_squad_is_not_restored_while_billing_state_is_frozen_by_grace():
+    """Грейс владеет сквадами: право подождёт следующего обычного чтения."""
+    subscription = _sub()
+    subscription.connected_squads = []
+
+    project_onto_subscription(
+        subscription,
+        PanelSnapshot(status='ACTIVE', squads=('squad-x',)),
+        now=NOW,
+        grace_open=True,
+        entitled_squads=('squad-lim',),
+    )
+
+    assert subscription.connected_squads == []
+
+
 def test_links_are_refreshed():
     subscription = _sub()
 

@@ -3875,11 +3875,14 @@ async def sync_user_from_panel(
                 # ними, а снимок — уже показывать его оверлей. Признак, прочитанный
                 # после снимка, это видит (хранилище пишет его до оверлея в панели).
                 await db.refresh(sync_sub, list(GRACE_MARKER_FIELDS))
+                from app.database.crud.premium_traffic import get_entitlement_squad_uuids
+
                 changed_fields = project_onto_subscription(
                     sync_sub,
                     snapshot,
                     policy=ADMIN_PULL if request.update_subscription else ROUTINE,
                     trust_status=request.update_subscription,
+                    entitled_squads=await get_entitlement_squad_uuids(db, sync_sub),
                 )
                 # Одиночный режим: аккаунт найден по пользователю, строка подписки могла
                 # остаться без id после старого импорта. В мультитарифе привязка выше.

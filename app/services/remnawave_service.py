@@ -2321,6 +2321,7 @@ class RemnaWaveService:
                     # Полный проход выгружает весь список панели и применяет его
                     # минутами позже, поэтому снимку нельзя верить на слово:
                     # свежее webhook-обновление (оплата во время прохода) важнее.
+                    from app.database.crud.premium_traffic import get_entitlement_squad_uuids
                     from app.database.crud.subscription import is_recently_updated_by_webhook
                     from app.database.crud.transaction import get_last_subscription_payment_at
 
@@ -2333,6 +2334,7 @@ class RemnaWaveService:
                         snapshot_taken_at=snapshot_taken_at,
                         trust_status=not is_recently_updated_by_webhook(subscription),
                         paid_at=await get_last_subscription_payment_at(db, subscription.user_id),
+                        entitled_squads=await get_entitlement_squad_uuids(db, subscription),
                     )
 
                     stats['updated'] += 1
@@ -2503,6 +2505,7 @@ class RemnaWaveService:
             # Тот же полный проход, что и в мультитарифе: список панели выгружен
             # минутами раньше, поэтому снимку нельзя верить на слово, а всё, что
             # изменилось в боте после снимка, он не трогает.
+            from app.database.crud.premium_traffic import get_entitlement_squad_uuids
             from app.database.crud.transaction import get_last_subscription_payment_at
 
             changed = project_onto_subscription(
@@ -2513,6 +2516,7 @@ class RemnaWaveService:
                 policy=BULK_SNAPSHOT,
                 snapshot_taken_at=snapshot_taken_at,
                 paid_at=await get_last_subscription_payment_at(db, user.id),
+                entitled_squads=await get_entitlement_squad_uuids(db, subscription),
             )
             # Старый импорт оставлял строку без id панели — привязываем при первом проходе.
             await link_subscription_panel_identity(db, subscription, _normalize_panel_user_id(panel_user.get('id')))

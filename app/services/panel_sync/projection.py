@@ -21,7 +21,11 @@
   ACTIVE с прошедшей датой — истекла. Панель не назвала статус — статус не
   трогаем, а по своей дате истечение доводит мониторинг.
 * **Сквады** — пустой список игнорируется: он значит «панель ещё не знает», а не
-  «отобрать все инбаунды».
+  «отобрать все инбаунды». Сквад, право на который бот ведёт сам (премиум-учёт)
+  и который уже есть в текущем наборе подписки, панель вычеркнуть не может: так
+  снятый за перерасход сквад доживает до возврата после сброса периода
+  (``entitled_squads``). Сквада, которого в локальном наборе уже нет, проекция
+  не возвращает: его сняли вручную.
 * От устаревшего снимка полного прохода защищает его возраст
   (``snapshot_taken_at``): подписку, изменённую в боте после снимка (оплата,
   продление), снимок не трогает — иначе он откатывал бы только что оплаченный
@@ -38,6 +42,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
@@ -319,6 +324,40 @@ def panel_date_behind_paid_renewal(
     return (end_date - snapshot.expire_at).total_seconds() > _DATE_TOLERANCE_SECONDS
 
 
+def _squads_to_keep(
+    panel_squads: Sequence[str],
+    entitled_squads: Collection[str],
+    current_squads: Sequence[str] | None,
+) -> list[str] | None:
+    """Набор сквадов для записи в подписку: ответ панели плюс сохранённое право.
+
+    Пустой список панели значит «панель ещё не знает», а не «отобрать все» —
+    тогда возвращаем ``None``, и сквады не трогаем.
+
+    Право на премиум-сквад сохраняем, только пока сквад есть в ТЕКУЩЕМ наборе
+    подписки. Локальный набор — это происхождение права: воркер за перерасход
+    правит лишь эффективный список для панели (``effective_panel_squads``), а
+    ``connected_squads`` не трогает. Поэтому пропажа сквада из локального
+    набора означает не сбой синхронизации, а ручное снятие, и выводить право
+    заново из учётной строки или тарифа нельзя.
+
+    Панель могла не знать про снятый за перерасход сквад (мы сами убрали его
+    из ``activeInternalSquads``), и без сохранения право на него стиралось бы
+    первым же чтением панели. Сохранённые сквады идут в исходном локальном
+    порядке после набора панели; панель задаёт состав и порядок остальных.
+    """
+    panel = list(panel_squads)
+    if not panel:
+        return None
+    entitled = {str(squad_uuid) for squad_uuid in entitled_squads if squad_uuid}
+    preserved = [
+        str(squad_uuid)
+        for squad_uuid in dict.fromkeys(current_squads or ())
+        if squad_uuid and str(squad_uuid) in entitled and str(squad_uuid) not in panel
+    ]
+    return [*panel, *preserved]
+
+
 def project_onto_subscription(
     subscription,
     snapshot: PanelSnapshot,
@@ -329,6 +368,7 @@ def project_onto_subscription(
     trust_status: bool = True,
     snapshot_taken_at: datetime | None = None,
     paid_at: datetime | None = None,
+    entitled_squads: Collection[str] = (),
 ) -> set[str]:
     """Перенести состояние панели в подписку. Возвращает имена изменённых полей.
 
@@ -349,6 +389,15 @@ def project_onto_subscription(
 
     Ссылки на подписку (``shortUuid``, url, крипто-ссылка) переносятся всегда:
     они описывают аккаунт панели, а не биллинговое состояние, и грейсу не мешают.
+
+    ``entitled_squads`` — сквады, право на которые бот ведёт сам (строки учёта
+    премиум-трафика, см. ``get_entitlement_squad_uuids``). Панель не знает о
+    снятом за перерасход премиум-скваде — мы сами убрали его из
+    ``activeInternalSquads``, — поэтому её ответ не должен вычёркивать такой
+    сквад из права подписки, пока сквад остаётся в текущем
+    ``connected_squads``. Локальный набор и есть происхождение права: если
+    сквада в нём уже нет, его сняли вручную, и проекция не возвращает его
+    обратно, даже когда строка учёта и тариф всё ещё разрешают сквад.
     """
     moment = now or datetime.now(UTC)
     changed: set[str] = set()
@@ -483,9 +532,11 @@ def project_onto_subscription(
         changed.add('device_limit')
 
     # Пустой список сквадов значит «панель ещё не знает», а не «отобрать все».
-    if policy.takes_squads and snapshot.squads and set(snapshot.squads) != set(subscription.connected_squads or []):
-        subscription.connected_squads = list(snapshot.squads)
-        changed.add('connected_squads')
+    if policy.takes_squads and snapshot.squads:
+        squads = _squads_to_keep(snapshot.squads, entitled_squads, subscription.connected_squads)
+        if squads is not None and set(squads) != set(subscription.connected_squads or []):
+            subscription.connected_squads = squads
+            changed.add('connected_squads')
 
     return changed
 
