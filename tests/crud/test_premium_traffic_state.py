@@ -1,6 +1,7 @@
 """CRUD состояний премиум-лимита: жизненный цикл периода и защита от гонки."""
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import IntegrityError
@@ -16,6 +17,7 @@ from app.database.crud.premium_traffic import (
     get_states_for_subscription,
     record_usage,
     start_new_period,
+    sync_premium_state_limits,
 )
 from app.database.models import SubscriptionPremiumTraffic
 from app.utils.premium_traffic import BYTES_IN_GB
@@ -281,3 +283,90 @@ async def test_deleting_nothing_is_a_no_op(monkeypatch):
 
         assert await delete_states_for_squads(db, 1, set()) == 0
         assert len(await get_states_for_subscription(db, 1)) == 1
+
+
+def _tariff(limits):
+    return SimpleNamespace(server_traffic_limits=limits)
+
+
+async def test_tariff_switch_refreshes_limit_and_keeps_extra(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.extra_bytes = 2 * BYTES_IN_GB
+        await db.commit()
+
+        changed = await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 20}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert changed == 1
+        assert reread.limit_bytes == 20 * BYTES_IN_GB
+        assert reread.extra_bytes == 2 * BYTES_IN_GB
+
+
+async def test_tariff_switch_lowers_limit_of_an_open_squad(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _new_state(db, limit_bytes=20 * BYTES_IN_GB)
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 5}}))
+        await db.commit()
+
+        assert (await get_state(db, 1, SQUAD)).limit_bytes == 5 * BYTES_IN_GB
+
+
+async def test_tariff_switch_raises_limit_for_an_auto_limited_squad(monkeypatch):
+    """Апгрейд должен вернуть воркеру право восстановить снятый сквад."""
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.used_bytes = 5 * BYTES_IN_GB
+        state.is_limited = True
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 20}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.limit_bytes == 20 * BYTES_IN_GB
+        assert reread.is_limited is True
+
+
+async def test_tariff_switch_does_not_lower_limit_of_a_limited_squad(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db, limit_bytes=20 * BYTES_IN_GB)
+        state.used_bytes = 20 * BYTES_IN_GB
+        state.is_limited = True
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 5}}))
+        await db.commit()
+
+        assert (await get_state(db, 1, SQUAD)).limit_bytes == 20 * BYTES_IN_GB
+
+
+async def test_tariff_switch_leaves_admin_closed_squad_untouched(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.used_bytes = state.limit_bytes
+        state.is_limited = True
+        state.closed_at = NOW
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 20}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.limit_bytes == 5 * BYTES_IN_GB
+        assert reread.closed_at == NOW
+
+
+async def test_tariff_switch_ignores_squad_absent_from_new_tariff(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _new_state(db)
+        await db.commit()
+
+        changed = await sync_premium_state_limits(db, 1, _tariff({}))
+        await db.commit()
+
+        assert changed == 0
+        assert (await get_state(db, 1, SQUAD)).limit_bytes == 5 * BYTES_IN_GB

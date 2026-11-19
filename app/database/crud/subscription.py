@@ -1527,6 +1527,16 @@ async def extend_subscription(
 
         await _drop_orphan_premium_states(db, subscription, new_tariff)
 
+        from app.database.crud.premium_traffic import sync_premium_state_limits
+
+        updated_limits = await sync_premium_state_limits(db, subscription.id, new_tariff)
+        if updated_limits:
+            logger.info(
+                '💠 Смена тарифа: лимиты премиум-сквадов обновлены',
+                subscription_id=subscription.id,
+                updated_count=updated_limits,
+            )
+
     # В режиме fixed_with_topup при продлении базовый лимит возвращаем к
     # fixed_limit, но активные TrafficPurchase сохраняем (накопительно).
     # Раньше здесь был хардкод DELETE всех пакетов — это самая частая причина

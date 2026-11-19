@@ -230,6 +230,38 @@ def start_new_period(
     return state
 
 
+async def sync_premium_state_limits(
+    db: AsyncSession,
+    subscription_id: int,
+    tariff: object | None,
+) -> int:
+    """Подтянуть снимки лимитов к новому тарифу после смены тарифа подписки.
+
+    Сквад, оставшийся премиумным в новом тарифе, продолжает текущий период, но
+    потолок берётся из нового тарифа сразу — иначе экран показывает старый лимит
+    до ближайшего прохода воркера. Автоснятому скваду лимит только поднимаем:
+    опускание ограничило бы возврат доступа задним числом. Вручную закрытый
+    сквад (``closed_at``) не трогаем — это решение оператора.
+    """
+    from app.utils.premium_traffic import get_premium_squads_for_tariff
+
+    premium = get_premium_squads_for_tariff(tariff)
+    if not premium:
+        return 0
+
+    changed = 0
+    for state in await get_states_for_subscription(db, subscription_id):
+        config = premium.get(state.squad_uuid)
+        if config is None or state.closed_at is not None:
+            continue
+        if state.is_limited and config.limit_bytes <= (state.limit_bytes or 0):
+            continue
+        if state.limit_bytes != config.limit_bytes:
+            state.limit_bytes = config.limit_bytes
+            changed += 1
+    return changed
+
+
 def record_usage(
     state: SubscriptionPremiumTraffic,
     used_bytes: int,
