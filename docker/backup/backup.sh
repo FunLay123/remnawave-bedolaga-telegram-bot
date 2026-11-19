@@ -28,6 +28,7 @@ MAINTENANCE_TIME=${BACKUP_RESTIC_MAINTENANCE_TIME:-03:00}
 HEALTHCHECK_MAX_AGE_SECONDS=${BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS:-900}
 TMPFS_SIZE=${BACKUP_RESTIC_TMPFS_SIZE:-256m}
 MIN_FREE_MB=${BACKUP_RESTIC_MIN_FREE_MB:-16}
+REQUIRE_TMPFS=${BACKUP_RESTIC_REQUIRE_TMPFS:-true}
 
 # Standard Restic overrides win.  The fallback is deliberately a dedicated
 # repository, never the legacy remnawave-bot/ GFS folder.
@@ -52,6 +53,8 @@ LOOP_LOCK_DIR=
 OPERATION_LOCK_HELD=0
 LOOP_LOCK_HELD=0
 SLEEP_PID=
+TMPFS_OVERRIDE_WARNED=0
+MAINTENANCE_RAN_DAY=
 
 log() {
     printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
@@ -162,6 +165,10 @@ validate_config() {
         error "invalid BACKUP_RESTIC_MAINTENANCE_ENABLED=$MAINTENANCE_ENABLED; use true or false"
         return 1
     fi
+    if ! valid_bool "$REQUIRE_TMPFS"; then
+        error "invalid BACKUP_RESTIC_REQUIRE_TMPFS=$REQUIRE_TMPFS; use true or false"
+        return 1
+    fi
 
     if [ -n "${RESTIC_PASSWORD_FILE:-}" ]; then
         if [ ! -f "$RESTIC_PASSWORD_FILE" ] || [ ! -r "$RESTIC_PASSWORD_FILE" ] || [ ! -s "$RESTIC_PASSWORD_FILE" ]; then
@@ -179,8 +186,8 @@ validate_config() {
                 error 'rclone repository configured but RCLONE_CONFIG / RCLONE_CONFIG_DIR is empty'
                 return 1
             fi
-            if [ ! -s "$RCLONE_CONFIG" ]; then
-                error "rclone config is missing, empty or is not a regular file: $RCLONE_CONFIG"
+            if [ ! -f "$RCLONE_CONFIG" ] || [ ! -r "$RCLONE_CONFIG" ] || [ ! -s "$RCLONE_CONFIG" ]; then
+                error "rclone config is missing, unreadable, empty or not a regular file: $RCLONE_CONFIG"
                 return 1
             fi
             ;;
@@ -218,8 +225,18 @@ prepare_stage() {
         rm -rf "$stale"
     done
 
-    if [ -r /proc/mounts ] && ! grep -q "[[:space:]]${STAGE_DIR}[[:space:]]tmpfs[[:space:]]" /proc/mounts 2>/dev/null; then
-        log "WARN: $STAGE_DIR is not a tmpfs mount; Compose normally mounts a bounded tmpfs"
+    if [ "$REQUIRE_TMPFS" = true ]; then
+        if [ ! -r /proc/mounts ]; then
+            error "cannot verify that $STAGE_DIR is a tmpfs mount; refusing unbounded staging"
+            return 1
+        fi
+        if ! grep -q "[[:space:]]${STAGE_DIR}[[:space:]]tmpfs[[:space:]]" /proc/mounts 2>/dev/null; then
+            error "$STAGE_DIR is not a tmpfs mount; set BACKUP_RESTIC_REQUIRE_TMPFS=false only for synthetic tests"
+            return 1
+        fi
+    elif [ "$TMPFS_OVERRIDE_WARNED" -eq 0 ]; then
+        log "WARN: tmpfs enforcement disabled (synthetic/test override); stage=$STAGE_DIR"
+        TMPFS_OVERRIDE_WARNED=1
     fi
 }
 
@@ -416,7 +433,7 @@ run_backup() {
 
     dump="$WORK_DIR/db.dump"
     log 'dump: pg_dump -Fc --no-owner --no-privileges --no-password'
-    pg_dump -Fc --no-owner --no-privileges --no-password -f "$dump"
+    pg_dump -Fc --no-owner --no-privileges --no-password --lock-wait-timeout=30s -f "$dump"
     dump_rc=$?
     if [ "$dump_rc" -ne 0 ]; then
         backup_failed "$dump_rc" 'pg_dump failed'
@@ -441,7 +458,7 @@ run_backup() {
     log "snapshot: restic backup --stdin-filename remnawave-backup.tar (dry-run=$DRY_RUN)"
     set -- backup
     [ "$DRY_RUN" -eq 1 ] && set -- backup --dry-run
-    restic "$@" \
+    restic "$@" --no-cache \
         --host "$RESTIC_HOST" \
         --group-by "$RESTIC_GROUP_BY" \
         --tag "$RESTIC_TAG" \
@@ -486,12 +503,20 @@ update_maintenance_day() {
     fi
     rm -f "$tmp"
     log "WARN: cannot update $MAINTENANCE_DAY_FILE"
-    return 0
+    return 1
 }
 
 run_maintenance() {
     log 'maintenance: restic forget/prune with scoped retention policy'
-    set -- forget \
+    if [ "$DRY_RUN" -eq 0 ]; then
+        # Record the day BEFORE deleting anything.  If the marker cannot be
+        # persisted, refuse to prune rather than risk repeating it every 5 min.
+        if ! update_maintenance_day; then
+            error 'cannot persist maintenance day marker; refusing to run retention/prune'
+            return 1
+        fi
+    fi
+    set -- forget --no-cache \
         --host "$RESTIC_HOST" \
         --tag "$RESTIC_TAG" \
         --group-by "$RESTIC_GROUP_BY" \
@@ -505,7 +530,7 @@ run_maintenance() {
         restic "$@" --dry-run
         forget_rc=$?
         if [ "$forget_rc" -eq 0 ]; then
-            restic prune --dry-run
+            restic prune --no-cache --dry-run
             forget_rc=$?
         fi
     else
@@ -521,7 +546,6 @@ run_maintenance() {
         log 'maintenance dry-run: nothing was deleted'
     else
         log 'maintenance finished'
-        update_maintenance_day
     fi
     return 0
 }
@@ -531,6 +555,7 @@ maintenance_due() {
     today=$(date +%Y-%m-%d)
     last=$(cat "$MAINTENANCE_DAY_FILE" 2>/dev/null || true)
     [ "$last" = "$today" ] && return 1
+    [ "$MAINTENANCE_RAN_DAY" = "$today" ] && return 1
     current_time=$(date +%H:%M)
     if awk -v now="$current_time" -v at="$MAINTENANCE_TIME" 'BEGIN { exit !(now >= at) }'; then
         return 0
@@ -586,11 +611,10 @@ run_loop() {
         if [ "$backup_rc" -eq 0 ] && [ "$SHUTDOWN" -eq 0 ] && maintenance_due; then
             if ! run_maintenance; then
                 log 'WARN: maintenance failed; ordinary backup loop continues'
-                # Do not retry a failing maintenance every 5 minutes.  The
-                # operator can rerun it explicitly; ordinary backups stay on
-                # their 300-second schedule.
-                update_maintenance_day
             fi
+            # In-process at-most-once-per-day fallback: even if the persistent
+            # day marker is unwritable, do not retry prune every 5 minutes.
+            MAINTENANCE_RAN_DAY=$(date +%Y-%m-%d)
         fi
         release_operation_lock
         [ "$SHUTDOWN" -eq 0 ] || break

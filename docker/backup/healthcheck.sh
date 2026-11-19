@@ -18,11 +18,42 @@ log() {
     printf '[healthcheck] %s\n' "$*" >&2
 }
 
+# Bounded POSIX integer check: digits only, no leading zero, bounded length.
+# The length bound is deliberate: BusyBox `test` returns status 2 on integers
+# outside its supported range, and an `if test` would otherwise fail open.
+valid_bounded_uint() {
+    value=$1
+    min=$2
+    max=$3
+    max_digits=$4
+    case "$value" in
+        ''|*[!0-9]*|0*) return 1 ;;
+    esac
+    [ "${#value}" -le "$max_digits" ] || return 1
+    [ "$value" -ge "$min" ] && [ "$value" -le "$max" ] || return 1
+    return 0
+}
+
 ping_event() {
     event=$1
     [ -n "${PING_URL_FILE:-}" ] || return 0
-    [ -f "$PING_URL_FILE" ] || return 0
-    url=$(sed -n '1p' "$PING_URL_FILE" 2>/dev/null | tr -d '\r\n')
+    if [ ! -e "$PING_URL_FILE" ]; then
+        log "WARN: ping URL file is missing: $PING_URL_FILE"
+        return 0
+    fi
+    if [ ! -f "$PING_URL_FILE" ]; then
+        # Compose intentionally mounts /dev/null here to disable pings.  Other
+        # non-regular paths are reported and disabled.
+        if [ ! -c "$PING_URL_FILE" ]; then
+            log "WARN: ping URL file is not a regular file: $PING_URL_FILE"
+        fi
+        return 0
+    fi
+    if [ ! -s "$PING_URL_FILE" ]; then
+        log "WARN: ping URL file is empty: $PING_URL_FILE"
+        return 0
+    fi
+    url=$(sed -n '1p' "$PING_URL_FILE" 2>/dev/null | tr -d '\r\n') || true
     [ -n "$url" ] || return 0
     case "$url" in
         http://*|https://*) ;;
@@ -52,30 +83,34 @@ fail() {
     exit 1
 }
 
-case "$MAX_AGE" in
-    ''|*[!0-9]*|0*)
-        fail "invalid BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS=$MAX_AGE"
-        ;;
-esac
+if ! valid_bounded_uint "$MAX_AGE" 1 604800 6; then
+    fail "invalid BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS=$MAX_AGE; expected 1..604800"
+fi
 
 if [ ! -f "$MARKER" ]; then
     fail "missing freshness marker: $MARKER"
 fi
 
-last=$(sed -n '1p' "$MARKER" 2>/dev/null | tr -d '\r')
-case "${last:-}" in
-    ''|*[!0-9]*)
-        fail "corrupt freshness marker: $MARKER"
-        ;;
-esac
+last=$(sed -n '1p' "$MARKER" 2>/dev/null | tr -d '\r') || true
+# Epoch seconds are currently 10 digits.  12 digits keeps the arithmetic
+# comfortably inside a signed 64-bit range while rejecting absurd values.
+if ! valid_bounded_uint "$last" 1 999999999999 12; then
+    fail "corrupt freshness marker: $MARKER"
+fi
 
 now=$(date +%s)
-if [ "$last" -gt $((now + 300)) ]; then
-    fail "freshness marker is in the future: $last > $now"
+if ! valid_bounded_uint "$now" 1 999999999999 12; then
+    fail "cannot read a bounded current time: $now"
+fi
+future_limit=$((now + 300))
+# Fail closed even if the comparison itself errors.
+if ! [ "$last" -le "$future_limit" ]; then
+    fail "freshness marker is in the future or unreadable: $last > $future_limit"
 fi
 
 age=$((now - last))
-if [ "$age" -ge "$MAX_AGE" ]; then
+# Fail closed even if the comparison itself errors.
+if ! [ "$age" -lt "$MAX_AGE" ]; then
     fail "last successful snapshot is too old: ${age}s ago (limit ${MAX_AGE}s)"
 fi
 
