@@ -9,6 +9,7 @@ that is the artifact Restic stores and the operator restores.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -27,6 +28,7 @@ COMPOSE = ROOT / 'docker-compose.yml'
 DOCKERFILE = ROOT / 'docker' / 'backup' / 'Dockerfile'
 
 SH = shutil.which('sh')
+BASH = shutil.which('bash')
 
 pytestmark = pytest.mark.skipif(SH is None, reason='POSIX shell is not available')
 
@@ -555,6 +557,62 @@ def test_compose_keeps_backup_optional_and_secrets_out_of_env() -> None:
     assert any('/run/remnawave-backup' in str(item) and 'size=' in str(item) for item in backup.get('tmpfs', []))
     assert any(':ro' in str(item) and 'restic-password' in str(item) for item in backup['volumes'])
     assert any(':rw' in str(item) and 'rclone' in str(item) for item in backup['volumes'])
+
+
+def _bash_blocks(path: Path) -> list[str]:
+    text = path.read_text(encoding='utf-8')
+    return re.findall(r'```bash\n(.*?)```', text, flags=re.DOTALL)
+
+
+@pytest.mark.skipif(BASH is None, reason='bash is not available')
+def test_restore_bash_blocks_are_syntactically_valid() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        for index, block in enumerate(_bash_blocks(path), start=1):
+            result = subprocess.run(  # noqa: S603 - fixed bash binary and repository docs
+                [BASH, '-n'],
+                input=block,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert result.returncode == 0, f'{path.name} bash block {index}:\n{result.stderr}\n{block}'
+
+
+def test_restore_runbooks_use_snapshot_variable_and_container_user() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        assert '<snapshot-id>' not in text
+        assert 'SNAPSHOT_ID' in text
+        assert 'read -r SNAPSHOT_ID' in text
+        assert 'restic dump "$SNAPSHOT_ID"' in text
+        assert 'restic ls "$SNAPSHOT_ID"' in text
+        assert 'exec -T postgres sh -c' in text
+        assert 'restore_db="$1" -U "$POSTGRES_USER"' in text
+        assert 'restore_db="$RESTORE_DB" -U "$POSTGRES_USER"' not in text
+
+
+def test_cutover_and_rollback_unset_host_db_and_verify_effective_config() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        assert text.count('unset POSTGRES_DB') >= 2
+        assert text.count('up -d --no-deps --force-recreate bot backup') >= 2
+        assert 'BOT_DB=' in text
+        assert 'BACKUP_DB=' in text
+        assert '$RESTORE_DB' in text
+        assert '$ORIGINAL_DB' in text
+        assert 'ROLLBACK_DIR=' in text
+        assert '/tmp/remnawave-env-rollback' in text  # noqa: S108 - documented path
+        assert '${TMPDIR' not in text
+
+
+def test_restore_runbooks_clarify_tar_members_and_check_lock() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        assert 'В каталоге должны быть ровно `db.dump` и `.env`' not in text
+        assert 'tar' in text.lower()
+        assert 'restic check' in text
+        assert 'lock' in text.lower()
+        assert 'одноразовый бот' not in text
 
 
 def test_restore_runbooks_avoid_hardcoded_rename_and_use_private_tmpdir() -> None:
