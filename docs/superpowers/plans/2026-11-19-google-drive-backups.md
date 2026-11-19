@@ -711,3 +711,17 @@ The final review found and the fix pass addressed:
 - Restore docs use the backup container for rclone, define `DC`, stop `bot` and `backup` during restore, and include a fresh-host order.
 
 Deferred minors (recorded in the ledger): readme retry semantics, rclone listing error logging, head-of-line blocking, local pair split on partial upload, rclone config warning noise, healthcheck path derived from `BACKUP_DIR`, single-file `.env` mount replacement, restore cleanup and timeouts.
+
+## Second review fixes (2026-11-19)
+
+- `copy_tier` selects only complete pairs, persists the chosen base in `state/tier-<dir>.pending`, retries it, uploads `.env` before the dump, and skips a pair whose dump is older than 3× the dump interval.
+- `prune_remote` is pair-aware: it lists dumps and envs, keeps the newest N complete bases, deletes orphans and older files; if one side is empty, it skips and logs. `prune_local` reconciles orphans and removes older pairs together.
+- `upload_pending` uploads and moves pairs together; `main` reconciles orphan pending files and `.env.tmp`.
+- `.env` is mounted as the repo directory (`./:/src:ro`), so replacing the host file is visible to the container.
+- `valid_keep` rejects leading zeros and caps at 9999.
+- `upload_readme` returns non-zero on failure, so the daily marker is not written on failure.
+- `stop_grace_period: 60s`.
+- Fresh-host docs include the exact `rclone config create ... filename_encryption off directory_name_encryption false suffix none` commands and the empty salt note.
+- `RESTORE.md` defines `DC` at the top and treats `docker-compose.asteria.yml` as optional.
+- `remote_path()` builds `gcrypt:5min/...` with the required colon; the earlier `gcrypt/5min/...` form was invalid rclone syntax and was caught by the fake integration test.
+- `ENV_FILE` must be non-empty; `umask 077`; `RCLONE_TIMEOUT=2m`, `RCLONE_CONTIMEOUT=10s`, `RCLONE_RETRIES=3`.

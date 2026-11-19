@@ -63,6 +63,10 @@ RCLONE_CONFIG_GDRIVE_TOKEN='{"access_token":"...","token_type":"Bearer","refresh
 Сохрани этот JSON (или готовый `rclone.conf`) в менеджере паролей: без него на
 новом хосте не скачать даже `.env` из бэкапа.
 
+Для нового хоста нужен не только токен, но и настройки crypt:
+`filename_encryption=off`, `directory_name_encryption=false`, `suffix=none`,
+пустой salt. Надёжнее всего сохранить готовый `rclone.conf`.
+
 Если используешь собственный OAuth client, переведи его в production mode:
 в testing mode refresh-token живёт 7 дней и бэкапы перестанут ходить.
 
@@ -111,9 +115,12 @@ RCLONE_CONFIG_GCRYPT_PASSWORD=...
 `docker-compose.asteria.yml` пароль задан литералом, продублируй его в `.env`
 как `POSTGRES_PASSWORD` — иначе `pg_dump` не подключится.
 
-Все `BACKUP_GDRIVE_KEEP_*` — положительные целые. Ноль, пустое значение или
-опечатка не «отключают» уровень: контейнер завершится с ошибкой при старте,
-чтобы случайно не удалить все копии.
+Все `BACKUP_GDRIVE_KEEP_*` — положительные целые от 1 до 9999. Ноль, пустое
+значение, ведущий ноль или опечатка не «отключают» уровень: контейнер
+завершится с ошибкой при старте, чтобы случайно не удалить все копии.
+
+Выгрузка запускается на цикле дампа, поэтому `BACKUP_GDRIVE_UPLOAD_INTERVAL_SECONDS`
+меньше `BACKUP_GDRIVE_DUMP_INTERVAL_SECONDS` не ускорит её.
 
 ### 4. Запуск
 
@@ -121,6 +128,7 @@ RCLONE_CONFIG_GCRYPT_PASSWORD=...
 
 ```bash
 DC="docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.asteria.yml"
+# если docker-compose.asteria.yml на хосте нет — убери последний -f
 $DC up -d --build
 ```
 
@@ -152,6 +160,7 @@ docker inspect --format '{{.State.Health.Status}}' remnawave_bot_backup
 
 ```bash
 DC="docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.asteria.yml"
+# если docker-compose.asteria.yml на хосте нет — убери последний -f
 ```
 
 ### База
@@ -184,6 +193,7 @@ cat ./db.dump | $DC exec -T postgres sh -c \
 ```bash
 $DC start bot backup
 rm -f ./db.dump
+$DC exec backup rm -f /backups/restore.dump
 ```
 
 Бот и бэкапы должны быть остановлены, чтобы не писать в базу и не снимать её в
@@ -206,6 +216,7 @@ cp ./.env.restore ./.env
 chmod 600 .env
 $DC up -d
 rm -f ./.env.restore
+$DC exec backup rm -f /backups/env.restore
 ```
 
 `up -d` нужен, потому что `RCLONE_*` и `POSTGRES_*` подставляются в контейнеры
@@ -218,7 +229,19 @@ rm -f ./.env.restore
 Если сервера больше нет:
 
 1. Поставь rclone и создай remote `gdrive`/`gcrypt` по сохранённому токену и
-   паролю (или скопируй сохранённый `rclone.conf`).
+   паролю. Проще всего — сохранить готовый `rclone.conf` ещё при настройке.
+   Если его нет, настрой так (salt/`password2` должен быть пустым):
+
+```bash
+rclone config create gdrive drive scope drive token '<JSON из rclone authorize>'
+rclone config create gcrypt crypt \
+  remote gdrive:remnawave-bot \
+  filename_encryption off \
+  directory_name_encryption false \
+  suffix none \
+  password "$(rclone obscure '<пароль>')"
+```
+
 2. Скачай самый свежий `.env.bak` из любого уровня и положи его как `.env` рядом
    с compose-файлами.
 3. Подними только базу:
@@ -280,6 +303,11 @@ $DC exec backup sh -c 'ls -la /backups/pending /backups/local /backups/state'
 - `.env` содержит пароль БД, токен бота и ключи платёжных провайдеров. Его
   зашифрованная копия лежит рядом с дампами; не выкладывай папку публично.
 - Пароль crypt хранится отдельно. Потеряешь его — потеряешь все копии.
+- Не меняй `RCLONE_CONFIG_GCRYPT_PASSWORD` после первых бэкапов: старые объекты
+  станут нечитаемыми, а новые будут с другим ключом. Смена пароля — только с
+  перезаливкой или сохранением старого ключа.
+- Если у дампа почему-то нет парного `.env.bak` (старая копия или сбой),
+  используй ближайший предыдущий `.env.bak` или текущий `.env`.
 - `uploads`, `locales`, код и Redis не бэкапятся. Штатный ежедневный архив бота
   остаётся второй копией и продолжает работать.
 - `weekly` — скользящее окно 7 дней: дата в имени — первый дамп нового окна,

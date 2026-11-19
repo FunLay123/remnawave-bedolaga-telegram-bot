@@ -107,6 +107,7 @@ services:
       context: ./docker/backup
     container_name: remnawave_bot_backup
     restart: unless-stopped
+    stop_grace_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
@@ -142,8 +143,11 @@ services:
       RCLONE_CONFIG_GCRYPT_DIRECTORY_NAME_ENCRYPTION: 'false'
       RCLONE_CONFIG_GCRYPT_SUFFIX: 'none'
       RCLONE_CONFIG_GCRYPT_PASSWORD: '${RCLONE_CONFIG_GCRYPT_PASSWORD:-}'
+      RCLONE_TIMEOUT: 2m
+      RCLONE_CONTIMEOUT: 10s
+      RCLONE_RETRIES: '3'
     volumes:
-      - ./.env:/src/.env:ro
+      - ./:/src:ro
       - backup_data:/backups
     networks:
       - bot_network

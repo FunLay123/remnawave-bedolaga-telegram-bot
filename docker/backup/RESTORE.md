@@ -36,15 +36,17 @@
 
 Без пароля и конфига файлы не расшифровать. Этот `README.md` не зашифрован.
 
-## Если стек ещё работает
-
-Определи команду compose (добавь свои `-f` файлы):
+## Команда compose
 
 ```bash
-DC="docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.asteria.yml"
+DC="docker compose -f docker-compose.yml -f docker-compose.local.yml"
+# если на хосте есть docker-compose.asteria.yml — добавь -f docker-compose.asteria.yml
 ```
 
-Скачай нужную пару через контейнер `backup` — у него уже есть rclone-конфиг:
+## Если стек ещё работает
+
+Используй `$DC` из начала документа. Скачай нужную пару через контейнер
+`backup` — у него уже есть rclone-конфиг:
 
 ```bash
 $DC exec backup rclone copyto gcrypt:5min/26_January_2026_22-30.dump /backups/restore.dump
@@ -76,6 +78,7 @@ cat ./db.dump | $DC exec -T postgres sh -c \
 ```bash
 $DC start bot backup
 rm -f ./db.dump
+$DC exec backup rm -f /backups/restore.dump
 ```
 
 ## Восстановить `.env`
@@ -86,6 +89,7 @@ cp ./.env.restore ./.env
 chmod 600 .env
 $DC up -d
 rm -f ./.env.restore
+$DC exec backup rm -f /backups/env.restore
 ```
 
 `up -d` нужен, потому что переменные подставляются в контейнеры при создании.
@@ -97,7 +101,19 @@ rm -f ./.env.restore
 Если сервера больше нет:
 
 1. Поставь rclone и создай remote `gdrive`/`gcrypt` по сохранённому токену и
-   паролю (или скопируй сохранённый `rclone.conf`).
+   паролю. Проще всего — сохранить готовый `rclone.conf` ещё при настройке.
+   Если его нет, настрой так (salt/`password2` должен быть пустым):
+
+```bash
+rclone config create gdrive drive scope drive token '<JSON из rclone authorize>'
+rclone config create gcrypt crypt \
+  remote gdrive:remnawave-bot \
+  filename_encryption off \
+  directory_name_encryption false \
+  suffix none \
+  password "$(rclone obscure '<пароль>')"
+```
+
 2. Скачай самый свежий `.env.bak` и положи его как `.env` рядом с compose.
 3. Подними только базу: `$DC up -d postgres`.
 4. Скачай дамп и восстанови его:
@@ -121,4 +137,9 @@ $DC exec -T postgres sh -c \
 
 - `.env` содержит токены, пароль БД и ключи платёжных провайдеров. Не пересылай его и не выкладывай публично.
 - Пароль crypt не хранится в этой папке. Если он потерян, копии не расшифровать.
+- Не меняй `RCLONE_CONFIG_GCRYPT_PASSWORD` после первых бэкапов: старые объекты
+  станут нечитаемыми. Смена пароля — только с перезаливкой или сохранением
+  старого ключа.
+- Если у дампа нет парного `.env.bak` (старая копия или сбой), используй
+  ближайший предыдущий `.env.bak` или текущий `.env`.
 - После восстановления проверь, что бот видит базу и платежи, и только потом удаляй старые копии.

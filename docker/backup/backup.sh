@@ -1,5 +1,6 @@
 #!/bin/sh
 set -u
+umask 077
 export LC_ALL=C
 
 BACKUP_DIR=${BACKUP_DIR:-/backups}
@@ -21,19 +22,23 @@ PENDING="$BACKUP_DIR/pending"
 LOCAL="$BACKUP_DIR/local"
 STATE="$BACKUP_DIR/state"
 
-if [ -n "$RCLONE_PATH" ]; then
-    REMOTE_PREFIX="$RCLONE_REMOTE:$RCLONE_PATH"
-else
-    REMOTE_PREFIX="$RCLONE_REMOTE"
-fi
 DOCS_PREFIX="$RCLONE_DOCS_REMOTE:$BACKUP_GDRIVE_FOLDER"
+
+remote_path() {
+    if [ -n "$RCLONE_PATH" ]; then
+        printf '%s:%s/%s' "$RCLONE_REMOTE" "$RCLONE_PATH" "$1"
+    else
+        printf '%s:%s' "$RCLONE_REMOTE" "$1"
+    fi
+}
 
 valid_keep() {
     case "${1:-}" in
         ''|*[!0-9]*) return 1 ;;
-        *[!0]*) return 0 ;;
+        0*) return 1 ;;
     esac
-    return 1
+    [ "${#1}" -le 4 ] || return 1
+    return 0
 }
 
 drop_newest() {
@@ -43,12 +48,6 @@ drop_newest() {
         return 1
     fi
     tail -n +$((keep + 1))
-}
-
-select_prune_names() {
-    keep=$1
-    suffix=$2
-    grep "|.*${suffix}$" | sort -r | cut -d'|' -f2- | drop_newest "$keep"
 }
 
 timestamp_name() {
@@ -63,7 +62,7 @@ validate_keep() {
     name=$1
     value=$2
     if ! valid_keep "$value"; then
-        log "invalid $name=$value; must be a positive integer"
+        log "invalid $name=$value; must be an integer from 1 to 9999"
         exit 1
     fi
 }
@@ -116,14 +115,26 @@ dump_database() {
 upload_pending() {
     uploaded=0
 
-    for f in "$PENDING"/*.dump "$PENDING"/*.env.bak; do
-        [ -e "$f" ] || continue
-        name=$(basename "$f")
-        if rclone copyto "$f" "$REMOTE_PREFIX/5min/$name"; then
-            mv "$f" "$LOCAL/$name"
-            uploaded=$((uploaded + 1))
+    for dump in "$PENDING"/*.dump; do
+        [ -e "$dump" ] || continue
+        base=$(basename "$dump" .dump)
+        env_file="$PENDING/${base}.env.bak"
+
+        if [ ! -f "$env_file" ]; then
+            log "pending pair missing env: ${base}.dump"
+            return 1
+        fi
+
+        if rclone copyto "$env_file" "$(remote_path "5min/$(basename "$env_file")")" \
+            && rclone copyto "$dump" "$(remote_path "5min/$(basename "$dump")")"; then
+            if mv "$env_file" "$LOCAL/" && mv "$dump" "$LOCAL/"; then
+                uploaded=$((uploaded + 1))
+            else
+                log "local move FAILED: ${base}"
+                return 1
+            fi
         else
-            log "upload FAILED: $name"
+            log "upload FAILED: ${base}"
             return 1
         fi
     done
@@ -133,19 +144,93 @@ upload_pending() {
     fi
 }
 
+prune_is_safe() {
+    [ "${1:-0}" -gt 0 ] && [ "${2:-0}" -gt 0 ]
+}
+
+select_prune_pair_names() {
+    dumps=$1
+    envs=$2
+    keep=$3
+    keep_file="$dumps.keep"
+
+    if ! valid_keep "$keep"; then
+        echo "select_prune_pair_names: invalid keep=$keep" >&2
+        return 1
+    fi
+
+    : > "$keep_file"
+    kept=0
+
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        base=${name%.dump}
+        if grep -qxF "${base}.env.bak" "$envs"; then
+            printf '%s\n' "$name" >> "$keep_file"
+            printf '%s\n' "${base}.env.bak" >> "$keep_file"
+            kept=$((kept + 1))
+            [ "$kept" -ge "$keep" ] && break
+        fi
+    done < "$dumps"
+
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qxF "$name" "$keep_file" || printf '%s\n' "$name"
+    done < "$dumps"
+
+    while IFS= read -r name; do
+        [ -n "$name" ] || continue
+        grep -qxF "$name" "$keep_file" || printf '%s\n' "$name"
+    done < "$envs"
+
+    rm -f "$keep_file"
+}
+
 prune_remote() {
     dir=$1
     keep=$2
-    suffix=$3
+    tmp=$(mktemp -d)
+    remote_dir=$(remote_path "$dir")
 
-    rclone lsf "$REMOTE_PREFIX/$dir" --files-only --format "tp" --separator "|" \
-        --time-format "2006-01-02T15:04:05" 2>/dev/null \
-        | select_prune_names "$keep" "$suffix" \
+    if ! rclone lsf "$remote_dir" --files-only --include '*.dump' \
+        --format "tp" --separator "|" --time-format unix > "$tmp/dumps.raw" 2>/dev/null; then
+        log "prune listing FAILED: $dir/dumps"
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    if ! rclone lsf "$remote_dir" --files-only --include '*.env.bak' \
+        --format "tp" --separator "|" --time-format unix > "$tmp/envs.raw" 2>/dev/null; then
+        log "prune listing FAILED: $dir/envs"
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    sort -rn "$tmp/dumps.raw" | cut -d'|' -f2- > "$tmp/dumps"
+    sort -rn "$tmp/envs.raw" | cut -d'|' -f2- > "$tmp/envs"
+
+    dumps_count=$(wc -l < "$tmp/dumps" | tr -d ' ')
+    envs_count=$(wc -l < "$tmp/envs" | tr -d ' ')
+
+    if [ "$dumps_count" -eq 0 ] && [ "$envs_count" -eq 0 ]; then
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    if ! prune_is_safe "$dumps_count" "$envs_count"; then
+        log "prune skipped: orphan-only tier $dir (dumps=$dumps_count envs=$envs_count)"
+        rm -rf "$tmp"
+        return 0
+    fi
+
+    select_prune_pair_names "$tmp/dumps" "$tmp/envs" "$keep" \
         | while IFS= read -r name; do
             [ -n "$name" ] || continue
-            rclone deletefile "$REMOTE_PREFIX/$dir/$name" --drive-use-trash=false \
+            rclone deletefile "$(remote_path "$dir/$name")" --drive-use-trash=false \
                 || log "prune FAILED: $dir/$name"
         done
+
+    rm -rf "$tmp"
 }
 
 copy_tier() {
@@ -157,39 +242,76 @@ copy_tier() {
     current=$(cat "$STATE/$marker" 2>/dev/null || true)
     [ "$value" = "$current" ] && return 0
 
-    newest=$(ls -1t "$LOCAL"/*.dump 2>/dev/null | head -n 1)
-    [ -n "$newest" ] || return 0
+    pending_marker="$STATE/tier-$dir.pending"
+    base=$(cat "$pending_marker" 2>/dev/null || true)
 
-    base=$(basename "$newest" .dump)
+    if [ -z "$base" ]; then
+        for dump in $(ls -1t "$LOCAL"/*.dump 2>/dev/null); do
+            candidate=$(basename "$dump" .dump)
+            if [ -f "$LOCAL/${candidate}.env.bak" ]; then
+                base=$candidate
+                break
+            fi
+        done
+    fi
+    [ -n "$base" ] || return 0
+
+    dump="$LOCAL/${base}.dump"
     env_file="$LOCAL/${base}.env.bak"
-
-    if ! rclone copyto "$newest" "$REMOTE_PREFIX/$dir/$(basename "$newest")"; then
-        log "tier copy FAILED: $dir/$(basename "$newest")"
+    if [ ! -f "$dump" ] || [ ! -f "$env_file" ]; then
+        log "tier pair missing: $dir/$base"
+        rm -f "$pending_marker"
         return 0
     fi
 
-    if [ ! -f "$env_file" ]; then
-        log "tier env missing: $dir/$base"
+    max_age_min=$((DUMP_INTERVAL_SECONDS / 60 * 3))
+    [ "$max_age_min" -ge 5 ] || max_age_min=5
+    if ! find "$dump" -mmin "-$max_age_min" 2>/dev/null | grep -q .; then
+        log "tier skip: selected dump is stale ($dir/$base)"
+        rm -f "$pending_marker"
         return 0
     fi
 
-    if ! rclone copyto "$env_file" "$REMOTE_PREFIX/$dir/$(basename "$env_file")"; then
-        log "tier env copy FAILED: $dir/$(basename "$env_file")"
+    echo "$base" > "$pending_marker"
+
+    if ! rclone copyto "$env_file" "$(remote_path "$dir/$(basename "$env_file")")"; then
+        log "tier env copy FAILED: $dir/${base}.env.bak"
         return 0
     fi
 
+    if ! rclone copyto "$dump" "$(remote_path "$dir/$(basename "$dump")")"; then
+        log "tier copy FAILED: $dir/${base}.dump"
+        return 0
+    fi
+
+    rm -f "$pending_marker"
     echo "$value" > "$STATE/$marker"
-    prune_remote "$dir" "$keep" ".dump"
-    prune_remote "$dir" "$keep" ".env.bak"
+    prune_remote "$dir" "$keep"
 }
 
 prune_local() {
-    ls -1t "$LOCAL"/*.dump 2>/dev/null | drop_newest "$KEEP_5MIN" | while IFS= read -r f; do
-        [ -n "$f" ] && rm -f "$f"
+    for dump in "$LOCAL"/*.dump; do
+        [ -e "$dump" ] || continue
+        base=$(basename "$dump" .dump)
+        if [ ! -f "$LOCAL/${base}.env.bak" ]; then
+            log "remove orphan local dump: ${base}.dump"
+            rm -f "$dump"
+        fi
     done
 
-    ls -1t "$LOCAL"/*.env.bak 2>/dev/null | drop_newest "$KEEP_5MIN" | while IFS= read -r f; do
-        [ -n "$f" ] && rm -f "$f"
+    for env_file in "$LOCAL"/*.env.bak; do
+        [ -e "$env_file" ] || continue
+        base=$(basename "$env_file" .env.bak)
+        if [ ! -f "$LOCAL/${base}.dump" ]; then
+            log "remove orphan local env: ${base}.env.bak"
+            rm -f "$env_file"
+        fi
+    done
+
+    ls -1t "$LOCAL"/*.dump 2>/dev/null | drop_newest "$KEEP_5MIN" | while IFS= read -r dump; do
+        [ -n "$dump" ] || continue
+        base=$(basename "$dump" .dump)
+        rm -f "$dump" "$LOCAL/${base}.env.bak"
     done
 }
 
@@ -197,9 +319,10 @@ upload_readme() {
     [ -f "$README_SOURCE" ] || return 0
     if rclone copyto "$README_SOURCE" "$DOCS_PREFIX/README.md"; then
         log "README uploaded"
-    else
-        log "README upload FAILED"
+        return 0
     fi
+    log "README upload FAILED"
+    return 1
 }
 
 upload_readme_once() {
@@ -241,8 +364,24 @@ run_self_test() {
         echo "self-test FAIL: valid_keep rejected 12" >&2
         return 1
     fi
+    if ! valid_keep 9999; then
+        echo "self-test FAIL: valid_keep rejected 9999" >&2
+        return 1
+    fi
     if valid_keep 0; then
         echo "self-test FAIL: valid_keep accepted 0" >&2
+        return 1
+    fi
+    if valid_keep 00; then
+        echo "self-test FAIL: valid_keep accepted 00" >&2
+        return 1
+    fi
+    if valid_keep 012; then
+        echo "self-test FAIL: valid_keep accepted 012" >&2
+        return 1
+    fi
+    if valid_keep 10000; then
+        echo "self-test FAIL: valid_keep accepted 10000" >&2
         return 1
     fi
     if valid_keep abc; then
@@ -253,36 +392,100 @@ run_self_test() {
         echo "self-test FAIL: valid_keep accepted empty" >&2
         return 1
     fi
-    if valid_keep 00; then
-        echo "self-test FAIL: valid_keep accepted 00" >&2
+
+    if ! prune_is_safe 12 12; then
+        echo "self-test FAIL: prune_is_safe rejected 12/12" >&2
+        return 1
+    fi
+    if prune_is_safe 12 0; then
+        echo "self-test FAIL: prune_is_safe accepted 12/0" >&2
+        return 1
+    fi
+    if prune_is_safe 0 12; then
+        echo "self-test FAIL: prune_is_safe accepted 0/12" >&2
         return 1
     fi
 
-    listing=$(i=1; while [ "$i" -le 13 ]; do
-        printf '2026-01-%02dT00:00:00|26_January_2026_00-%02d.dump\n' "$i" "$i"
-        i=$((i + 1))
-    done)
-    out=$(printf '%s\n' "$listing" | select_prune_names 12 ".dump")
-    if [ "$out" != "26_January_2026_00-01.dump" ]; then
-        echo "self-test FAIL: dump prune expected 00-01, got $out" >&2
+    old_remote=$RCLONE_REMOTE
+    old_path=$RCLONE_PATH
+    RCLONE_REMOTE=gcrypt
+    RCLONE_PATH=
+    if [ "$(remote_path "5min/x.dump")" != "gcrypt:5min/x.dump" ]; then
+        echo "self-test FAIL: remote_path without path" >&2
         return 1
     fi
+    RCLONE_PATH=backups
+    if [ "$(remote_path "5min/x.dump")" != "gcrypt:backups/5min/x.dump" ]; then
+        echo "self-test FAIL: remote_path with path" >&2
+        return 1
+    fi
+    RCLONE_REMOTE=$old_remote
+    RCLONE_PATH=$old_path
 
-    listing=$(i=1; while [ "$i" -le 13 ]; do
-        printf '2026-01-%02dT00:00:00|26_January_2026_00-%02d.env.bak\n' "$i" "$i"
-        i=$((i + 1))
-    done)
-    out=$(printf '%s\n' "$listing" | select_prune_names 12 ".env.bak")
-    if [ "$out" != "26_January_2026_00-01.env.bak" ]; then
-        echo "self-test FAIL: env prune expected 00-01, got $out" >&2
+    tmp=$(mktemp -d)
+    i=13
+    while [ "$i" -ge 1 ]; do
+        printf '26_January_2026_00-%02d.dump\n' "$i" >> "$tmp/dumps"
+        printf '26_January_2026_00-%02d.env.bak\n' "$i" >> "$tmp/envs"
+        i=$((i - 1))
+    done
+    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 12)
+    count=$(printf '%s\n' "$out" | wc -l)
+    if [ "$count" -ne 2 ]; then
+        echo "self-test FAIL: pair prune expected 2, got $count" >&2
+        rm -rf "$tmp"
         return 1
     fi
+    first=$(printf '%s\n' "$out" | head -n 1)
+    if [ "$first" != "26_January_2026_00-01.dump" ]; then
+        echo "self-test FAIL: pair prune expected 00-01.dump, got $first" >&2
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
 
-    out=$(printf '2026-01-01T00:00:00|b.dump\n2026-01-01T00:00:00|a.dump\n' | select_prune_names 1 ".dump")
-    if [ "$out" != "a.dump" ]; then
-        echo "self-test FAIL: tie prune expected a.dump, got $out" >&2
+    tmp=$(mktemp -d)
+    printf '26_January_2026_00-99.dump\n' > "$tmp/dumps"
+    i=12
+    while [ "$i" -ge 1 ]; do
+        printf '26_January_2026_00-%02d.dump\n' "$i" >> "$tmp/dumps"
+        printf '26_January_2026_00-%02d.env.bak\n' "$i" >> "$tmp/envs"
+        i=$((i - 1))
+    done
+    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 12)
+    if [ "$out" != "26_January_2026_00-99.dump" ]; then
+        echo "self-test FAIL: orphan dump prune got $out" >&2
+        rm -rf "$tmp"
         return 1
     fi
+    rm -rf "$tmp"
+
+    tmp=$(mktemp -d)
+    printf '26_January_2026_00-99.env.bak\n' > "$tmp/envs"
+    i=12
+    while [ "$i" -ge 1 ]; do
+        printf '26_January_2026_00-%02d.dump\n' "$i" >> "$tmp/dumps"
+        printf '26_January_2026_00-%02d.env.bak\n' "$i" >> "$tmp/envs"
+        i=$((i - 1))
+    done
+    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 12)
+    if [ "$out" != "26_January_2026_00-99.env.bak" ]; then
+        echo "self-test FAIL: orphan env prune got $out" >&2
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
+
+    tmp=$(mktemp -d)
+    : > "$tmp/dumps"
+    : > "$tmp/envs"
+    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 0 2>/dev/null)
+    if [ -n "$out" ]; then
+        echo "self-test FAIL: invalid keep produced output" >&2
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
 
     tmp=$(mktemp -d)
     : > "$tmp/01_January_2026_00-00.dump"
@@ -303,15 +506,33 @@ run_self_test() {
 
 main() {
     mkdir -p "$PENDING" "$LOCAL" "$STATE"
-    rm -f "$PENDING"/.*.dump.tmp
+    rm -f "$PENDING"/.*.dump.tmp "$PENDING"/.*.env.tmp
+
+    for dump in "$PENDING"/*.dump; do
+        [ -e "$dump" ] || continue
+        base=$(basename "$dump" .dump)
+        if [ ! -f "$PENDING/${base}.env.bak" ]; then
+            log "remove orphan pending dump: ${base}.dump"
+            rm -f "$dump"
+        fi
+    done
+
+    for env_file in "$PENDING"/*.env.bak; do
+        [ -e "$env_file" ] || continue
+        base=$(basename "$env_file" .env.bak)
+        if [ ! -f "$PENDING/${base}.dump" ]; then
+            log "remove orphan pending env: ${base}.env.bak"
+            rm -f "$env_file"
+        fi
+    done
 
     if [ -z "${RCLONE_CONFIG_GDRIVE_TOKEN:-}" ] || [ -z "${RCLONE_CONFIG_GCRYPT_PASSWORD:-}" ]; then
         log "RCLONE_CONFIG_GDRIVE_TOKEN / RCLONE_CONFIG_GCRYPT_PASSWORD are empty; configure .env"
         exit 1
     fi
 
-    if [ ! -f "$ENV_FILE" ] || [ ! -r "$ENV_FILE" ]; then
-        log "ENV_FILE $ENV_FILE is missing or unreadable; refusing to start"
+    if [ ! -s "$ENV_FILE" ] || [ ! -r "$ENV_FILE" ]; then
+        log "ENV_FILE $ENV_FILE is missing, empty or unreadable; refusing to start"
         exit 1
     fi
 
@@ -334,8 +555,7 @@ main() {
         if [ $((now - last_upload)) -ge "$UPLOAD_INTERVAL_SECONDS" ]; then
             if upload_pending; then
                 last_upload=$now
-                prune_remote 5min "$KEEP_5MIN" ".dump"
-                prune_remote 5min "$KEEP_5MIN" ".env.bak"
+                prune_remote 5min "$KEEP_5MIN"
                 copy_tier hourly "$KEEP_HOURLY" hourly "$(date +%Y%m%d%H)"
                 copy_tier daily "$KEEP_DAILY" daily "$(date +%Y%m%d)"
                 copy_tier weekly "$KEEP_WEEKLY" weekly "$(( $(date +%s) / 604800 ))"
