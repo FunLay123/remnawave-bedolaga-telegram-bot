@@ -389,6 +389,8 @@ main() {
         if [ $((now - last_upload)) -ge "$UPLOAD_INTERVAL_SECONDS" ]; then
             if upload_pending; then
                 last_upload=$now
+                prune_remote 5min "$KEEP_5MIN" ".dump"
+                prune_remote 5min "$KEEP_5MIN" ".env.bak"
                 copy_tier hourly "$KEEP_HOURLY" hourly "$(date +%Y%m%d%H)"
                 copy_tier daily "$KEEP_DAILY" daily "$(date +%Y%m%d)"
                 copy_tier weekly "$KEEP_WEEKLY" weekly "$(( $(date +%s) / 604800 ))"
