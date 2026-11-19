@@ -203,8 +203,8 @@ Compose и скрипт используют запись `${VAR:-default}`: **�
 DC="docker compose -f docker-compose.yml -f docker-compose.local.yml"
 # если на хосте есть docker-compose.asteria.yml — добавь -f docker-compose.asteria.yml
 
-$DC --profile backup run --rm --no-deps --entrypoint restic backup init
-$DC --profile backup run --rm --no-deps --entrypoint restic backup snapshots
+$DC --profile backup run --rm --no-deps --entrypoint restic backup --no-cache init
+$DC --profile backup run --rm --no-deps --entrypoint restic backup --no-cache snapshots
 ```
 
 Вторая команда должна показать пустой список и завершиться успешно. Если Restic
@@ -220,8 +220,8 @@ $DC --profile backup run --rm --no-deps --entrypoint restic backup snapshots
 ```bash
 $DC --profile backup up -d --build backup
 $DC logs -f backup
-$DC exec backup restic snapshots
-$DC exec backup restic ls latest
+$DC exec backup restic --no-cache snapshots
+$DC exec backup restic --no-cache ls latest
 ```
 
 Первый цикл выполняется сразу после старта, затем — на ближайшем будущем
@@ -253,7 +253,7 @@ export BACKUP_RESTIC_REQUIRE_TMPFS=false
 export ENV_FILE=/tmp/app.env
 restic init
 backup.sh --once
-restic snapshots
+restic --no-cache snapshots
 ```
 
 Для проверки именно rclone-бэкенда можно создать локальный remote:
@@ -370,18 +370,18 @@ RESTORE_DIR=$(mktemp -d /tmp/remnawave-restore.XXXXXX)
 chmod 700 "$RESTORE_DIR"
 trap 'rm -rf "$RESTORE_DIR"' EXIT
 
-$DC exec backup restic snapshots
+$DC exec backup restic --no-cache snapshots
 # restic check запускай, когда backup не держит operation lock (loop спит
 # между слотами). Не делай unlock, пока идёт активный backup.
-$DC exec backup restic check
+$DC exec backup restic --no-cache check
 if [ -z "${SNAPSHOT_ID:-}" ]; then
     printf 'Snapshot ID: '
     read -r SNAPSHOT_ID
 fi
 [ -n "$SNAPSHOT_ID" ] || { echo 'SNAPSHOT_ID is required' >&2; exit 1; }
 
-$DC exec backup restic ls "$SNAPSHOT_ID"
-$DC exec -T backup restic dump "$SNAPSHOT_ID" remnawave-backup.tar \
+$DC exec backup restic --no-cache ls "$SNAPSHOT_ID"
+$DC exec -T backup restic --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
   > "$RESTORE_DIR/remnawave-backup.tar"
 tar -C "$RESTORE_DIR" -xf "$RESTORE_DIR/remnawave-backup.tar"
 chmod 600 "$RESTORE_DIR/db.dump" "$RESTORE_DIR/.env"
@@ -408,7 +408,9 @@ $DC stop bot backup
 
 ORIGINAL_DB=$($DC exec -T postgres sh -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
 [ -n "$ORIGINAL_DB" ] || { echo 'POSTGRES_DB is empty' >&2; exit 1; }
-RESTORE_DB="${ORIGINAL_DB}_restore_$(date +%Y%m%d%H%M%S)"
+# Fixed short ASCII prefix + timestamp/PID, independent of ORIGINAL_DB:
+# PostgreSQL truncates identifiers over 63 bytes, including multibyte names.
+RESTORE_DB="remnawave_restore_$(date +%Y%m%d%H%M%S)_$$"
 echo "original=$ORIGINAL_DB restore=$RESTORE_DB"
 
 # SQL identifier quoting: psql :"restore_db" -> CREATE DATABASE "name".
@@ -522,7 +524,7 @@ rm -rf "$ROLLBACK_DIR"
 1. Поставь Docker/Compose, `restic` и `rclone` (или используй образ sidecar).
 2. Восстанови из офлайн-копии `rclone.conf` и файл пароля Restic. Не делай
    `restic init` — репозиторий уже существует.
-3. Проверь доступ: `restic snapshots`.
+3. Проверь доступ: `restic --no-cache snapshots`.
 4. Подними только базовые сервисы и подготовь пустую БД:
    `$DC up -d --no-deps postgres redis`; создай свежую БД и восстанови снапшот
    по шагам выше.
@@ -555,8 +557,9 @@ rm -rf "$ROLLBACK_DIR"
 - Пятиминутный интервал — это **целевая частота, а не гарантированный RPO**.
   Без WAL фактический разрыв зависит от длительности дампа/загрузки и ошибок;
   потеря последних минут данных при аварии возможна.
-- Restic запускается с `--no-cache`, поэтому кэш не растёт неограниченно в
-  writable layer контейнера. Цена — повторное чтение индексов из rclone.
+- Restic запускается с `--no-cache` в automated sidecar и в ручных restore/check
+  командах runbook, поэтому кэш не растёт неограниченно в writable layer
+  контейнера. Цена — повторное чтение индексов из rclone.
 - `RCLONE_TIMEOUT=2m` — это idle timeout одной I/O-операции, а
   `RCLONE_CONTIMEOUT=10s` — только установка соединения. `RCLONE_RETRIES=3`
   ограничивает число повторов; это **не** общий дедлайн всего upload/restore.

@@ -22,18 +22,18 @@ RESTORE_DIR=$(mktemp -d /tmp/remnawave-restore.XXXXXX)
 chmod 700 "$RESTORE_DIR"
 trap 'rm -rf "$RESTORE_DIR"' EXIT
 
-$DC exec backup restic snapshots
+$DC exec backup restic --no-cache snapshots
 # restic check запускай, когда backup не держит operation lock (loop спит
 # между слотами). Не делай unlock, пока идёт активный backup.
-$DC exec backup restic check
+$DC exec backup restic --no-cache check
 if [ -z "${SNAPSHOT_ID:-}" ]; then
     printf 'Snapshot ID: '
     read -r SNAPSHOT_ID
 fi
 [ -n "$SNAPSHOT_ID" ] || { echo 'SNAPSHOT_ID is required' >&2; exit 1; }
 
-$DC exec backup restic ls "$SNAPSHOT_ID"
-$DC exec -T backup restic dump "$SNAPSHOT_ID" remnawave-backup.tar \
+$DC exec backup restic --no-cache ls "$SNAPSHOT_ID"
+$DC exec -T backup restic --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
   > "$RESTORE_DIR/remnawave-backup.tar"
 tar -C "$RESTORE_DIR" -xf "$RESTORE_DIR/remnawave-backup.tar"
 chmod 600 "$RESTORE_DIR/db.dump" "$RESTORE_DIR/.env"
@@ -55,7 +55,9 @@ $DC stop bot backup
 
 ORIGINAL_DB=$($DC exec -T postgres sh -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
 [ -n "$ORIGINAL_DB" ] || { echo 'POSTGRES_DB is empty' >&2; exit 1; }
-RESTORE_DB="${ORIGINAL_DB}_restore_$(date +%Y%m%d%H%M%S)"
+# Fixed short ASCII prefix + timestamp/PID, independent of ORIGINAL_DB:
+# PostgreSQL truncates identifiers over 63 bytes, including multibyte names.
+RESTORE_DB="remnawave_restore_$(date +%Y%m%d%H%M%S)_$$"
 
 # psql :"restore_db" безопасно квотирует идентификатор. POSTGRES_USER должен
 # раскрыться внутри контейнера, а не в host shell под set -u.
@@ -161,7 +163,7 @@ rm -rf "$ROLLBACK_DIR"
 
 1. Восстанови из офлайн-копии `rclone.conf` и файл пароля Restic.
 2. Не выполняй `restic init`: репозиторий уже существует.
-3. Проверь `restic snapshots`, подними базовые сервисы:
+3. Проверь `restic --no-cache snapshots`, подними базовые сервисы:
    `$DC up -d --no-deps postgres redis`.
 4. Создай свежую БД и повтори шаги 1–3. В `.env` укажи `POSTGRES_DB`
    восстановленной БД.

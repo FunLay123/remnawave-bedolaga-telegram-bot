@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -578,14 +579,43 @@ def test_restore_bash_blocks_are_syntactically_valid() -> None:
             assert result.returncode == 0, f'{path.name} bash block {index}:\n{result.stderr}\n{block}'
 
 
+def _restore_db_expression(path: Path) -> str:
+    match = re.search(r'^RESTORE_DB=(.+)$', path.read_text(encoding='utf-8'), flags=re.MULTILINE)
+    assert match, f'RESTORE_DB assignment missing in {path}'
+    return match.group(0)
+
+
+@pytest.mark.skipif(BASH is None, reason='bash is not available')
+@pytest.mark.parametrize('original', ['a' * 63, 'ж' * 63, 'x' * 200])
+def test_restore_db_name_is_short_ascii_and_independent(original: str) -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        expression = _restore_db_expression(path)
+        script = f'ORIGINAL_DB={shlex.quote(original)}\n{expression}\nprintf "%s" "$RESTORE_DB"'
+        result = subprocess.run(  # noqa: S603 - fixed bash binary and repository docs
+            [BASH, '-c', script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        name = result.stdout
+        assert re.fullmatch(r'remnawave_restore_[0-9]{14}_[0-9]+', name), name
+        assert len(name.encode('utf-8')) <= 63
+        assert original not in name
+
+
 def test_restore_runbooks_use_snapshot_variable_and_container_user() -> None:
     for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
         text = path.read_text(encoding='utf-8')
         assert '<snapshot-id>' not in text
         assert 'SNAPSHOT_ID' in text
         assert 'read -r SNAPSHOT_ID' in text
-        assert 'restic dump "$SNAPSHOT_ID"' in text
-        assert 'restic ls "$SNAPSHOT_ID"' in text
+        assert 'restic --no-cache snapshots' in text
+        assert 'restic --no-cache check' in text
+        assert 'restic --no-cache ls "$SNAPSHOT_ID"' in text
+        assert 'restic --no-cache dump "$SNAPSHOT_ID"' in text
+        assert '$DC exec backup restic snapshots' not in text
+        assert '$DC exec backup restic dump' not in text
         assert 'exec -T postgres sh -c' in text
         assert 'restore_db="$1" -U "$POSTGRES_USER"' in text
         assert 'restore_db="$RESTORE_DB" -U "$POSTGRES_USER"' not in text
