@@ -622,7 +622,9 @@ async def fulfill_purchase(
         await db.refresh(purchase, attribute_names=['landing', 'user', 'buyer'])
 
         _panel_user_id = (
-            subscription.remnawave_id if settings.is_multi_tariff_enabled() else user.remnawave_id
+            subscription.remnawave_id
+            if settings.is_multi_tariff_enabled()
+            else subscription.remnawave_id or user.remnawave_id
         )
         request_premium_traffic_refresh(subscription, _panel_user_id, tariff=tariff)
 
@@ -1659,7 +1661,9 @@ async def activate_purchase(db: AsyncSession, purchase_token: str, *, skip_notif
         # Снимок белых списков уже обновлён, но воркер должен увидеть новый
         # тариф сразу — иначе снятый за расход сквад ждёт до пяти минут.
         _panel_user_id = (
-            subscription.remnawave_id if settings.is_multi_tariff_enabled() else user.remnawave_id
+            subscription.remnawave_id
+            if settings.is_multi_tariff_enabled()
+            else subscription.remnawave_id or user.remnawave_id
         )
         request_premium_traffic_refresh(subscription, _panel_user_id, tariff=tariff)
 

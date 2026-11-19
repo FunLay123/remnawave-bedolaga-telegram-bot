@@ -2296,9 +2296,11 @@ async def test_stop_interrupts_the_sleep_and_ends_the_loop(monkeypatch):
 
     monkeypatch.setattr(service, 'process_once', _process_once)
     task = asyncio.create_task(service.start_monitoring())
-    await asyncio.wait_for(first_pass.wait(), timeout=1)
-    service.stop()
-    await asyncio.wait_for(task, timeout=1)
+    try:
+        await asyncio.wait_for(first_pass.wait(), timeout=1)
+    finally:
+        service.stop()
+        await asyncio.wait_for(task, timeout=1)
 
 
 def test_request_pass_invalidates_the_panel_user_cache():

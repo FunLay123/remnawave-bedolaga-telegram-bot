@@ -736,6 +736,64 @@ class TestGiftSubscriptionActivationSingleTariff:
             assert sub.device_limit == t2.device_limit
 
     @pytest.mark.asyncio
+    async def test_activation_wakes_premium_worker_with_explicit_tariff(self, monkeypatch):
+        """Regression: the wake must receive the loaded tariff, not resolve it lazily.
+
+        `activate_purchase` does `db.refresh(subscription)` before the wake; the
+        lazy `subscription.tariff` then raises MissingGreenlet and the helper's
+        except silently swallows the wake.
+        """
+        monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', False)
+
+        async with memory_session(monkeypatch, _TABLES) as db:
+            t1, t2 = await _seed_tariffs_and_settings(db)
+
+            recipient = User(telegram_id=22222, username='rec', balance_kopeks=0)
+            db.add(recipient)
+            await db.commit()
+            await db.refresh(recipient)
+
+            now = datetime.now(UTC)
+            sub = Subscription(
+                user_id=recipient.id,
+                tariff_id=t1.id,
+                status=SubscriptionStatus.ACTIVE.value,
+                is_trial=False,
+                start_date=now,
+                end_date=now + timedelta(days=30),
+                traffic_limit_gb=50,
+                device_limit=2,
+            )
+            db.add(sub)
+            await db.commit()
+
+            token = generate_purchase_token()
+            purchase = GuestPurchase(
+                token=token,
+                contact_type='telegram',
+                contact_value=str(recipient.telegram_id),
+                is_gift=True,
+                status=GuestPurchaseStatus.PENDING_ACTIVATION.value,
+                tariff_id=t2.id,
+                period_days=30,
+                amount_kopeks=60000,
+                user_id=recipient.id,
+            )
+            db.add(purchase)
+            await db.commit()
+
+            wake = MagicMock()
+            with (
+                patch('app.services.subscription_service.SubscriptionService.create_remnawave_user', AsyncMock()),
+                patch('app.services.guest_purchase_service.request_premium_traffic_refresh', wake),
+            ):
+                activated = await activate_purchase(db, token, skip_notification=True)
+
+            assert activated.status == GuestPurchaseStatus.DELIVERED.value
+            wake.assert_called_once()
+            assert wake.call_args.kwargs['tariff'].id == t2.id
+
+    @pytest.mark.asyncio
     async def test_expired_subscription_replaced_with_gifted_tariff(self, monkeypatch):
         """In single-tariff mode, claiming a gift on expired subscription replaces it with fresh dates."""
         monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', False)

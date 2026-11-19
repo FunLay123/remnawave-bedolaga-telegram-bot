@@ -456,6 +456,26 @@ async def test_tariff_switch_rearms_warning_for_an_open_squad_on_raise(monkeypat
         assert reread.notified_90 is False
 
 
+async def test_tariff_switch_rearms_warning_with_extra_bytes(monkeypatch):
+    """Свободное место считается от base + extra, а не только от нового base."""
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.extra_bytes = 2 * BYTES_IN_GB
+        state.used_bytes = 7 * BYTES_IN_GB
+        state.is_limited = True
+        state.notified_80 = True
+        state.notified_90 = True
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 10}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.limit_bytes == 10 * BYTES_IN_GB
+        assert reread.notified_80 is False
+        assert reread.notified_90 is False
+
+
 async def test_tariff_switch_does_not_rearm_warning_when_limit_is_lowered(monkeypatch):
     """Понижение не создаёт новую квоту — старое предупреждение остаётся в силе."""
     async with memory_session(monkeypatch, TABLES) as db:

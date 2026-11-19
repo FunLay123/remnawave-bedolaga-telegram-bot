@@ -18,6 +18,7 @@ from tests.fixtures.sqlite_memory import memory_session
 
 TABLES = list(Base.metadata.sorted_tables)
 SQUAD = 'e4f819ca-2cfd-4425-9354-16a262b180c1'
+OTHER_SQUAD = '82a12389-14d6-40c6-b320-4674f6bbb344'
 NOW = datetime.now(UTC)
 
 
@@ -113,6 +114,8 @@ async def test_extend_subscription_refreshes_premium_snapshot(monkeypatch):
         )
         await db.commit()
 
+        await db.refresh(subscription)
+        assert subscription.tariff_id == 2
         assert await _premium_limit(db) == 20 * BYTES_IN_GB
 
 
@@ -135,7 +138,86 @@ async def test_replace_subscription_refreshes_premium_snapshot(monkeypatch):
         )
         await db.commit()
 
+        await db.refresh(subscription)
+        assert subscription.tariff_id == 2
         assert await _premium_limit(db) == 20 * BYTES_IN_GB
+
+
+async def test_failed_premium_sync_does_not_roll_back_tariff_change(monkeypatch):
+    """Auxiliary snapshot failure must not undo a paid tariff change.
+
+    The savepoint wraps only the premium helper; the subscription's new
+    tariff_id and limits are flushed before it and still commit.
+    """
+    _configure(monkeypatch)
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(db)
+        subscription = await db.get(Subscription, 10)
+
+        from app.database.crud import premium_traffic as premium_crud
+
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError('premium snapshot failed')
+
+        monkeypatch.setattr(premium_crud, 'sync_premium_state_limits', _boom)
+
+        await extend_subscription(
+            db,
+            subscription,
+            30,
+            tariff_id=2,
+            traffic_limit_gb=20,
+            device_limit=3,
+            connected_squads=[SQUAD],
+            commit=False,
+        )
+        await db.commit()
+
+        await db.refresh(subscription)
+        assert subscription.tariff_id == 2
+        # Savepoint rolled the snapshot back; the periodic worker will retry.
+        assert await _premium_limit(db) == 3 * BYTES_IN_GB
+
+
+async def test_failed_orphan_cleanup_does_not_roll_back_tariff_change(monkeypatch):
+    """A failing orphan delete is inside the same savepoint and cannot poison the purchase."""
+    _configure(monkeypatch)
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(db)
+        db.add(
+            SubscriptionPremiumTraffic(
+                subscription_id=10,
+                squad_uuid=OTHER_SQUAD,
+                limit_bytes=3 * BYTES_IN_GB,
+                period_start_at=NOW,
+            )
+        )
+        await db.commit()
+        subscription = await db.get(Subscription, 10)
+
+        from app.database.crud import premium_traffic as premium_crud
+
+        async def _boom(*_args, **_kwargs):
+            raise RuntimeError('orphan cleanup failed')
+
+        monkeypatch.setattr(premium_crud, 'delete_states_for_squads', _boom)
+
+        await extend_subscription(
+            db,
+            subscription,
+            30,
+            tariff_id=2,
+            traffic_limit_gb=20,
+            device_limit=3,
+            connected_squads=[SQUAD],
+            commit=False,
+        )
+        await db.commit()
+
+        await db.refresh(subscription)
+        assert subscription.tariff_id == 2
+        # The savepoint rolled back the partial orphan cleanup; the row survives.
+        assert await _premium_limit(db) == 3 * BYTES_IN_GB
 
 
 async def test_replace_subscription_refreshes_same_tariff_after_limit_edit(monkeypatch):
