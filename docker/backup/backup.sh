@@ -1,584 +1,719 @@
 #!/bin/sh
+# Optional PostgreSQL + .env backup sidecar.
+#
+# One interval = one atomic Restic snapshot.  The dump and the current .env are
+# staged together in a private directory and published as a single tar stream,
+# so a snapshot can never contain only half of the pair.  Failed intervals are
+# not queued: the next interval starts a fresh dump.
 set -u
 umask 077
 export LC_ALL=C
 
-BACKUP_DIR=${BACKUP_DIR:-/backups}
 ENV_FILE=${ENV_FILE:-/src/.env}
-README_SOURCE=${README_SOURCE:-/usr/local/share/remnawave-backup/RESTORE.md}
-DUMP_INTERVAL_SECONDS=${DUMP_INTERVAL_SECONDS:-300}
-UPLOAD_INTERVAL_SECONDS=${UPLOAD_INTERVAL_SECONDS:-300}
-KEEP_5MIN=${KEEP_5MIN:-12}
-KEEP_HOURLY=${KEEP_HOURLY:-24}
-KEEP_DAILY=${KEEP_DAILY:-30}
-KEEP_WEEKLY=${KEEP_WEEKLY:-12}
-KEEP_MONTHLY=${KEEP_MONTHLY:-12}
-RCLONE_REMOTE=${RCLONE_REMOTE:-gcrypt}
-RCLONE_PATH=${RCLONE_PATH:-}
-RCLONE_DOCS_REMOTE=${RCLONE_DOCS_REMOTE:-gdrive}
-BACKUP_GDRIVE_FOLDER=${BACKUP_GDRIVE_FOLDER:-remnawave-bot}
+STAGE_DIR=${BACKUP_RESTIC_STAGE_DIR:-/run/remnawave-backup}
+STATE_DIR=${BACKUP_RESTIC_STATE_DIR:-/backups/restic/state}
+MARKER="$STATE_DIR/last_success"
+MAINTENANCE_DAY_FILE="$STATE_DIR/last_maintenance_day"
+LOCK_FILE="$STATE_DIR/operation.lock"
+LOOP_LOCK_FILE="$STATE_DIR/loop.lock"
 
-PENDING="$BACKUP_DIR/pending"
-LOCAL="$BACKUP_DIR/local"
-STATE="$BACKUP_DIR/state"
+INTERVAL_SECONDS=${BACKUP_RESTIC_INTERVAL_SECONDS:-300}
+KEEP_LAST=${BACKUP_RESTIC_KEEP_LAST:-12}
+KEEP_HOURLY=${BACKUP_RESTIC_KEEP_HOURLY:-24}
+KEEP_DAILY=${BACKUP_RESTIC_KEEP_DAILY:-30}
+KEEP_WEEKLY=${BACKUP_RESTIC_KEEP_WEEKLY:-12}
+KEEP_MONTHLY=${BACKUP_RESTIC_KEEP_MONTHLY:-12}
+MAINTENANCE_ENABLED=${BACKUP_RESTIC_MAINTENANCE_ENABLED:-true}
+MAINTENANCE_TIME=${BACKUP_RESTIC_MAINTENANCE_TIME:-03:00}
+HEALTHCHECK_MAX_AGE_SECONDS=${BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS:-900}
+TMPFS_SIZE=${BACKUP_RESTIC_TMPFS_SIZE:-256m}
+MIN_FREE_MB=${BACKUP_RESTIC_MIN_FREE_MB:-16}
 
-DOCS_PREFIX="$RCLONE_DOCS_REMOTE:$BACKUP_GDRIVE_FOLDER"
+# Standard Restic overrides win.  The fallback is deliberately a dedicated
+# repository, never the legacy remnawave-bot/ GFS folder.
+RESTIC_REPOSITORY=${RESTIC_REPOSITORY:-${BACKUP_RESTIC_REPOSITORY:-rclone:gdrive:remnawave-restic}}
+export RESTIC_REPOSITORY
 
-remote_path() {
-    if [ -n "$RCLONE_PATH" ]; then
-        printf '%s:%s/%s' "$RCLONE_REMOTE" "$RCLONE_PATH" "$1"
-    else
-        printf '%s:%s' "$RCLONE_REMOTE" "$1"
-    fi
+RESTIC_HOST=${BACKUP_RESTIC_HOST:-remnawave-backup}
+RESTIC_GROUP_BY=${BACKUP_RESTIC_GROUP_BY:-host,tags}
+RESTIC_TAG=${BACKUP_RESTIC_TAG:-remnawave-backup}
+
+if [ -n "${RCLONE_CONFIG_DIR:-}" ] && [ -z "${RCLONE_CONFIG:-}" ]; then
+    RCLONE_CONFIG="$RCLONE_CONFIG_DIR/rclone.conf"
+    export RCLONE_CONFIG
+fi
+
+MODE=loop
+DRY_RUN=0
+SHUTDOWN=0
+WORK_DIR=
+LOCK_DIR=
+LOOP_LOCK_DIR=
+OPERATION_LOCK_HELD=0
+LOOP_LOCK_HELD=0
+SLEEP_PID=
+
+log() {
+    printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"
 }
 
-valid_keep() {
-    case "${1:-}" in
-        ''|*[!0-9]*) return 1 ;;
-        0*) return 1 ;;
+error() {
+    printf '[%s] ERROR: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2
+}
+
+valid_uint() {
+    value=$1
+    min=$2
+    max=$3
+    case "$value" in
+        ''|*[!0-9]*|0*) return 1 ;;
     esac
-    [ "${#1}" -le 4 ] || return 1
+    [ "${#value}" -le 9 ] || return 1
+    [ "$value" -ge "$min" ] && [ "$value" -le "$max" ]
+}
+
+valid_tmpfs_size() {
+    size=$1
+    case "$size" in
+        [0-9]*[mMgG]) ;;
+        *) return 1 ;;
+    esac
+    number=${size%?}
+    unit=${size#"$number"}
+    case "$number" in
+        ''|*[!0-9]*|0*) return 1 ;;
+    esac
+    case "$unit" in
+        m|M) [ "$number" -ge 16 ] && [ "$number" -le 1024 ] ;;
+        g|G) [ "$number" -eq 1 ] ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_time() {
+    case "${1:-}" in
+        [0-1][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_bool() {
+    case "${1:-}" in
+        true|false) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_host() {
+    case "${1:-}" in
+        ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    esac
     return 0
 }
 
-drop_newest() {
-    keep=${1:-0}
-    if ! valid_keep "$keep"; then
-        echo "drop_newest: invalid keep=$keep" >&2
+check_uint() {
+    if ! valid_uint "$2" "$3" "$4"; then
+        error "invalid $1=$2; expected an integer from $3 to $4"
         return 1
     fi
-    tail -n +$((keep + 1))
 }
 
-timestamp_name() {
-    date +%d_%B_%Y_%H-%M
+legacy_repository() {
+    case "${1:-}" in
+        *:remnawave-bot|*:remnawave-bot/|*:remnawave-bot/*) return 0 ;;
+        *) return 1 ;;
+    esac
 }
 
-log() {
-    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
-}
-
-validate_keep() {
-    name=$1
-    value=$2
-    if ! valid_keep "$value"; then
-        log "invalid $name=$value; must be an integer from 1 to 9999"
-        exit 1
-    fi
-}
-
-unique_base() {
-    base=$(timestamp_name)
-    candidate=$base
-    n=2
-    while [ -e "$PENDING/${candidate}.dump" ] || [ -e "$LOCAL/${candidate}.dump" ]; do
-        candidate="${base}_${n}"
-        n=$((n + 1))
-    done
-    echo "$candidate"
-}
-
-dump_database() {
-    base=$(unique_base)
-    dump_tmp="$PENDING/.${base}.dump.tmp"
-    dump_final="$PENDING/${base}.dump"
-    env_tmp="$PENDING/.${base}.env.tmp"
-    env_final="$PENDING/${base}.env.bak"
-
-    if ! pg_dump --no-owner --no-privileges --no-password -Fc -f "$dump_tmp"; then
-        rm -f "$dump_tmp"
-        log "dump FAILED"
+validate_config() {
+    if [ -z "$ENV_FILE" ]; then
+        error 'ENV_FILE is empty'
         return 1
     fi
-
-    if [ ! -s "$dump_tmp" ]; then
-        rm -f "$dump_tmp"
-        log "dump FAILED: empty file"
+    if [ -z "$RESTIC_REPOSITORY" ]; then
+        error 'RESTIC_REPOSITORY / BACKUP_RESTIC_REPOSITORY is empty'
+        return 1
+    fi
+    if legacy_repository "$RESTIC_REPOSITORY"; then
+        error "refusing legacy repository path '$RESTIC_REPOSITORY'; use a dedicated restic repository"
+        return 1
+    fi
+    if ! valid_host "$RESTIC_HOST"; then
+        error "invalid BACKUP_RESTIC_HOST=$RESTIC_HOST"
+        return 1
+    fi
+    check_uint BACKUP_RESTIC_INTERVAL_SECONDS "$INTERVAL_SECONDS" 1 86400 || return 1
+    check_uint BACKUP_RESTIC_KEEP_LAST "$KEEP_LAST" 1 9999 || return 1
+    check_uint BACKUP_RESTIC_KEEP_HOURLY "$KEEP_HOURLY" 1 9999 || return 1
+    check_uint BACKUP_RESTIC_KEEP_DAILY "$KEEP_DAILY" 1 9999 || return 1
+    check_uint BACKUP_RESTIC_KEEP_WEEKLY "$KEEP_WEEKLY" 1 9999 || return 1
+    check_uint BACKUP_RESTIC_KEEP_MONTHLY "$KEEP_MONTHLY" 1 9999 || return 1
+    check_uint BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS "$HEALTHCHECK_MAX_AGE_SECONDS" 1 604800 || return 1
+    check_uint BACKUP_RESTIC_MIN_FREE_MB "$MIN_FREE_MB" 1 1024 || return 1
+    if ! valid_tmpfs_size "$TMPFS_SIZE"; then
+        error "invalid BACKUP_RESTIC_TMPFS_SIZE=$TMPFS_SIZE; use 16m..1024m or 1g"
+        return 1
+    fi
+    if ! valid_time "$MAINTENANCE_TIME"; then
+        error "invalid BACKUP_RESTIC_MAINTENANCE_TIME=$MAINTENANCE_TIME; use HH:MM"
+        return 1
+    fi
+    if ! valid_bool "$MAINTENANCE_ENABLED"; then
+        error "invalid BACKUP_RESTIC_MAINTENANCE_ENABLED=$MAINTENANCE_ENABLED; use true or false"
         return 1
     fi
 
-    if ! cp "$ENV_FILE" "$env_tmp"; then
-        rm -f "$dump_tmp" "$env_tmp"
-        log "dump FAILED: env snapshot"
-        return 1
-    fi
-
-    if ! mv "$dump_tmp" "$dump_final" || ! mv "$env_tmp" "$env_final"; then
-        rm -f "$dump_tmp" "$env_tmp" "$dump_final" "$env_final"
-        log "dump FAILED: cannot finalize pair"
-        return 1
-    fi
-
-    log "dump: ${base}.dump + .env"
-}
-
-upload_pending() {
-    uploaded=0
-
-    for dump in "$PENDING"/*.dump; do
-        [ -e "$dump" ] || continue
-        base=$(basename "$dump" .dump)
-        env_file="$PENDING/${base}.env.bak"
-
-        if [ ! -f "$env_file" ]; then
-            log "pending pair missing env: ${base}.dump"
+    if [ -n "${RESTIC_PASSWORD_FILE:-}" ]; then
+        if [ ! -f "$RESTIC_PASSWORD_FILE" ] || [ ! -r "$RESTIC_PASSWORD_FILE" ] || [ ! -s "$RESTIC_PASSWORD_FILE" ]; then
+            error "RESTIC_PASSWORD_FILE is missing, unreadable or empty: $RESTIC_PASSWORD_FILE"
             return 1
         fi
+    elif [ -z "${RESTIC_PASSWORD:-}" ]; then
+        error 'set RESTIC_PASSWORD_FILE (preferred) or RESTIC_PASSWORD'
+        return 1
+    fi
 
-        if rclone copyto "$env_file" "$(remote_path "5min/$(basename "$env_file")")" \
-            && rclone copyto "$dump" "$(remote_path "5min/$(basename "$dump")")"; then
-            if mv "$env_file" "$LOCAL/" && mv "$dump" "$LOCAL/"; then
-                uploaded=$((uploaded + 1))
-            else
-                log "local move FAILED: ${base}"
+    case "$RESTIC_REPOSITORY" in
+        rclone:*)
+            if [ -z "${RCLONE_CONFIG:-}" ]; then
+                error 'rclone repository configured but RCLONE_CONFIG / RCLONE_CONFIG_DIR is empty'
                 return 1
             fi
-        else
-            log "upload FAILED: ${base}"
+            if [ ! -s "$RCLONE_CONFIG" ]; then
+                error "rclone config is missing, empty or is not a regular file: $RCLONE_CONFIG"
+                return 1
+            fi
+            ;;
+    esac
+
+    for command_name in pg_dump restic tar; do
+        if ! command -v "$command_name" >/dev/null 2>&1; then
+            error "required command not found: $command_name"
             return 1
         fi
     done
-
-    if [ "$uploaded" -gt 0 ]; then
-        date +%s > "$STATE/last_success"
-    fi
 }
 
-prune_is_safe() {
-    [ "${1:-0}" -gt 0 ] && [ "${2:-0}" -gt 0 ]
-}
-
-select_prune_pair_names() {
-    dumps=$1
-    envs=$2
-    keep=$3
-    keep_file="$dumps.keep"
-
-    if ! valid_keep "$keep"; then
-        echo "select_prune_pair_names: invalid keep=$keep" >&2
+prepare_state() {
+    if ! mkdir -p "$STATE_DIR"; then
+        error "cannot create state directory: $STATE_DIR"
         return 1
     fi
+    chmod 700 "$STATE_DIR" 2>/dev/null || true
+}
 
-    : > "$keep_file"
-    kept=0
+prepare_stage() {
+    if ! mkdir -p "$STAGE_DIR"; then
+        error "cannot create stage directory: $STAGE_DIR"
+        return 1
+    fi
+    chmod 700 "$STAGE_DIR" 2>/dev/null || true
 
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        base=${name%.dump}
-        if grep -qxF "${base}.env.bak" "$envs"; then
-            printf '%s\n' "$name" >> "$keep_file"
-            printf '%s\n' "${base}.env.bak" >> "$keep_file"
-            kept=$((kept + 1))
-            [ "$kept" -ge "$keep" ] && break
+    # A SIGKILL can leave a private work directory behind.  A tmpfs normally
+    # clears it on container restart; this also covers a long-lived container.
+    # The lock is already held, so a concurrently starting process can't remove
+    # another process's stage.
+    for stale in "$STAGE_DIR"/work.*; do
+        [ -e "$stale" ] || continue
+        rm -rf "$stale"
+    done
+
+    if [ -r /proc/mounts ] && ! grep -q "[[:space:]]${STAGE_DIR}[[:space:]]tmpfs[[:space:]]" /proc/mounts 2>/dev/null; then
+        log "WARN: $STAGE_DIR is not a tmpfs mount; Compose normally mounts a bounded tmpfs"
+    fi
+}
+
+check_free_space() {
+    free_kb=$(df -Pk "$STAGE_DIR" 2>/dev/null | awk 'NR == 2 { print $4 }')
+    case "${free_kb:-}" in
+        ''|*[!0-9]*)
+            error "cannot determine free space for $STAGE_DIR"
+            return 1
+            ;;
+    esac
+    need_kb=$((MIN_FREE_MB * 1024))
+    if [ "$free_kb" -lt "$need_kb" ]; then
+        error "not enough free space in $STAGE_DIR: ${free_kb} KiB available, ${need_kb} KiB required"
+        return 1
+    fi
+}
+
+acquire_dir_lock() {
+    lock_dir=$1
+    wait_mode=$2
+    while :; do
+        if mkdir "$lock_dir" 2>/dev/null; then
+            printf '%s\n' "$$" > "$lock_dir/pid"
+            return 0
         fi
-    done < "$dumps"
 
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        grep -qxF "$name" "$keep_file" || printf '%s\n' "$name"
-    done < "$dumps"
-
-    while IFS= read -r name; do
-        [ -n "$name" ] || continue
-        grep -qxF "$name" "$keep_file" || printf '%s\n' "$name"
-    done < "$envs"
-
-    rm -f "$keep_file"
-}
-
-prune_remote() {
-    dir=$1
-    keep=$2
-    tmp=$(mktemp -d)
-    remote_dir=$(remote_path "$dir")
-
-    if ! rclone lsf "$remote_dir" --files-only --include '*.dump' \
-        --format "tp" --separator "|" --time-format unix > "$tmp/dumps.raw" 2>/dev/null; then
-        log "prune listing FAILED: $dir/dumps"
-        rm -rf "$tmp"
-        return 0
-    fi
-
-    if ! rclone lsf "$remote_dir" --files-only --include '*.env.bak' \
-        --format "tp" --separator "|" --time-format unix > "$tmp/envs.raw" 2>/dev/null; then
-        log "prune listing FAILED: $dir/envs"
-        rm -rf "$tmp"
-        return 0
-    fi
-
-    sort -rn "$tmp/dumps.raw" | cut -d'|' -f2- > "$tmp/dumps"
-    sort -rn "$tmp/envs.raw" | cut -d'|' -f2- > "$tmp/envs"
-
-    dumps_count=$(wc -l < "$tmp/dumps" | tr -d ' ')
-    envs_count=$(wc -l < "$tmp/envs" | tr -d ' ')
-
-    if [ "$dumps_count" -eq 0 ] && [ "$envs_count" -eq 0 ]; then
-        rm -rf "$tmp"
-        return 0
-    fi
-
-    if ! prune_is_safe "$dumps_count" "$envs_count"; then
-        log "prune skipped: orphan-only tier $dir (dumps=$dumps_count envs=$envs_count)"
-        rm -rf "$tmp"
-        return 0
-    fi
-
-    select_prune_pair_names "$tmp/dumps" "$tmp/envs" "$keep" \
-        | while IFS= read -r name; do
-            [ -n "$name" ] || continue
-            rclone deletefile "$(remote_path "$dir/$name")" --drive-use-trash=false \
-                || log "prune FAILED: $dir/$name"
-        done
-
-    rm -rf "$tmp"
-}
-
-copy_tier() {
-    dir=$1
-    keep=$2
-    marker=$3
-    value=$4
-
-    current=$(cat "$STATE/$marker" 2>/dev/null || true)
-    [ "$value" = "$current" ] && return 0
-
-    pending_marker="$STATE/tier-$dir.pending"
-    base=$(cat "$pending_marker" 2>/dev/null || true)
-
-    if [ -z "$base" ]; then
-        for dump in $(ls -1t "$LOCAL"/*.dump 2>/dev/null); do
-            candidate=$(basename "$dump" .dump)
-            if [ -f "$LOCAL/${candidate}.env.bak" ]; then
-                base=$candidate
-                break
+        pid=$(cat "$lock_dir/pid" 2>/dev/null || true)
+        case "${pid:-}" in
+            ''|*[!0-9]*) pid=0 ;;
+        esac
+        if [ "$pid" -gt 0 ] && kill -0 "$pid" 2>/dev/null; then
+            if [ "$wait_mode" = wait ]; then
+                sleep 1
+                [ "$SHUTDOWN" -eq 0 ] || return 1
+                continue
             fi
-        done
-    fi
-    [ -n "$base" ] || return 0
-
-    dump="$LOCAL/${base}.dump"
-    env_file="$LOCAL/${base}.env.bak"
-    if [ ! -f "$dump" ] || [ ! -f "$env_file" ]; then
-        log "tier pair missing: $dir/$base"
-        rm -f "$pending_marker"
-        return 0
-    fi
-
-    max_age_min=$((DUMP_INTERVAL_SECONDS / 60 * 3))
-    [ "$max_age_min" -ge 5 ] || max_age_min=5
-    if ! find "$dump" -mmin "-$max_age_min" 2>/dev/null | grep -q .; then
-        log "tier skip: selected dump is stale ($dir/$base)"
-        rm -f "$pending_marker"
-        return 0
-    fi
-
-    echo "$base" > "$pending_marker"
-
-    if ! rclone copyto "$env_file" "$(remote_path "$dir/$(basename "$env_file")")"; then
-        log "tier env copy FAILED: $dir/${base}.env.bak"
-        return 0
-    fi
-
-    if ! rclone copyto "$dump" "$(remote_path "$dir/$(basename "$dump")")"; then
-        log "tier copy FAILED: $dir/${base}.dump"
-        return 0
-    fi
-
-    rm -f "$pending_marker"
-    echo "$value" > "$STATE/$marker"
-    prune_remote "$dir" "$keep"
-}
-
-prune_local() {
-    for dump in "$LOCAL"/*.dump; do
-        [ -e "$dump" ] || continue
-        base=$(basename "$dump" .dump)
-        if [ ! -f "$LOCAL/${base}.env.bak" ]; then
-            log "remove orphan local dump: ${base}.dump"
-            rm -f "$dump"
+            error 'another backup process is already running'
+            return 1
         fi
-    done
 
-    for env_file in "$LOCAL"/*.env.bak; do
-        [ -e "$env_file" ] || continue
-        base=$(basename "$env_file" .env.bak)
-        if [ ! -f "$LOCAL/${base}.dump" ]; then
-            log "remove orphan local env: ${base}.env.bak"
-            rm -f "$env_file"
+        # Stale lock left by SIGKILL / container restart.
+        rm -rf "$lock_dir"
+        if ! mkdir "$lock_dir" 2>/dev/null; then
+            error "cannot acquire lock $lock_dir"
+            return 1
         fi
-    done
-
-    ls -1t "$LOCAL"/*.dump 2>/dev/null | drop_newest "$KEEP_5MIN" | while IFS= read -r dump; do
-        [ -n "$dump" ] || continue
-        base=$(basename "$dump" .dump)
-        rm -f "$dump" "$LOCAL/${base}.env.bak"
+        printf '%s\n' "$$" > "$lock_dir/pid"
+        return 0
     done
 }
 
-upload_readme() {
-    [ -f "$README_SOURCE" ] || return 0
-    if rclone copyto "$README_SOURCE" "$DOCS_PREFIX/README.md"; then
-        log "README uploaded"
+acquire_operation_lock() {
+    wait_mode=${1:-nowait}
+    if command -v flock >/dev/null 2>&1; then
+        exec 9>"$LOCK_FILE" || {
+            error "cannot open lock file $LOCK_FILE"
+            return 1
+        }
+        if [ "$wait_mode" = wait ]; then
+            if ! flock 9; then
+                error "cannot acquire operation lock $LOCK_FILE"
+                return 1
+            fi
+        elif ! flock -n 9; then
+            error 'another backup operation is already running'
+            return 1
+        fi
+        OPERATION_LOCK_HELD=1
         return 0
     fi
-    log "README upload FAILED"
+
+    # Fallback for hosts without flock (including the shell-test host).
+    LOCK_DIR="$LOCK_FILE.d"
+    acquire_dir_lock "$LOCK_DIR" "$wait_mode"
+}
+
+acquire_loop_lock() {
+    if command -v flock >/dev/null 2>&1; then
+        exec 8>"$LOOP_LOCK_FILE" || {
+            error "cannot open loop lock file $LOOP_LOCK_FILE"
+            return 1
+        }
+        if ! flock -n 8; then
+            error 'another backup loop is already running'
+            return 1
+        fi
+        LOOP_LOCK_HELD=1
+        return 0
+    fi
+
+    LOOP_LOCK_DIR="$LOOP_LOCK_FILE.d"
+    acquire_dir_lock "$LOOP_LOCK_DIR" nowait
+}
+
+release_operation_lock() {
+    if [ "${OPERATION_LOCK_HELD:-0}" -eq 1 ]; then
+        flock -u 9 2>/dev/null || true
+        OPERATION_LOCK_HELD=0
+    fi
+    if [ -n "${LOCK_DIR:-}" ]; then
+        rm -rf "$LOCK_DIR"
+        LOCK_DIR=
+    fi
+}
+
+release_loop_lock() {
+    if [ "${LOOP_LOCK_HELD:-0}" -eq 1 ]; then
+        flock -u 8 2>/dev/null || true
+        LOOP_LOCK_HELD=0
+    fi
+    if [ -n "${LOOP_LOCK_DIR:-}" ]; then
+        rm -rf "$LOOP_LOCK_DIR"
+        LOOP_LOCK_DIR=
+    fi
+}
+
+cleanup_work() {
+    if [ -n "${WORK_DIR:-}" ] && [ -d "$WORK_DIR" ]; then
+        rm -rf "$WORK_DIR"
+    fi
+    WORK_DIR=
+}
+
+cleanup() {
+    cleanup_work
+    release_operation_lock
+    release_loop_lock
+}
+
+on_signal() {
+    SHUTDOWN=1
+    if [ -n "${SLEEP_PID:-}" ] && kill -0 "$SLEEP_PID" 2>/dev/null; then
+        kill "$SLEEP_PID" 2>/dev/null || true
+    fi
+    log 'shutting down after current operation'
+}
+
+check_env_file() {
+    if [ ! -f "$ENV_FILE" ]; then
+        error "ENV_FILE $ENV_FILE is missing; refusing to create a snapshot"
+        return 1
+    fi
+    if [ ! -r "$ENV_FILE" ]; then
+        error "ENV_FILE $ENV_FILE is unreadable; refusing to create a snapshot"
+        return 1
+    fi
+    if [ ! -s "$ENV_FILE" ]; then
+        error "ENV_FILE $ENV_FILE is empty; refusing to create a snapshot"
+        return 1
+    fi
+    if ! grep -q '[^[:space:]]' "$ENV_FILE" 2>/dev/null; then
+        error "ENV_FILE $ENV_FILE is blank; refusing to create a snapshot"
+        return 1
+    fi
+}
+
+update_marker() {
+    now=$(date +%s)
+    tmp="$STATE_DIR/.last_success.$$"
+    if printf '%s\n' "$now" > "$tmp" && mv -f "$tmp" "$MARKER"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    error "cannot atomically update freshness marker $MARKER"
     return 1
 }
 
-upload_readme_once() {
-    value=$(date +%Y%m%d)
-    current=$(cat "$STATE/readme" 2>/dev/null || true)
-    [ "$value" = "$current" ] && return 0
-    if upload_readme; then
-        echo "$value" > "$STATE/readme"
+backup_failed() {
+    code=$1
+    message=$2
+    error "$message (exit $code); snapshot not accepted, freshness marker unchanged"
+    cleanup_work
+    return "$code"
+}
+
+run_backup() {
+    WORK_DIR="$STAGE_DIR/work.$$"
+    rm -rf "$WORK_DIR"
+    if ! mkdir -p "$WORK_DIR"; then
+        error "cannot create private stage $WORK_DIR"
+        return 1
     fi
+    chmod 700 "$WORK_DIR" 2>/dev/null || true
+
+    if ! check_env_file; then
+        cleanup_work
+        return 1
+    fi
+    if ! check_free_space; then
+        cleanup_work
+        return 1
+    fi
+
+    dump="$WORK_DIR/db.dump"
+    log 'dump: pg_dump -Fc --no-owner --no-privileges --no-password'
+    pg_dump -Fc --no-owner --no-privileges --no-password -f "$dump"
+    dump_rc=$?
+    if [ "$dump_rc" -ne 0 ]; then
+        backup_failed "$dump_rc" 'pg_dump failed'
+        return "$dump_rc"
+    fi
+    if [ ! -s "$dump" ]; then
+        backup_failed 1 'pg_dump produced an empty dump'
+        return 1
+    fi
+
+    env_copy="$WORK_DIR/.env"
+    if ! cp "$ENV_FILE" "$env_copy"; then
+        backup_failed 1 'cannot copy current .env into the private stage'
+        return 1
+    fi
+    chmod 600 "$env_copy" 2>/dev/null || true
+    if [ ! -s "$env_copy" ]; then
+        backup_failed 1 'staged .env is empty'
+        return 1
+    fi
+
+    log "snapshot: restic backup --stdin-filename remnawave-backup.tar (dry-run=$DRY_RUN)"
+    set -- backup
+    [ "$DRY_RUN" -eq 1 ] && set -- backup --dry-run
+    restic "$@" \
+        --host "$RESTIC_HOST" \
+        --group-by "$RESTIC_GROUP_BY" \
+        --tag "$RESTIC_TAG" \
+        --tag postgres \
+        --tag env \
+        --stdin-filename remnawave-backup.tar \
+        --stdin-from-command \
+        -- tar -C "$WORK_DIR" -cf - db.dump .env
+    restic_rc=$?
+
+    if [ "$restic_rc" -ne 0 ]; then
+        case "$restic_rc" in
+            3) message='restic backup could not read all source data' ;;
+            10) message='restic repository does not exist; run restic init explicitly' ;;
+            11) message='restic repository is locked' ;;
+            12) message='restic password is incorrect' ;;
+            *) message='restic backup failed' ;;
+        esac
+        backup_failed "$restic_rc" "$message"
+        return "$restic_rc"
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log 'dry-run: snapshot not published; freshness marker unchanged'
+        cleanup_work
+        return 0
+    fi
+
+    if ! update_marker; then
+        cleanup_work
+        return 1
+    fi
+    log 'snapshot published; freshness marker updated'
+    cleanup_work
+    return 0
+}
+
+update_maintenance_day() {
+    tmp="$STATE_DIR/.last_maintenance_day.$$"
+    if printf '%s\n' "$(date +%Y-%m-%d)" > "$tmp" && mv -f "$tmp" "$MAINTENANCE_DAY_FILE"; then
+        return 0
+    fi
+    rm -f "$tmp"
+    log "WARN: cannot update $MAINTENANCE_DAY_FILE"
+    return 0
+}
+
+run_maintenance() {
+    log 'maintenance: restic forget/prune with scoped retention policy'
+    set -- forget \
+        --host "$RESTIC_HOST" \
+        --tag "$RESTIC_TAG" \
+        --group-by "$RESTIC_GROUP_BY" \
+        --keep-last "$KEEP_LAST" \
+        --keep-hourly "$KEEP_HOURLY" \
+        --keep-daily "$KEEP_DAILY" \
+        --keep-weekly "$KEEP_WEEKLY" \
+        --keep-monthly "$KEEP_MONTHLY"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        restic "$@" --dry-run
+        forget_rc=$?
+        if [ "$forget_rc" -eq 0 ]; then
+            restic prune --dry-run
+            forget_rc=$?
+        fi
+    else
+        restic "$@" --prune
+        forget_rc=$?
+    fi
+
+    if [ "$forget_rc" -ne 0 ]; then
+        error "restic maintenance failed (exit $forget_rc)"
+        return "$forget_rc"
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log 'maintenance dry-run: nothing was deleted'
+    else
+        log 'maintenance finished'
+        update_maintenance_day
+    fi
+    return 0
+}
+
+maintenance_due() {
+    [ "$MAINTENANCE_ENABLED" = true ] || return 1
+    today=$(date +%Y-%m-%d)
+    last=$(cat "$MAINTENANCE_DAY_FILE" 2>/dev/null || true)
+    [ "$last" = "$today" ] && return 1
+    current_time=$(date +%H:%M)
+    if awk -v now="$current_time" -v at="$MAINTENANCE_TIME" 'BEGIN { exit !(now >= at) }'; then
+        return 0
+    fi
+    return 1
+}
+
+sleep_until() {
+    target=$1
+    while [ "$SHUTDOWN" -eq 0 ]; do
+        now=$(date +%s)
+        if [ "$now" -ge "$target" ]; then
+            return 0
+        fi
+        sleep "$((target - now))" &
+        SLEEP_PID=$!
+        wait "$SLEEP_PID" 2>/dev/null || true
+        SLEEP_PID=
+        [ "$SHUTDOWN" -eq 0 ] || return 0
+    done
+}
+
+sleep_next_slot() {
+    # Compute the next FUTURE slot.  A long run therefore skips missed
+    # intervals instead of queuing snapshots back-to-back.
+    next_slot=$(( ($(date +%s) / INTERVAL_SECONDS + 1) * INTERVAL_SECONDS ))
+    log "sleeping until epoch $next_slot"
+    sleep_until "$next_slot"
+}
+
+run_loop() {
+    log "loop started: interval=${INTERVAL_SECONDS}s repository=$RESTIC_REPOSITORY"
+    while [ "$SHUTDOWN" -eq 0 ]; do
+        # The operation lock is released while sleeping, so an explicit
+        # `--maintenance`/`--once` can run between intervals.  The loop lock
+        # still prevents a second loop process.
+        if ! acquire_operation_lock wait; then
+            [ "$SHUTDOWN" -eq 0 ] || break
+            log 'WARN: cannot acquire operation lock; retrying at next slot'
+            sleep_next_slot
+            continue
+        fi
+        if ! prepare_stage; then
+            release_operation_lock
+            [ "$SHUTDOWN" -eq 0 ] || break
+            log 'WARN: cannot prepare stage; retrying at next slot'
+            sleep_next_slot
+            continue
+        fi
+
+        run_backup
+        backup_rc=$?
+        if [ "$backup_rc" -eq 0 ] && [ "$SHUTDOWN" -eq 0 ] && maintenance_due; then
+            if ! run_maintenance; then
+                log 'WARN: maintenance failed; ordinary backup loop continues'
+                # Do not retry a failing maintenance every 5 minutes.  The
+                # operator can rerun it explicitly; ordinary backups stay on
+                # their 300-second schedule.
+                update_maintenance_day
+            fi
+        fi
+        release_operation_lock
+        [ "$SHUTDOWN" -eq 0 ] || break
+        sleep_next_slot
+    done
+    log 'loop stopped'
 }
 
 run_self_test() {
-    out=$(printf '%s\n' f5 f4 f3 f2 f1 | drop_newest 2)
-    count=$(printf '%s\n' "$out" | wc -l)
-    if [ "$count" -ne 3 ]; then
-        echo "self-test FAIL: drop_newest expected 3, got $count" >&2
+    if ! valid_uint 12 1 9999; then
+        echo 'self-test FAIL: valid_uint rejected 12' >&2
         return 1
     fi
+    if valid_uint 0 1 9999; then
+        echo 'self-test FAIL: valid_uint accepted 0' >&2
+        return 1
+    fi
+    if valid_uint 012 1 9999; then
+        echo 'self-test FAIL: valid_uint accepted leading zero' >&2
+        return 1
+    fi
+    if valid_uint abc 1 9999; then
+        echo 'self-test FAIL: valid_uint accepted letters' >&2
+        return 1
+    fi
+    if ! valid_tmpfs_size 256m; then
+        echo 'self-test FAIL: valid_tmpfs_size rejected 256m' >&2
+        return 1
+    fi
+    if ! valid_tmpfs_size 1g; then
+        echo 'self-test FAIL: valid_tmpfs_size rejected 1g' >&2
+        return 1
+    fi
+    if valid_tmpfs_size 2g; then
+        echo 'self-test FAIL: valid_tmpfs_size accepted 2g' >&2
+        return 1
+    fi
+    if valid_tmpfs_size 8m; then
+        echo 'self-test FAIL: valid_tmpfs_size accepted 8m' >&2
+        return 1
+    fi
+    if ! valid_time 03:00; then
+        echo 'self-test FAIL: valid_time rejected 03:00' >&2
+        return 1
+    fi
+    if valid_time 25:00; then
+        echo 'self-test FAIL: valid_time accepted 25:00' >&2
+        return 1
+    fi
+    if ! legacy_repository 'rclone:gdrive:remnawave-bot/5min'; then
+        echo 'self-test FAIL: legacy repository not detected' >&2
+        return 1
+    fi
+    if legacy_repository 'rclone:gdrive:remnawave-restic'; then
+        echo 'self-test FAIL: dedicated repository treated as legacy' >&2
+        return 1
+    fi
+    echo 'self-test ok'
+}
 
-    first=$(printf '%s\n' "$out" | head -n 1)
-    if [ "$first" != "f3" ]; then
-        echo "self-test FAIL: drop_newest expected first f3, got $first" >&2
-        return 1
-    fi
+usage() {
+    cat <<'EOF'
+Usage: backup.sh [--once | --maintenance | --loop] [--dry-run]
 
-    empty=$(printf '' | drop_newest 2)
-    if [ -n "$empty" ]; then
-        echo "self-test FAIL: drop_newest expected empty output" >&2
-        return 1
-    fi
-
-    name=$(timestamp_name)
-    if ! printf '%s\n' "$name" | grep -Eq '^[0-9]{2}_[A-Z][a-z]+_[0-9]{4}_[0-9]{2}-[0-9]{2}$'; then
-        echo "self-test FAIL: bad timestamp name: $name" >&2
-        return 1
-    fi
-
-    if ! valid_keep 12; then
-        echo "self-test FAIL: valid_keep rejected 12" >&2
-        return 1
-    fi
-    if ! valid_keep 9999; then
-        echo "self-test FAIL: valid_keep rejected 9999" >&2
-        return 1
-    fi
-    if valid_keep 0; then
-        echo "self-test FAIL: valid_keep accepted 0" >&2
-        return 1
-    fi
-    if valid_keep 00; then
-        echo "self-test FAIL: valid_keep accepted 00" >&2
-        return 1
-    fi
-    if valid_keep 012; then
-        echo "self-test FAIL: valid_keep accepted 012" >&2
-        return 1
-    fi
-    if valid_keep 10000; then
-        echo "self-test FAIL: valid_keep accepted 10000" >&2
-        return 1
-    fi
-    if valid_keep abc; then
-        echo "self-test FAIL: valid_keep accepted abc" >&2
-        return 1
-    fi
-    if valid_keep ''; then
-        echo "self-test FAIL: valid_keep accepted empty" >&2
-        return 1
-    fi
-
-    if ! prune_is_safe 12 12; then
-        echo "self-test FAIL: prune_is_safe rejected 12/12" >&2
-        return 1
-    fi
-    if prune_is_safe 12 0; then
-        echo "self-test FAIL: prune_is_safe accepted 12/0" >&2
-        return 1
-    fi
-    if prune_is_safe 0 12; then
-        echo "self-test FAIL: prune_is_safe accepted 0/12" >&2
-        return 1
-    fi
-
-    old_remote=$RCLONE_REMOTE
-    old_path=$RCLONE_PATH
-    RCLONE_REMOTE=gcrypt
-    RCLONE_PATH=
-    if [ "$(remote_path "5min/x.dump")" != "gcrypt:5min/x.dump" ]; then
-        echo "self-test FAIL: remote_path without path" >&2
-        return 1
-    fi
-    RCLONE_PATH=backups
-    if [ "$(remote_path "5min/x.dump")" != "gcrypt:backups/5min/x.dump" ]; then
-        echo "self-test FAIL: remote_path with path" >&2
-        return 1
-    fi
-    RCLONE_REMOTE=$old_remote
-    RCLONE_PATH=$old_path
-
-    tmp=$(mktemp -d)
-    i=13
-    while [ "$i" -ge 1 ]; do
-        printf '26_January_2026_00-%02d.dump\n' "$i" >> "$tmp/dumps"
-        printf '26_January_2026_00-%02d.env.bak\n' "$i" >> "$tmp/envs"
-        i=$((i - 1))
-    done
-    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 12)
-    count=$(printf '%s\n' "$out" | wc -l)
-    if [ "$count" -ne 2 ]; then
-        echo "self-test FAIL: pair prune expected 2, got $count" >&2
-        rm -rf "$tmp"
-        return 1
-    fi
-    first=$(printf '%s\n' "$out" | head -n 1)
-    if [ "$first" != "26_January_2026_00-01.dump" ]; then
-        echo "self-test FAIL: pair prune expected 00-01.dump, got $first" >&2
-        rm -rf "$tmp"
-        return 1
-    fi
-    rm -rf "$tmp"
-
-    tmp=$(mktemp -d)
-    printf '26_January_2026_00-99.dump\n' > "$tmp/dumps"
-    i=12
-    while [ "$i" -ge 1 ]; do
-        printf '26_January_2026_00-%02d.dump\n' "$i" >> "$tmp/dumps"
-        printf '26_January_2026_00-%02d.env.bak\n' "$i" >> "$tmp/envs"
-        i=$((i - 1))
-    done
-    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 12)
-    if [ "$out" != "26_January_2026_00-99.dump" ]; then
-        echo "self-test FAIL: orphan dump prune got $out" >&2
-        rm -rf "$tmp"
-        return 1
-    fi
-    rm -rf "$tmp"
-
-    tmp=$(mktemp -d)
-    printf '26_January_2026_00-99.env.bak\n' > "$tmp/envs"
-    i=12
-    while [ "$i" -ge 1 ]; do
-        printf '26_January_2026_00-%02d.dump\n' "$i" >> "$tmp/dumps"
-        printf '26_January_2026_00-%02d.env.bak\n' "$i" >> "$tmp/envs"
-        i=$((i - 1))
-    done
-    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 12)
-    if [ "$out" != "26_January_2026_00-99.env.bak" ]; then
-        echo "self-test FAIL: orphan env prune got $out" >&2
-        rm -rf "$tmp"
-        return 1
-    fi
-    rm -rf "$tmp"
-
-    tmp=$(mktemp -d)
-    : > "$tmp/dumps"
-    : > "$tmp/envs"
-    out=$(select_prune_pair_names "$tmp/dumps" "$tmp/envs" 0 2>/dev/null)
-    if [ -n "$out" ]; then
-        echo "self-test FAIL: invalid keep produced output" >&2
-        rm -rf "$tmp"
-        return 1
-    fi
-    rm -rf "$tmp"
-
-    tmp=$(mktemp -d)
-    : > "$tmp/01_January_2026_00-00.dump"
-    collision=$(
-        timestamp_name() { echo "01_January_2026_00-00"; }
-        PENDING=$tmp
-        LOCAL=$tmp
-        unique_base
-    )
-    rm -rf "$tmp"
-    if [ "$collision" != "01_January_2026_00-00_2" ]; then
-        echo "self-test FAIL: unique_base collision: $collision" >&2
-        return 1
-    fi
-
-    echo "self-test ok"
+  --once         run one backup and exit with its status
+  --maintenance  run one Restic forget/prune pass and exit
+  --loop         run the 300-second backup loop (default)
+  --dry-run      with --once or --maintenance, do not write to the repository
+  --self-test    run local helper checks
+EOF
 }
 
 main() {
-    mkdir -p "$PENDING" "$LOCAL" "$STATE"
-    rm -f "$PENDING"/.*.dump.tmp "$PENDING"/.*.env.tmp
-
-    for dump in "$PENDING"/*.dump; do
-        [ -e "$dump" ] || continue
-        base=$(basename "$dump" .dump)
-        if [ ! -f "$PENDING/${base}.env.bak" ]; then
-            log "remove orphan pending dump: ${base}.dump"
-            rm -f "$dump"
-        fi
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --once) MODE=once ;;
+            --maintenance) MODE=maintenance ;;
+            --loop) MODE=loop ;;
+            --dry-run) DRY_RUN=1 ;;
+            --self-test)
+                run_self_test
+                exit $?
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                usage >&2
+                exit 2
+                ;;
+        esac
+        shift
     done
 
-    for env_file in "$PENDING"/*.env.bak; do
-        [ -e "$env_file" ] || continue
-        base=$(basename "$env_file" .env.bak)
-        if [ ! -f "$PENDING/${base}.dump" ]; then
-            log "remove orphan pending env: ${base}.env.bak"
-            rm -f "$env_file"
-        fi
-    done
-
-    if [ -z "${RCLONE_CONFIG_GDRIVE_TOKEN:-}" ] || [ -z "${RCLONE_CONFIG_GCRYPT_PASSWORD:-}" ]; then
-        log "RCLONE_CONFIG_GDRIVE_TOKEN / RCLONE_CONFIG_GCRYPT_PASSWORD are empty; configure .env"
-        exit 1
+    if [ "$MODE" = loop ] && [ "$DRY_RUN" -eq 1 ]; then
+        error '--dry-run requires --once or --maintenance'
+        exit 2
     fi
 
-    if [ ! -s "$ENV_FILE" ] || [ ! -r "$ENV_FILE" ]; then
-        log "ENV_FILE $ENV_FILE is missing, empty or unreadable; refusing to start"
-        exit 1
-    fi
+    validate_config || exit 1
+    prepare_state || exit 1
+    trap cleanup EXIT
+    trap on_signal TERM INT
 
-    validate_keep KEEP_5MIN "$KEEP_5MIN"
-    validate_keep KEEP_HOURLY "$KEEP_HOURLY"
-    validate_keep KEEP_DAILY "$KEEP_DAILY"
-    validate_keep KEEP_WEEKLY "$KEEP_WEEKLY"
-    validate_keep KEEP_MONTHLY "$KEEP_MONTHLY"
-
-    [ "$DUMP_INTERVAL_SECONDS" -gt 0 ] 2>/dev/null || DUMP_INTERVAL_SECONDS=300
-    [ "$UPLOAD_INTERVAL_SECONDS" -gt 0 ] 2>/dev/null || UPLOAD_INTERVAL_SECONDS=300
-
-    upload_readme
-    last_upload=0
-
-    while true; do
-        dump_database || true
-
-        now=$(date +%s)
-        if [ $((now - last_upload)) -ge "$UPLOAD_INTERVAL_SECONDS" ]; then
-            if upload_pending; then
-                last_upload=$now
-                prune_remote 5min "$KEEP_5MIN"
-                copy_tier hourly "$KEEP_HOURLY" hourly "$(date +%Y%m%d%H)"
-                copy_tier daily "$KEEP_DAILY" daily "$(date +%Y%m%d)"
-                copy_tier weekly "$KEEP_WEEKLY" weekly "$(( $(date +%s) / 604800 ))"
-                copy_tier monthly "$KEEP_MONTHLY" monthly "$(date +%Y%m)"
-                upload_readme_once
-            fi
-        fi
-
-        prune_local
-
-        now=$(date +%s)
-        next=$(( (now / DUMP_INTERVAL_SECONDS + 1) * DUMP_INTERVAL_SECONDS ))
-        sleep $((next - now))
-    done
+    case "$MODE" in
+        once)
+            acquire_operation_lock nowait || exit 1
+            prepare_stage || exit 1
+            run_backup
+            exit $?
+            ;;
+        maintenance)
+            acquire_operation_lock nowait || exit 1
+            run_maintenance
+            exit $?
+            ;;
+        loop)
+            acquire_loop_lock || exit 1
+            run_loop
+            exit $?
+            ;;
+    esac
 }
 
-trap 'log "shutting down"; exit 0' TERM INT
-
-case "${1:-}" in
-    --self-test)
-        run_self_test
-        exit $?
-        ;;
-esac
-
-main
+main "$@"

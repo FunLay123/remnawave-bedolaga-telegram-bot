@@ -107,7 +107,9 @@ services:
       context: ./docker/backup
     container_name: remnawave_bot_backup
     restart: unless-stopped
-    stop_grace_period: 60s
+    # Restic may be in the middle of an upload.  SIGTERM stops the loop after
+    # the current operation; this grace period does not cancel an active upload.
+    stop_grace_period: 2m
     depends_on:
       postgres:
         condition: service_healthy
@@ -119,36 +121,41 @@ services:
       PGPASSWORD: '${POSTGRES_PASSWORD:-secure_password_123}'
       PGCONNECT_TIMEOUT: '10'
       TZ: '${TZ:-Europe/Moscow}'
-      BACKUP_DIR: /backups
       ENV_FILE: /src/.env
-      README_SOURCE: /usr/local/share/remnawave-backup/RESTORE.md
-      DUMP_INTERVAL_SECONDS: '${BACKUP_GDRIVE_DUMP_INTERVAL_SECONDS:-300}'
-      UPLOAD_INTERVAL_SECONDS: '${BACKUP_GDRIVE_UPLOAD_INTERVAL_SECONDS:-300}'
-      KEEP_5MIN: '${BACKUP_GDRIVE_KEEP_5MIN:-12}'
-      KEEP_HOURLY: '${BACKUP_GDRIVE_KEEP_HOURLY:-24}'
-      KEEP_DAILY: '${BACKUP_GDRIVE_KEEP_DAILY:-30}'
-      KEEP_WEEKLY: '${BACKUP_GDRIVE_KEEP_WEEKLY:-12}'
-      KEEP_MONTHLY: '${BACKUP_GDRIVE_KEEP_MONTHLY:-12}'
-      HEALTHCHECK_MAX_AGE_SECONDS: '${BACKUP_GDRIVE_HEALTHCHECK_MAX_AGE_SECONDS:-900}'
-      RCLONE_REMOTE: gcrypt
-      RCLONE_PATH: ''
-      RCLONE_DOCS_REMOTE: gdrive
-      BACKUP_GDRIVE_FOLDER: '${BACKUP_GDRIVE_FOLDER:-remnawave-bot}'
-      RCLONE_CONFIG_GDRIVE_TYPE: drive
-      RCLONE_CONFIG_GDRIVE_SCOPE: drive
-      RCLONE_CONFIG_GDRIVE_TOKEN: '${RCLONE_CONFIG_GDRIVE_TOKEN:-}'
-      RCLONE_CONFIG_GCRYPT_TYPE: crypt
-      RCLONE_CONFIG_GCRYPT_REMOTE: 'gdrive:${BACKUP_GDRIVE_FOLDER:-remnawave-bot}'
-      RCLONE_CONFIG_GCRYPT_FILENAME_ENCRYPTION: 'off'
-      RCLONE_CONFIG_GCRYPT_DIRECTORY_NAME_ENCRYPTION: 'false'
-      RCLONE_CONFIG_GCRYPT_SUFFIX: 'none'
-      RCLONE_CONFIG_GCRYPT_PASSWORD: '${RCLONE_CONFIG_GCRYPT_PASSWORD:-}'
-      RCLONE_TIMEOUT: 2m
-      RCLONE_CONTIMEOUT: 10s
-      RCLONE_RETRIES: '3'
+      BACKUP_RESTIC_STAGE_DIR: /run/remnawave-backup
+      BACKUP_RESTIC_STATE_DIR: /backups/restic/state
+      BACKUP_RESTIC_INTERVAL_SECONDS: '${BACKUP_RESTIC_INTERVAL_SECONDS:-300}'
+      BACKUP_RESTIC_KEEP_LAST: '${BACKUP_RESTIC_KEEP_LAST:-12}'
+      BACKUP_RESTIC_KEEP_HOURLY: '${BACKUP_RESTIC_KEEP_HOURLY:-24}'
+      BACKUP_RESTIC_KEEP_DAILY: '${BACKUP_RESTIC_KEEP_DAILY:-30}'
+      BACKUP_RESTIC_KEEP_WEEKLY: '${BACKUP_RESTIC_KEEP_WEEKLY:-12}'
+      BACKUP_RESTIC_KEEP_MONTHLY: '${BACKUP_RESTIC_KEEP_MONTHLY:-12}'
+      BACKUP_RESTIC_MAINTENANCE_ENABLED: '${BACKUP_RESTIC_MAINTENANCE_ENABLED:-true}'
+      BACKUP_RESTIC_MAINTENANCE_TIME: '${BACKUP_RESTIC_MAINTENANCE_TIME:-03:00}'
+      BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS: '${BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS:-900}'
+      BACKUP_RESTIC_TMPFS_SIZE: '${BACKUP_RESTIC_TMPFS_SIZE:-256m}'
+      BACKUP_RESTIC_MIN_FREE_MB: '${BACKUP_RESTIC_MIN_FREE_MB:-16}'
+      RESTIC_REPOSITORY: '${BACKUP_RESTIC_REPOSITORY:-rclone:gdrive:remnawave-restic}'
+      RESTIC_PASSWORD_FILE: /run/secrets/restic-password
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+      BACKUP_PING_URL_FILE: /run/secrets/ping-url
     volumes:
+      # Directory mount, not a single-file bind: replacing .env on the host must
+      # be visible without recreating the container.  The script reads only
+      # /src/.env from this read-only mount.
       - ./:/src:ro
+      # rclone writes refreshed OAuth tokens back to its dedicated config.
+      - ${BACKUP_RCLONE_CONFIG_DIR:-/etc/remnawave-backup/rclone}:/config/rclone:rw
+      # Password file is read-only and never part of the application .env.
+      - ${BACKUP_RESTIC_PASSWORD_FILE:-/etc/remnawave-backup/restic-password}:/run/secrets/restic-password:ro
+      # Optional healthchecks.io-compatible ping URL. /dev/null disables it.
+      - ${BACKUP_PING_URL_FILE:-/dev/null}:/run/secrets/ping-url:ro
+      # Persistent freshness/maintenance state.  Legacy backup_data contents are
+      # intentionally left untouched until a verified cutover.
       - backup_data:/backups
+    # Bounded staging area: a huge dump must not fill the container writable layer.
+    tmpfs:
+      - /run/remnawave-backup:size=${BACKUP_RESTIC_TMPFS_SIZE:-256m},mode=0700
     networks:
       - bot_network
     healthcheck:
