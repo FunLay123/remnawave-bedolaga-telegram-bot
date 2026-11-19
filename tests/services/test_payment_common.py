@@ -246,20 +246,20 @@ async def test_success_keyboard_multi_tariff_renew_targets_current_subscription(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ('is_trial', 'tariff_id', 'tariff'),
+    ('tariff_id', 'tariff'),
     [
-        pytest.param(False, None, None, id='legacy'),
-        pytest.param(False, 1, SimpleNamespace(is_active=False, is_daily=False), id='inactive-tariff'),
-        pytest.param(False, 1, SimpleNamespace(is_active=True, is_daily=True), id='daily'),
+        pytest.param(None, None, id='legacy'),
+        pytest.param(1, SimpleNamespace(is_active=False, is_daily=False), id='inactive-tariff'),
+        pytest.param(1, SimpleNamespace(is_active=True, is_daily=True), id='daily'),
     ],
 )
 async def test_success_keyboard_omits_renew_when_current_tariff_cannot_be_renewed(
-    monkeypatch: pytest.MonkeyPatch, is_trial: bool, tariff_id: int | None, tariff: SimpleNamespace | None
+    monkeypatch: pytest.MonkeyPatch, tariff_id: int | None, tariff: SimpleNamespace | None
 ) -> None:
     monkeypatch.setattr(settings, 'SALES_MODE', 'tariffs')
     monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', False)
     monkeypatch.setattr(settings, 'MAIN_MENU_MODE', 'default')
-    subscription = SimpleNamespace(id=7, is_trial=is_trial, is_active=True, tariff_id=tariff_id, tariff=tariff)
+    subscription = SimpleNamespace(id=7, is_trial=False, is_active=True, tariff_id=tariff_id, tariff=tariff)
     user = SimpleNamespace(language='ru', subscription=subscription)
     service = PaymentCommonMixin()
 
@@ -269,6 +269,27 @@ async def test_success_keyboard_omits_renew_when_current_tariff_cannot_be_renewe
 
     assert _callbacks(keyboard) == ['back_to_menu']
     assert _callbacks(snapshot_keyboard) == ['back_to_menu']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'error',
+    [
+        pytest.param(MissingGreenlet('lazy load is not available'), id='missing-greenlet'),
+        pytest.param(DetachedInstanceError('instance is detached'), id='detached-instance'),
+    ],
+)
+async def test_success_keyboard_lazy_subscription_falls_back_to_main_menu(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    """Сбой чтения подписки не должен ломать клавиатуру успешного пополнения."""
+    monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', False)
+    monkeypatch.setattr(settings, 'MAIN_MENU_MODE', 'default')
+    user = _LazyUser(error)
+
+    keyboard = await PaymentCommonMixin().build_topup_success_keyboard(user)
+
+    assert _callbacks(keyboard) == ['back_to_menu']
 
 
 @pytest.mark.asyncio
