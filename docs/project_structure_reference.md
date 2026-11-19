@@ -4854,7 +4854,7 @@
   Функции: `test_daily_tariff_one_day_is_priced_from_daily_price` — A 1-day purchase of a daily tariff must cost ``daily_price_kopeks``,, `test_daily_tariff_rejects_non_daily_period` — A daily tariff only sells a 1-day period; asking for 30 days must fail
 - `tests/services/test_guest_purchase_fulfillment.py` — Python-модуль
   Классы: нет
-  Функции: `test_fulfill_purchase_passes_purchase_context_to_user_resolution`
+  Функции: `test_fulfill_purchase_passes_purchase_context_to_user_resolution`, `test_fulfill_expired_subscription_passes_tariff_and_wakes_premium_worker` — Landing fulfillment must not pre-assign tariff_id and must wake the worker.
 - `tests/services/test_guest_purchase_receipt_contact.py` — Python-модуль
   Классы: нет
   Функции: `test_regular_purchase_uses_the_fulfilment_user` — Обычная покупка: покупатель и получатель — одно лицо., `test_gift_receipt_goes_to_the_linked_buyer` — Подарок из кабинета: buyer_user_id проставлен — чек уходит дарителю., `test_guest_gift_falls_back_to_the_purchase_contact` — Подарок с лендинга: аккаунта дарителя нет, но его почта есть на покупке., `test_guest_gift_with_telegram_contact_has_no_usable_channel` — contact_value для telegram — это username, отправить по нему чек нельзя., `test_gift_never_leaks_the_recipient_contacts` — Инвариант: контакты одаряемого не попадают в чек ни в одной ветке.
@@ -5265,7 +5265,7 @@
   Функции: `test_snapshot_fetches_panel_once_and_serves_repeat_from_cache`, `test_snapshot_refetches_after_invalidate_all`, `test_devices_failure_caches_user_without_devices`, `test_missing_panel_user_is_cached_without_devices`, `test_panel_error_propagates_and_is_not_cached`, `test_apply_panel_user_usage_writes_traffic_without_panel_access`, `test_loaded_panel_user_skips_existence_get`, `test_loaded_missing_panel_user_triggers_sync`, `test_default_path_still_checks_panel_user`
 - `tests/services/test_subscription_service_premium_refresh.py` — Python-модуль
   Классы: нет
-  Функции: `test_premium_tariff_wakes_the_worker_with_the_panel_id`, `test_public_refresh_wakes_without_a_reset_flag` — Delivered purchase may not reset panel traffic — the wake is still needed., `test_sync_without_traffic_reset_does_not_wake_the_worker`, `test_tariff_without_premium_squads_does_not_wake_the_worker`, `test_disabled_feature_does_not_wake_the_worker`
+  Функции: `test_premium_tariff_wakes_the_worker_with_the_panel_id`, `test_public_refresh_wakes_without_a_reset_flag` — Delivered purchase may not reset panel traffic — the wake is still needed., `test_explicit_tariff_avoids_an_expired_lazy_relationship` — After db.refresh(subscription) the tariff attribute can raise on access., `test_sync_without_traffic_reset_does_not_wake_the_worker`, `test_tariff_without_premium_squads_does_not_wake_the_worker`, `test_disabled_feature_does_not_wake_the_worker`
 - `tests/services/test_subscription_service_sync.py` — Python-модуль
   Классы: нет
   Функции: `test_sync_picks_create_or_update_by_panel_id`, `test_missing_user_falls_to_create_which_reports_it` — Пользователя нет в базе: не падаем, create сам залогирует и вернёт None.
