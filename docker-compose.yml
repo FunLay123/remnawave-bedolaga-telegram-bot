@@ -101,12 +101,66 @@ services:
       retries: 3
       start_period: 30s
 
+  backup:
+    profiles: ['backup']
+    build:
+      context: ./docker/backup
+    container_name: remnawave_bot_backup
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGDATABASE: '${POSTGRES_DB:-remnawave_bot}'
+      PGUSER: '${POSTGRES_USER:-remnawave_user}'
+      PGPASSWORD: '${POSTGRES_PASSWORD:-secure_password_123}'
+      PGCONNECT_TIMEOUT: '10'
+      TZ: '${TZ:-Europe/Moscow}'
+      BACKUP_DIR: /backups
+      ENV_FILE: /src/.env
+      README_SOURCE: /usr/local/share/remnawave-backup/RESTORE.md
+      DUMP_INTERVAL_SECONDS: '${BACKUP_GDRIVE_DUMP_INTERVAL_SECONDS:-300}'
+      UPLOAD_INTERVAL_SECONDS: '${BACKUP_GDRIVE_UPLOAD_INTERVAL_SECONDS:-300}'
+      KEEP_5MIN: '${BACKUP_GDRIVE_KEEP_5MIN:-12}'
+      KEEP_HOURLY: '${BACKUP_GDRIVE_KEEP_HOURLY:-24}'
+      KEEP_DAILY: '${BACKUP_GDRIVE_KEEP_DAILY:-30}'
+      KEEP_WEEKLY: '${BACKUP_GDRIVE_KEEP_WEEKLY:-12}'
+      KEEP_MONTHLY: '${BACKUP_GDRIVE_KEEP_MONTHLY:-12}'
+      HEALTHCHECK_MAX_AGE_SECONDS: '${BACKUP_GDRIVE_HEALTHCHECK_MAX_AGE_SECONDS:-900}'
+      RCLONE_REMOTE: gcrypt
+      RCLONE_PATH: ''
+      RCLONE_DOCS_REMOTE: gdrive
+      BACKUP_GDRIVE_FOLDER: '${BACKUP_GDRIVE_FOLDER:-remnawave-bot}'
+      RCLONE_CONFIG_GDRIVE_TYPE: drive
+      RCLONE_CONFIG_GDRIVE_SCOPE: drive
+      RCLONE_CONFIG_GDRIVE_TOKEN: '${RCLONE_CONFIG_GDRIVE_TOKEN:-}'
+      RCLONE_CONFIG_GCRYPT_TYPE: crypt
+      RCLONE_CONFIG_GCRYPT_REMOTE: 'gdrive:${BACKUP_GDRIVE_FOLDER:-remnawave-bot}'
+      RCLONE_CONFIG_GCRYPT_FILENAME_ENCRYPTION: 'off'
+      RCLONE_CONFIG_GCRYPT_DIRECTORY_NAME_ENCRYPTION: 'false'
+      RCLONE_CONFIG_GCRYPT_PASSWORD: '${RCLONE_CONFIG_GCRYPT_PASSWORD:-}'
+    volumes:
+      - ./.env:/src/.env:ro
+      - backup_data:/backups
+    networks:
+      - bot_network
+    healthcheck:
+      test: ['CMD', '/usr/local/bin/healthcheck.sh']
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+
 volumes:
   postgres18_data:
     driver: local
   postgres_data:
     driver: local
   redis_data:
+    driver: local
+  backup_data:
     driver: local
 
 networks:
