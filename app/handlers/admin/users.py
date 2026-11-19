@@ -5699,6 +5699,68 @@ async def admin_buy_subscription_confirm(callback: types.CallbackQuery, db_user:
     await callback.answer()
 
 
+async def _refund_admin_purchase(
+    db: AsyncSession,
+    target_user_id: int,
+    amount_kopeks: int,
+    reason: str,
+) -> bool:
+    """Вернуть списанные деньги, если админская покупка не сохранилась.
+
+    Принимаем ID, а не ORM-объект: после ``db.rollback()`` прежний экземпляр
+    протухает, и обращение к ``user.id`` в async-сессии падает с MissingGreenlet
+    — компенсация молча не срабатывала. Пользователь перечитывается по id уже
+    в чистой транзакции.
+    """
+    if amount_kopeks <= 0:
+        return True
+    try:
+        from app.database.crud.user import add_user_balance
+
+        target_user = await db.get(User, target_user_id)
+        if target_user is None:
+            raise RuntimeError(f'user {target_user_id} not found for refund')
+
+        refunded = await add_user_balance(
+            db,
+            target_user,
+            amount_kopeks,
+            reason,
+            create_transaction=True,
+            transaction_type=TransactionType.REFUND,
+        )
+        if not refunded:
+            from app.handlers.subscription.tariff_purchase import _persist_failed_refund
+
+            await _persist_failed_refund(
+                user_id=target_user_id,
+                amount_kopeks=amount_kopeks,
+                reason=f'{reason} (add_user_balance returned False)',
+                error=Exception('add_user_balance returned False'),
+            )
+        return bool(refunded)
+    except Exception as refund_error:
+        logger.critical(
+            'CRITICAL: не удалось вернуть средства после админской покупки',
+            user_id=target_user_id,
+            amount_kopeks=amount_kopeks,
+            reason=reason,
+            refund_error=refund_error,
+        )
+        try:
+            from app.handlers.subscription.tariff_purchase import _persist_failed_refund
+
+            await _persist_failed_refund(
+                user_id=target_user_id,
+                amount_kopeks=amount_kopeks,
+                reason=reason,
+                error=refund_error,
+            )
+        except Exception:
+            pass
+        return False
+
+
 @admin_required
 @error_handler
 async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
@@ -5757,6 +5819,11 @@ async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user:
         await callback.answer('❌ Недостаточно средств на балансе пользователя', show_alert=True)
         return
 
+    balance_charged = False
+    purchase_persisted = False
+    # ID снимаем ДО возможного rollback: после него ORM-объект протухает.
+    target_user_id = target_user.id
+
     try:
         from app.database.crud.user import subtract_user_balance
 
@@ -5772,26 +5839,40 @@ async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user:
             await callback.answer('❌ Ошибка списания средств', show_alert=True)
             return
 
+        balance_charged = True
+
         if subscription:
             # Оверлей грейса, осевший в подписке (v4.10–4.11), — не её срок: вернуть до расчёта.
+            from app.database.crud.subscription import (
+                apply_trial_conversion_defaults,
+                get_trial_carry_over_delta,
+            )
             from app.services.grace_access_echo import undo_grace_overlay_echo
 
             await undo_grace_overlay_echo(db, subscription)
             current_time = datetime.now(UTC)
-            bonus_period = timedelta()
+            bonus_period = get_trial_carry_over_delta(subscription, current_time)
 
-            if subscription.is_trial and settings.TRIAL_ADD_REMAINING_DAYS_TO_PAID and subscription.end_date:
-                remaining_trial_delta = subscription.end_date - current_time
-                if remaining_trial_delta.total_seconds() > 0:
-                    bonus_period = remaining_trial_delta
-                    logger.info(
-                        'Админ продлевает подписку: добавляем оставшееся время триала пользователю',
-                        bonus_period=bonus_period,
-                        telegram_id=target_user.telegram_id,
-                    )
+            if bonus_period.total_seconds() > 0:
+                logger.info(
+                    'Админ продлевает подписку: добавляем оставшееся время триала пользователю',
+                    bonus_period=bonus_period,
+                    telegram_id=target_user.telegram_id,
+                )
 
+            # Дни «только перенос реферального хвоста» (days_only) применяем только к
+            # строкам с известной базовой датой: платный срок стартует от покупки,
+            # разрешённый остаток уже в bonus_period. Для legacy/levels сохраняем
+            # прежнюю формулу — база = будущий end_date (иначе терялся бы остаток).
+            is_days_only_trial_with_base = (
+                subscription.is_trial
+                and subscription.base_trial_end_date is not None
+                and settings.is_referral_days_only_scheme()
+            )
             extension_base_date = current_time
-            if subscription.end_date and subscription.end_date > current_time:
+            if is_days_only_trial_with_base:
+                subscription.start_date = current_time
+            elif subscription.end_date and subscription.end_date > current_time:
                 extension_base_date = subscription.end_date
             else:
                 subscription.start_date = current_time
@@ -5803,13 +5884,18 @@ async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user:
             if subscription.is_trial or not subscription.is_active:
                 was_trial = subscription.is_trial
                 subscription.is_trial = False
+                # Учёт реферального остатка относится к триалу — на платной строке не нужен.
+                subscription.trial_referral_seconds = None
                 if subscription.traffic_limit_gb != 0:
                     subscription.traffic_limit_gb = 0
                 subscription.device_limit = settings.DEFAULT_DEVICE_LIMIT
                 if was_trial:
                     subscription.traffic_used_gb = 0.0
+                    # Триал не мог включать автоплатёж — выставляем дефолт ровно на конверсии.
+                    apply_trial_conversion_defaults(subscription)
 
             await db.commit()
+            purchase_persisted = True
             await db.refresh(subscription)
 
             from app.database.crud.transaction import create_transaction
@@ -5911,9 +5997,21 @@ async def admin_buy_subscription_execute(callback: types.CallbackQuery, db_user:
 
     except Exception as e:
         logger.error('Ошибка покупки подписки администратором', error=e)
-        await callback.answer('❌ Ошибка при покупке подписки', show_alert=True)
-
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        if balance_charged and not purchase_persisted:
+            await _refund_admin_purchase(
+                db,
+                target_user_id,
+                price_kopeks,
+                'Возврат: ошибка покупки подписки (администратор)',
+            )
+        try:
+            await callback.answer('❌ Ошибка при покупке подписки', show_alert=True)
+        except Exception:
+            pass
 
 
 # ==================== Покупка тарифа администратором ====================
@@ -6197,6 +6295,11 @@ async def admin_buy_tariff_execute(callback: types.CallbackQuery, db_user: User,
         await callback.answer('❌ Недостаточно средств на балансе', show_alert=True)
         return
 
+    balance_charged = False
+    purchase_persisted = False
+    # ID снимаем ДО возможного rollback: после него ORM-объект протухает.
+    target_user_id = target_user.id
+
     try:
         from app.database.crud.subscription import (
             create_paid_subscription,
@@ -6218,6 +6321,8 @@ async def admin_buy_tariff_execute(callback: types.CallbackQuery, db_user: User,
         if not success:
             await callback.answer('❌ Ошибка списания средств', show_alert=True)
             return
+
+        balance_charged = True
 
         # Получаем серверы из тарифа
         squads = tariff.allowed_squads or []
@@ -6247,6 +6352,8 @@ async def admin_buy_tariff_execute(callback: types.CallbackQuery, db_user: User,
                 connected_squads=squads,
                 tariff_id=tariff.id,
             )
+
+        purchase_persisted = True
 
         # Обновляем в Remnawave
         try:
@@ -6315,8 +6422,21 @@ async def admin_buy_tariff_execute(callback: types.CallbackQuery, db_user: User,
 
     except Exception as e:
         logger.error('Ошибка покупки тарифа администратором', error=e, exc_info=True)
-        await callback.answer('❌ Ошибка при покупке тарифа', show_alert=True)
-        await db.rollback()
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        if balance_charged and not purchase_persisted:
+            await _refund_admin_purchase(
+                db,
+                target_user_id,
+                price_kopeks,
+                'Возврат: ошибка покупки тарифа (администратор)',
+            )
+        try:
+            await callback.answer('❌ Ошибка при покупке тарифа', show_alert=True)
+        except Exception:
+            pass
 
 
 @admin_required

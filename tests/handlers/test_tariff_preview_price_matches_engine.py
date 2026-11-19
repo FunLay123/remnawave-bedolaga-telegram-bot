@@ -152,3 +152,55 @@ async def test_purchase_confirmation_matches_compact_renewal_layout(monkeypatch)
         assert 'Баланс 100 ₽ → 0 ₽' in plain
         for legacy in ('Тариф:', 'Трафик:', 'Устройств:', 'После оплаты:'):
             assert legacy not in plain, plain
+
+
+async def test_confirmation_shows_referral_carry_note(monkeypatch):
+    """На подтверждении видно, сколько реферальных дней дойдёт до платного срока."""
+    from app.handlers.subscription import tariff_purchase as m
+
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        now = datetime.now(UTC)
+        user = User(
+            telegram_id=113,
+            username='user113',
+            first_name='User',
+            status=UserStatus.ACTIVE.value,
+            language='ru',
+            balance_kopeks=BASE_PRICE_KOPEKS,
+        )
+        db.add(user)
+        await db.commit()
+
+        tariff = Tariff(
+            name='Базовый',
+            is_active=True,
+            device_limit=1,
+            traffic_limit_gb=0,
+            period_prices={'30': BASE_PRICE_KOPEKS},
+        )
+        db.add(tariff)
+        await db.commit()
+
+        db.add(
+            Subscription(
+                user_id=user.id,
+                status=SubscriptionStatus.TRIAL.value,
+                is_trial=True,
+                start_date=now,
+                base_trial_end_date=now + timedelta(days=1),
+                end_date=now + timedelta(days=20),
+                remnawave_short_id='trial1',
+            )
+        )
+        await db.commit()
+
+        monkeypatch.setattr(m.user_cart_service, 'save_user_cart', AsyncMock())
+
+        callback = _callback(f'tariff_period:{tariff.id}:30')
+        await m.select_tariff_period.__wrapped__(callback, user, db, _state())
+
+        rendered = callback.message.edit_text.await_args.args[0]
+        assert '<blockquote>Реферальные дни перенесутся в основной тариф — 19 дней</blockquote>' in rendered
+        assert '🎁' not in rendered

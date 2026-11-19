@@ -1,10 +1,13 @@
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.config import settings
+from app.database.crud.subscription import activate_pending_trial_subscription
 from app.handlers.subscription.purchase import activate_trial
+from app.services.trial_activation_service import get_base_trial_duration_days
 
 
 def _texts():
@@ -79,3 +82,78 @@ async def test_referral_tail_survives_screen_render_failure(monkeypatch):
     # Перерисовка упала до тоста: callback подтверждён без текста.
     callback.answer.assert_awaited_once_with(None)
     assert ['subscriptions'] in refresh_calls
+
+
+# ---------------------------------------------------------------------------
+# Базовая длительность триала: фактически применённый реферальный бонус
+# ---------------------------------------------------------------------------
+
+
+def _referred_user() -> SimpleNamespace:
+    return SimpleNamespace(referred_by_id=1)
+
+
+def _direct_user() -> SimpleNamespace:
+    return SimpleNamespace(referred_by_id=None)
+
+
+def test_base_duration_subtracts_applied_bonus(monkeypatch):
+    """days_only + приглашённый: из полного срока вычитается бонус приглашённому."""
+    monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', True)
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 20)
+
+    assert get_base_trial_duration_days(_referred_user(), 23) == 3
+
+
+def test_base_duration_never_negative(monkeypatch):
+    """Бонус больше полного срока не делает базу отрицательной."""
+    monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', True)
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 20)
+
+    assert get_base_trial_duration_days(_referred_user(), 5) == 0
+
+
+def test_base_duration_without_referral_or_scheme_is_total(monkeypatch):
+    """Без приглашения, вне days_only или при выключенной программе бонус не вычитается."""
+    monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', True)
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 20)
+
+    assert get_base_trial_duration_days(_direct_user(), 23) == 23
+
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'levels')
+    assert get_base_trial_duration_days(_referred_user(), 23) == 23
+
+    monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', False)
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    assert get_base_trial_duration_days(_referred_user(), 23) == 23
+
+
+@pytest.mark.asyncio
+async def test_pending_trial_activation_restores_base_date(monkeypatch):
+    """Отложенная активация сдвигает и полный срок, и базу без бонуса."""
+    monkeypatch.setattr(settings, 'REFERRAL_PROGRAM_ENABLED', True)
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 20)
+
+    created_at = datetime.now(UTC) - timedelta(days=2)
+    pending = SimpleNamespace(
+        id=10,
+        user_id=7,
+        status='pending',
+        start_date=created_at,
+        end_date=created_at + timedelta(days=23),
+        duration_days=None,
+    )
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = pending
+    db = AsyncMock()
+    db.execute = AsyncMock(return_value=result)
+    db.get = AsyncMock(return_value=_referred_user())
+
+    subscription = await activate_pending_trial_subscription(db, subscription_id=10, user_id=7)
+
+    assert subscription.end_date - subscription.start_date == timedelta(days=23)
+    assert subscription.base_trial_end_date - subscription.start_date == timedelta(days=3)

@@ -583,6 +583,11 @@ async def _auto_extend_subscription(
         getattr(user, 'promo_offer_discount_expires_at', None) if prepared.consume_promo_offer else None
     )
 
+    # ID/подпись снимаем ДО списания: rollback в компенсации протухает объект,
+    # и обращение к user.id в async-сессии падает с MissingGreenlet.
+    user_id = user.id
+    format_user_id = _format_user_id(user)
+
     try:
         deducted = await subtract_user_balance(
             db,
@@ -633,63 +638,59 @@ async def _auto_extend_subscription(
             subscription,
             prepared.period_days,
             tariff_id=prepared.tariff_id if is_tariff_change else None,
+            convert_trial=True,
             traffic_limit_gb=conversion_traffic_limit_gb if apply_traffic_limit else None,
             device_limit=prepared.device_limit if is_tariff_change else None,
         )
-
-        # Конвертируем триал в платную подписку ТОЛЬКО после успешного продления
-        if was_trial and subscription.is_trial:
-            subscription.is_trial = False
-            subscription.status = 'active'
-            await db.commit()
-            logger.info(
-                '✅ Триал конвертирован в платную подписку для пользователя',
-                subscription_id=subscription.id,
-                format_user_id=_format_user_id(user),
-            )
-
     except Exception as error:  # pragma: no cover - defensive logging
         logger.error(
             '❌ Автопокупка: не удалось продлить подписку пользователя',
-            format_user_id=_format_user_id(user),
+            format_user_id=format_user_id,
             error=error,
             exc_info=True,
         )
         await db.rollback()
-        # Compensating refund: balance was already committed by subtract_user_balance
+        # Compensating refund: balance was already committed by subtract_user_balance.
+        # Пользователя перечитываем по id: после rollback прежний ORM-объект
+        # протух, и компенсация молча падала бы с MissingGreenlet.
         try:
             from app.database.crud.user import add_user_balance
 
+            refund_user = await db.get(User, user_id)
+            if refund_user is None:
+                raise RuntimeError(f'user {user_id} not found for refund')
+
             await add_user_balance(
                 db,
-                user,
+                refund_user,
                 prepared.price_kopeks,
                 'Возврат: ошибка автопродления подписки',
                 create_transaction=True,
                 transaction_type=TransactionType.REFUND,
+                commit=False,
             )
 
-            # Restore consumed promo offer fields
+            # Restore consumed promo offer fields (in the same refund commit).
             if prepared.consume_promo_offer and saved_promo_percent > 0:
-                user.promo_offer_discount_percent = saved_promo_percent
-                user.promo_offer_discount_source = saved_promo_source
-                user.promo_offer_discount_expires_at = saved_promo_expires
-                await db.commit()
+                refund_user.promo_offer_discount_percent = saved_promo_percent
+                refund_user.promo_offer_discount_source = saved_promo_source
+                refund_user.promo_offer_discount_expires_at = saved_promo_expires
                 logger.info(
                     '💰 Автопокупка: восстановлен промо-оффер после ошибки продления',
-                    format_user_id=_format_user_id(user),
+                    format_user_id=format_user_id,
                     restored_percent=saved_promo_percent,
                 )
 
+            await db.commit()
             logger.info(
                 '💰 Автопокупка: возврат средств после ошибки продления',
-                format_user_id=_format_user_id(user),
+                format_user_id=format_user_id,
                 refund_kopeks=prepared.price_kopeks,
             )
         except Exception as refund_error:
             logger.critical(
                 'CRITICAL: Автопокупка: не удалось вернуть средства после ошибки продления',
-                format_user_id=_format_user_id(user),
+                format_user_id=format_user_id,
                 price_kopeks=prepared.price_kopeks,
                 refund_error=refund_error,
             )
@@ -1339,9 +1340,23 @@ async def _auto_purchase_daily_tariff(
         if existing_subscription:
             # Обновляем существующую подписку на суточный тариф
             # Суточность определяется через tariff.is_daily, поэтому достаточно установить tariff_id
-            was_trial_conversion = existing_subscription.is_trial  # Сохраняем до изменения
-            from app.database.crud.subscription import calc_device_limit_on_tariff_switch
+            from app.database.crud.subscription import (
+                apply_trial_conversion_defaults,
+                calc_device_limit_on_tariff_switch,
+                get_trial_carry_over_delta,
+            )
             from app.database.crud.tariff import get_tariff_by_id as _get_old_tariff
+            from app.services.grace_access_echo import undo_grace_overlay_echo
+
+            # Оверлей грейса, осевший в подписке (v4.10–4.11), — не её срок:
+            # возвращаем до расчёта остатка триала, как в остальных платных путях.
+            await undo_grace_overlay_echo(db, existing_subscription)
+
+            now = datetime.now(UTC)
+            # Снимок ДО сброса is_trial: помощник возвращает ноль для не-триала.
+            was_trial = bool(existing_subscription.is_trial)
+            was_trial_conversion = was_trial
+            trial_carry_over = get_trial_carry_over_delta(existing_subscription, now)
 
             old_tariff = (
                 await _get_old_tariff(db, existing_subscription.tariff_id) if existing_subscription.tariff_id else None
@@ -1357,9 +1372,17 @@ async def _auto_purchase_daily_tariff(
             existing_subscription.connected_squads = squads
             existing_subscription.status = 'active'
             existing_subscription.is_trial = False
-            existing_subscription.last_daily_charge_at = datetime.now(UTC)
+            existing_subscription.last_daily_charge_at = now
             existing_subscription.is_daily_paused = False
-            existing_subscription.end_date = datetime.now(UTC) + timedelta(days=1)
+            if was_trial:
+                # Конверсия триала: платный период стартует от покупки, переносится
+                # только разрешённый остаток (в days_only — реферальный хвост).
+                existing_subscription.start_date = now
+                existing_subscription.end_date = now + timedelta(days=1) + trial_carry_over
+                apply_trial_conversion_defaults(existing_subscription)
+            else:
+                # Платная строка: прежняя суточная семантика — только сброс срока.
+                existing_subscription.end_date = now + timedelta(days=1)
 
             from app.database.crud.subscription import refresh_premium_states_for_tariff
 
@@ -2404,22 +2427,10 @@ async def try_auto_extend_expired_after_topup(
         return False
 
     old_end_date = subscription.end_date
-    was_trial = subscription.is_trial
 
     # Extend subscription
     try:
         updated_subscription = await extend_subscription(db, subscription, period_days)
-
-        # Convert trial to paid if needed
-        if was_trial and subscription.is_trial:
-            subscription.is_trial = False
-            subscription.status = 'active'
-            await db.commit()
-            logger.info(
-                '✅ Триал конвертирован в платную подписку (автопродление expired)',
-                subscription_id=subscription.id,
-                format_user_id=_format_user_id(user),
-            )
     except Exception as error:
         logger.error(
             '❌ Автопродление expired: не удалось продлить подписку',

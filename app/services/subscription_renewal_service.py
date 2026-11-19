@@ -427,7 +427,15 @@ class SubscriptionRenewalService:
         )
 
         try:
-            subscription_after = await extend_subscription(db, subscription_before, period_days)
+            # Классическое продление — настоящая покупка: конвертируем триал
+            # и в классическом режиме без tariff_id (иначе он остался бы
+            # триалом с платным сроком).
+            subscription_after = await extend_subscription(
+                db,
+                subscription_before,
+                period_days,
+                convert_trial=True,
+            )
         except Exception:
             # Session may be in a failed state after a broken commit — rollback first
             await db.rollback()

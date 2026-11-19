@@ -113,6 +113,7 @@ async def test_proceed_skip_selection_uses_back_to_menu(monkeypatch):
 
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
     monkeypatch.setattr(m, 'get_tariff_by_id', AsyncMock(return_value=tariff))
+    monkeypatch.setattr(m, 'get_subscription_by_user_id', AsyncMock(return_value=None))
     monkeypatch.setattr(m, 'format_tariff_info_for_user', MagicMock(return_value='INFO'))
     monkeypatch.setattr(m, 'get_tariff_periods_keyboard', MagicMock(return_value=periods_kb))
 
@@ -132,6 +133,7 @@ async def test_proceed_normal_selection_uses_menu_buy_back(monkeypatch):
 
     monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
     monkeypatch.setattr(m, 'get_tariff_by_id', AsyncMock(return_value=tariff))
+    monkeypatch.setattr(m, 'get_subscription_by_user_id', AsyncMock(return_value=None))
     monkeypatch.setattr(m, 'format_tariff_info_for_user', MagicMock(return_value='INFO'))
     monkeypatch.setattr(m, 'get_tariff_periods_keyboard', MagicMock(return_value=periods_kb))
 

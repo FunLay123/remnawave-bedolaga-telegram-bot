@@ -468,7 +468,15 @@ class AdvertisingCampaignService:
             # Multi-tariff: extend the existing subscription for this tariff
             from app.database.crud.subscription import extend_subscription
 
-            await extend_subscription(db, existing_subscription, duration_days, tariff_id=tariff.id)
+            # Бонус кампании — бесплатная выдача, а не покупка: живой триал
+            # остаётся триалом и не проходит платный перенос хвоста.
+            await extend_subscription(
+                db,
+                existing_subscription,
+                duration_days,
+                tariff_id=tariff.id,
+                convert_trial=False,
+            )
             try:
                 await self.subscription_service.update_remnawave_user(db, existing_subscription)
             except Exception as error:

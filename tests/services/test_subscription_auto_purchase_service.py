@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,7 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database.models import TransactionType, User
-from app.services.subscription_auto_purchase_service import auto_purchase_saved_cart_after_topup
+from app.services.subscription_auto_purchase_service import (
+    _auto_purchase_daily_tariff,
+    auto_purchase_saved_cart_after_topup,
+)
 from app.services.subscription_purchase_service import (
     PurchaseDevicesConfig,
     PurchaseOptionsContext,
@@ -760,6 +764,9 @@ async def test_auto_purchase_trial_converted_after_successful_extension(monkeypa
     # Mock: продление успешно
     async def extend_stub(db, current_subscription, days, **kwargs):
         current_subscription.end_date = current_subscription.end_date + timedelta(days=days)
+        # Реальный extend_subscription конвертирует триал при convert_trial=True.
+        if kwargs.get('convert_trial') is True:
+            current_subscription.is_trial = False
         return current_subscription
 
     monkeypatch.setattr(
@@ -853,7 +860,9 @@ async def test_auto_purchase_trial_converted_after_successful_extension(monkeypa
     assert result is True  # Автопокупка успешна
     assert subscription.is_trial is False  # ТРИАЛ КОНВЕРТИРОВАН!
     assert subscription.status == 'active'
-    db_session.commit.assert_awaited()  # Commit был вызван
+    # Дополнительный commit из удалённого мёртвого блока больше не нужен:
+    # реальный extend_subscription коммитит сам. Проверяем само продление.
+    assert subscription.end_date > datetime.now(UTC) + timedelta(days=30)
 
 
 async def test_auto_purchase_trial_preserved_on_extension_failure(monkeypatch):
@@ -1062,6 +1071,9 @@ async def test_auto_purchase_trial_remaining_days_transferred(monkeypatch):
 
         if tariff_id is not None:
             current_subscription.tariff_id = tariff_id
+        # Реальный extend_subscription конвертирует триал при convert_trial=True.
+        if kwargs.get('convert_trial') is True:
+            current_subscription.is_trial = False
         return current_subscription
 
     monkeypatch.setattr(
@@ -1226,3 +1238,168 @@ def test_notification_nav_keyboard_uses_main_menu_icons():
     assert home.text == 'В главное меню'
     assert home.callback_data == 'back_to_menu'
     assert home.icon_custom_emoji_id == '5314310000531766389'
+
+
+class _DailySubscriptionService:
+    async def create_remnawave_user(self, *args, **kwargs):
+        return None
+
+
+def _daily_tariff() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=5,
+        name='Daily',
+        is_active=True,
+        is_daily=True,
+        daily_price_kopeks=1000,
+        traffic_limit_gb=10,
+        device_limit=2,
+        max_device_limit=None,
+        allowed_squads=['squad'],
+    )
+
+
+def _daily_user() -> SimpleNamespace:
+    return SimpleNamespace(
+        id=1,
+        telegram_id=101,
+        email=None,
+        language='ru',
+        balance_kopeks=200_000,
+        get_primary_promo_group=lambda: None,
+    )
+
+
+def _patch_daily_autopurchase(monkeypatch, subscription, tariff, user) -> AsyncMock:
+    """Обвязка вокруг ``_auto_purchase_daily_tariff``: всё внешнее — мок, логика дат реальная."""
+    monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
+    monkeypatch.setattr(type(settings), 'is_autopay_enabled_by_default', lambda self: True)
+    # days_only: переносится только реферальный хвост после base_trial_end_date.
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', False)
+    monkeypatch.setattr('app.database.crud.tariff.get_tariff_by_id', AsyncMock(return_value=tariff))
+    monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', AsyncMock(return_value=user))
+    monkeypatch.setattr('app.utils.promo_offer.get_user_active_promo_discount_percent', lambda _user: 0)
+    monkeypatch.setattr(
+        'app.services.pricing_engine.PricingEngine.apply_stacked_discounts',
+        staticmethod(lambda amount, group_percent, offer_percent: (amount, 0, 0)),
+    )
+    monkeypatch.setattr('app.database.crud.user.subtract_user_balance', AsyncMock(return_value=True))
+    monkeypatch.setattr(
+        'app.database.crud.subscription.get_subscription_by_user_id',
+        AsyncMock(return_value=subscription),
+    )
+    monkeypatch.setattr('app.services.grace_access_echo.undo_grace_overlay_echo', AsyncMock(return_value=set()))
+    monkeypatch.setattr(
+        'app.database.crud.transaction.create_transaction',
+        AsyncMock(return_value=SimpleNamespace(id=1)),
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.SubscriptionService',
+        _DailySubscriptionService,
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service._delete_cart_for_subscription',
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service.clear_subscription_checkout_draft',
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_renewal_service.with_admin_notification_service',
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        'app.services.subscription_auto_purchase_service._notify_email_user_auto_purchase',
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        'app.cabinet.routes.websocket.notify_user_subscription_renewed',
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        'app.cabinet.routes.websocket.notify_user_subscription_activated',
+        AsyncMock(),
+    )
+    return AsyncMock(spec=AsyncSession)
+
+
+async def test_daily_autopurchase_trial_conversion_carries_only_referral_tail(monkeypatch):
+    """Суточная автопокупка, конвертируя триал, не сжигает реферальный хвост days_only."""
+    before = datetime.now(UTC)
+    subscription = SimpleNamespace(
+        id=7,
+        user_id=1,
+        is_trial=True,
+        start_date=before - timedelta(days=5),
+        end_date=before + timedelta(days=20),
+        # База — через день: 19 дней после неё и есть реферальный хвост.
+        base_trial_end_date=before + timedelta(days=1),
+        autopay_enabled=False,
+        status='trial',
+        traffic_limit_gb=0,
+        device_limit=1,
+        connected_squads=['old'],
+        tariff_id=99,
+        last_daily_charge_at=None,
+        is_daily_paused=True,
+    )
+    tariff = _daily_tariff()
+    user = _daily_user()
+    db = _patch_daily_autopurchase(monkeypatch, subscription, tariff, user)
+
+    result = await _auto_purchase_daily_tariff(db, user, {'tariff_id': 5})
+    after = datetime.now(UTC)
+
+    assert result is True
+    assert subscription.is_trial is False
+    assert subscription.status == 'active'
+    # 1 купленные сутки + 19 реферальных; базовый день не переносится.
+    assert before + timedelta(days=20) <= subscription.end_date <= after + timedelta(days=20)
+    assert subscription.end_date < before + timedelta(days=21)
+    # Конверсия стартует новый платный период от now, а не от старого start_date.
+    assert before <= subscription.start_date <= after
+    # На триале автоплатёж был запрещён; на конверсии выставляется дефолт.
+    assert subscription.autopay_enabled is True
+    # Остальные обновления тарифа/устройств/сквадов сохранены.
+    assert subscription.tariff_id == tariff.id
+    assert subscription.device_limit == tariff.device_limit
+    assert subscription.connected_squads == ['squad']
+    assert subscription.is_daily_paused is False
+
+
+async def test_daily_autopurchase_paid_row_keeps_daily_reset_semantics(monkeypatch):
+    """Платная строка: только суточный сброс end_date, start_date и автоплатёж не трогаем."""
+    before = datetime.now(UTC)
+    original_start = before - timedelta(days=40)
+    subscription = SimpleNamespace(
+        id=8,
+        user_id=1,
+        is_trial=False,
+        start_date=original_start,
+        end_date=before + timedelta(days=3),
+        base_trial_end_date=None,
+        autopay_enabled=False,
+        status='active',
+        traffic_limit_gb=5,
+        device_limit=1,
+        connected_squads=['old'],
+        tariff_id=99,
+        last_daily_charge_at=None,
+        is_daily_paused=True,
+    )
+    tariff = _daily_tariff()
+    user = _daily_user()
+    db = _patch_daily_autopurchase(monkeypatch, subscription, tariff, user)
+
+    result = await _auto_purchase_daily_tariff(db, user, {'tariff_id': 5})
+    after = datetime.now(UTC)
+
+    assert result is True
+    assert subscription.is_trial is False
+    assert subscription.start_date == original_start
+    assert before + timedelta(days=1) <= subscription.end_date <= after + timedelta(days=1)
+    assert subscription.end_date < before + timedelta(days=2)
+    # Дефолт автоплатежа на продлении платной строки не применяется.
+    assert subscription.autopay_enabled is False

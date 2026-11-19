@@ -15,7 +15,7 @@ from app.database.crud.subscription import (
     create_paid_subscription,
     create_pending_trial_subscription,
     create_trial_subscription,
-    should_carry_trial_remaining_days,
+    get_trial_carry_over_delta,
 )
 from app.database.crud.transaction import create_transaction
 from app.database.crud.user import subtract_user_balance
@@ -931,10 +931,11 @@ async def activate_trial(
             trial_squad_uuid = await get_random_trial_squad_uuid(db)
             trial_squads = [trial_squad_uuid] if trial_squad_uuid else []
 
-        effective_trial_days = get_effective_trial_days(
-            db_user,
-            trial_duration or settings.TRIAL_DURATION_DAYS,
-        )
+        base_trial_days = trial_duration or settings.TRIAL_DURATION_DAYS
+        effective_trial_days = get_effective_trial_days(db_user, base_trial_days)
+        # Снимок фактически применённого бонуса в тот же момент, что и срок:
+        # create_trial_subscription не должен пересчитывать его после await.
+        applied_trial_referral_days = max(0, effective_trial_days - max(0, int(base_trial_days)))
 
         subscription = await create_trial_subscription(
             db,
@@ -944,6 +945,7 @@ async def activate_trial(
             traffic_limit_gb=trial_traffic_limit,
             connected_squads=trial_squads,
             tariff_id=tariff_id_for_trial,
+            trial_referral_days=applied_trial_referral_days,
         )
 
         await db.refresh(db_user)
@@ -2307,6 +2309,91 @@ async def devices_continue(callback: types.CallbackQuery, state: FSMContext, db_
         await callback.answer()
 
 
+async def _refund_failed_purchase(
+    db: AsyncSession,
+    db_user: User,
+    amount_kopeks: int,
+    reason: str,
+    *,
+    promo_state: tuple[int, str | None, datetime | None] | None = None,
+    user_id: int | None = None,
+) -> bool:
+    """Вернуть списанные деньги и восстановить сожжённый promo offer.
+
+    ``promo_state`` — снятые до списания ``(percent, source, expires_at)``.
+    Возврат и восстановление промо коммитятся одной транзакцией.
+
+    ``user_id`` обязателен для вызовов ПОСЛЕ ``db.rollback()``: там ORM-объект
+    протух, и обращение к ``db_user.id`` в async-сессии падает с MissingGreenlet.
+    Пользователь перечитывается по id уже в чистой транзакции.
+    """
+    if amount_kopeks <= 0 and not promo_state:
+        return True
+    target_user_id = user_id if user_id is not None else db_user.id
+    try:
+        from sqlalchemy import inspect as sa_inspect
+
+        from app.database.crud.user import add_user_balance
+
+        refund_user = db_user
+        # После rollback ORM-объект протухает: перечитываем его по id в чистой
+        # транзакции. Обычный/duck-typed объект используем как есть.
+        user_state = sa_inspect(db_user, raiseerr=False)
+        if user_state is not None and user_state.expired:
+            refund_user = await db.get(User, target_user_id)
+            if refund_user is None:
+                raise RuntimeError(f'user {target_user_id} not found for refund')
+
+        refunded = True
+        if amount_kopeks > 0:
+            refunded = await add_user_balance(
+                db,
+                refund_user,
+                amount_kopeks,
+                reason,
+                create_transaction=True,
+                transaction_type=TransactionType.REFUND,
+                commit=False,
+            )
+        if not refunded:
+            from app.handlers.subscription.tariff_purchase import _persist_failed_refund
+
+            await _persist_failed_refund(
+                user_id=target_user_id,
+                amount_kopeks=amount_kopeks,
+                reason=f'{reason} (add_user_balance returned False)',
+                error=Exception('add_user_balance returned False'),
+            )
+        if promo_state is not None:
+            percent, source, expires = promo_state
+            if percent > 0:
+                refund_user.promo_offer_discount_percent = percent
+                refund_user.promo_offer_discount_source = source
+                refund_user.promo_offer_discount_expires_at = expires
+        await db.commit()
+        return bool(refunded)
+    except Exception as refund_error:
+        logger.critical(
+            'CRITICAL: не удалось вернуть средства после неудачной покупки',
+            user_id=target_user_id,
+            amount_kopeks=amount_kopeks,
+            reason=reason,
+            refund_error=refund_error,
+        )
+        try:
+            from app.handlers.subscription.tariff_purchase import _persist_failed_refund
+
+            await _persist_failed_refund(
+                user_id=target_user_id,
+                amount_kopeks=amount_kopeks,
+                reason=reason,
+                error=refund_error,
+            )
+        except Exception:
+            pass
+        return False
+
+
 async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_user: User, db: AsyncSession):
     # Проверка ограничения на покупку/продление подписки
     if getattr(db_user, 'restriction_subscription', False):
@@ -2328,6 +2415,9 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
 
     data = await state.get_data()
     texts = get_texts(db_user.language)
+    # Снимаем до возможного rollback: после него ORM-объект протухает.
+    purchase_user_id = db_user.id
+    purchase_user_language = db_user.language
 
     await save_subscription_checkout_draft(db_user.id, dict(data))
     resume_callback = 'subscription_resume_checkout' if should_offer_checkout_resume(db_user, True) else None
@@ -2514,6 +2604,14 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
         return
 
     purchase_completed = False
+    balance_charged = False
+    purchase_persisted = False
+    saved_promo_percent = (
+        int(getattr(db_user, 'promo_offer_discount_percent', 0) or 0) if promo_offer_discount_value > 0 else 0
+    )
+    saved_promo_source = getattr(db_user, 'promo_offer_discount_source', None) if saved_promo_percent else None
+    saved_promo_expires = getattr(db_user, 'promo_offer_discount_expires_at', None) if saved_promo_percent else None
+    promo_state = (saved_promo_percent, saved_promo_source, saved_promo_expires) if saved_promo_percent else None
 
     try:
         success = await subtract_user_balance(
@@ -2554,6 +2652,8 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
             await callback.answer()
             return
 
+        balance_charged = True
+
         # Multi-tariff note: confirm_purchase runs only when start_subscription_purchase
         # took the classic day flow. In tariff mode with active tariffs it redirects
         # to show_tariffs_list; the no-active-tariffs fallback deliberately uses this
@@ -2573,6 +2673,42 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
         if existing_subscription:
             logger.info('Обновляем существующую подписку пользователя', telegram_id=db_user.telegram_id)
 
+            # Страны проверяем ДО любых мутаций подписки: возврат за отменённую
+            # покупку не должен закоммитить конверсию триала/статус/лимиты.
+            selected_countries = data.get('countries')
+            if not selected_countries:
+                # Иногда после возврата к оформлению из сохраненной корзины список стран не передается.
+                # В таком случае повторно используем текущие подключенные страны подписки.
+                selected_countries = existing_subscription.connected_squads or []
+                if selected_countries:
+                    data['countries'] = selected_countries  # чтобы далее использовать фактический список стран
+
+            if not selected_countries:
+                texts = get_texts(db_user.language)
+                await callback.message.edit_text(
+                    texts.t(
+                        'COUNTRIES_MINIMUM_REQUIRED',
+                        '❌ Нельзя отключить все страны. Должна быть подключена хотя бы одна страна.',
+                    ),
+                    reply_markup=get_back_keyboard(db_user.language),
+                )
+                await _refund_failed_purchase(
+                    db,
+                    db_user,
+                    final_price,
+                    'Возврат: покупка подписки отменена — не выбрана страна',
+                    promo_state=promo_state,
+                )
+                await callback.answer()
+                return
+
+            # Оверлей грейса, осевший в подписке (v4.10–4.11), — не её срок.
+            # Возвращаем до расчёта остатка триала, иначе хвост посчитается от
+            # даты конца грейса. Тот же порядок, что в Mini App и кабинете.
+            from app.services.grace_access_echo import undo_grace_overlay_echo
+
+            await undo_grace_overlay_echo(db, existing_subscription)
+
             bonus_period = timedelta()
 
             if existing_subscription.is_trial:
@@ -2581,15 +2717,16 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
 
                 trial_duration = (current_time - existing_subscription.start_date).days
 
-                if should_carry_trial_remaining_days() and existing_subscription.end_date:
-                    remaining_trial_delta = existing_subscription.end_date - current_time
-                    if remaining_trial_delta.total_seconds() > 0:
-                        bonus_period = remaining_trial_delta
-                        logger.info(
-                            'Добавляем оставшееся время триала к новой подписке пользователя',
-                            bonus_period=bonus_period,
-                            telegram_id=db_user.telegram_id,
-                        )
+                # Единый расчёт: в days_only переносится только реферальный хвост,
+                # базовый триал не переносится; старые строки/схема levels
+                # сохраняют прежнее поведение should_carry.
+                bonus_period = get_trial_carry_over_delta(existing_subscription, current_time)
+                if bonus_period.total_seconds() > 0:
+                    logger.info(
+                        'Добавляем оставшееся время триала к новой подписке пользователя',
+                        bonus_period=bonus_period,
+                        telegram_id=db_user.telegram_id,
+                    )
 
                 try:
                     from app.database.crud.subscription_conversion import create_subscription_conversion
@@ -2611,11 +2748,6 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
                 except Exception as conversion_error:
                     logger.error('Ошибка записи конверсии', conversion_error=conversion_error)
 
-            # Оверлей грейса, осевший в подписке (v4.10–4.11), — не её срок и не её
-            # серверы: вернуть до расчёта (страны по умолчанию берутся из подписки).
-            from app.services.grace_access_echo import undo_grace_overlay_echo
-
-            await undo_grace_overlay_echo(db, existing_subscription)
             existing_subscription.is_trial = False
             if was_trial_conversion:
                 # is_trial сбрасывается и при обычном продлении платной подписки —
@@ -2626,27 +2758,6 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
             existing_subscription.traffic_limit_gb = final_traffic_gb
             if should_update_devices:
                 existing_subscription.device_limit = selected_devices
-            # Проверяем, что при обновлении существующей подписки есть хотя бы одна страна
-            selected_countries = data.get('countries')
-            if not selected_countries:
-                # Иногда после возврата к оформлению из сохраненной корзины список стран не передается.
-                # В таком случае повторно используем текущие подключенные страны подписки.
-                selected_countries = existing_subscription.connected_squads or []
-                if selected_countries:
-                    data['countries'] = selected_countries  # чтобы далее использовать фактический список стран
-
-            if not selected_countries:
-                texts = get_texts(db_user.language)
-                await callback.message.edit_text(
-                    texts.t(
-                        'COUNTRIES_MINIMUM_REQUIRED',
-                        '❌ Нельзя отключить все страны. Должна быть подключена хотя бы одна страна.',
-                    ),
-                    reply_markup=get_back_keyboard(db_user.language),
-                )
-                await callback.answer()
-                return
-
             existing_subscription.connected_squads = selected_countries
 
             # Если подписка еще активна, продлеваем от текущей даты окончания,
@@ -2669,6 +2780,7 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
             existing_subscription.traffic_used_gb = 0.0
 
             await db.commit()
+            purchase_persisted = True
             await db.refresh(existing_subscription)
             subscription = existing_subscription
 
@@ -2702,6 +2814,13 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
                     ),
                     reply_markup=get_back_keyboard(db_user.language),
                 )
+                await _refund_failed_purchase(
+                    db,
+                    db_user,
+                    final_price,
+                    'Возврат: покупка подписки отменена — не выбрана страна',
+                    promo_state=promo_state,
+                )
                 await callback.answer()
                 return
 
@@ -2713,6 +2832,7 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
                 connected_squads=new_subscription_countries,
                 traffic_gb=final_traffic_gb,
             )
+            purchase_persisted = True
 
         from app.database.crud.server_squad import add_user_to_servers, get_server_ids_by_uuids
         from app.database.crud.subscription import add_subscription_servers
@@ -2981,7 +3101,22 @@ async def confirm_purchase(callback: types.CallbackQuery, state: FSMContext, db_
 
     except Exception as e:
         logger.error('Ошибка покупки подписки', error=e)
-        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(db_user.language))
+        # Деньги уже списаны, а подписка ещё не сохранена: без возврата платёж
+        # потерялся бы. После сохранения подписки не возвращаем — она выдана.
+        if balance_charged and not purchase_persisted:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            await _refund_failed_purchase(
+                db,
+                db_user,
+                final_price,
+                'Возврат: ошибка покупки подписки',
+                promo_state=promo_state,
+                user_id=purchase_user_id,
+            )
+        await callback.message.edit_text(texts.ERROR, reply_markup=get_back_keyboard(purchase_user_language))
 
     if purchase_completed:
         await clear_subscription_checkout_draft(db_user.id)
@@ -3532,6 +3667,7 @@ async def handle_trial_pay_with_balance(callback: types.CallbackQuery, db_user: 
             traffic_limit_gb=trial_traffic_limit,
             connected_squads=trial_squads,
             tariff_id=tariff_id_for_trial,
+            duration_days_include_referral_bonus=True,
         )
 
         await db.refresh(db_user)
@@ -4660,6 +4796,31 @@ async def handle_simple_subscription_purchase(
     await callback.answer()
 
 
+def _calculate_simple_extension_end_date(
+    subscription: Subscription,
+    period_days: int,
+    current_time: datetime,
+    *,
+    converted_days_only_trial: bool,
+    trial_carry_over: timedelta = timedelta(),
+) -> datetime:
+    """Дата окончания после классического продления simple-подписки.
+
+    Конверсия ``days_only``-триала с известной базовой датой стартует от момента
+    покупки и добавляет только перенесённый реферальный хвост. Остальные случаи
+    (legacy-триал без базы, схема ``levels``, платная подписка) сохраняют прежнее
+    правило: продлеваем от ``end_date``, если она в будущем, иначе от текущего
+    времени.
+    """
+    if converted_days_only_trial:
+        return current_time + timedelta(days=period_days) + trial_carry_over
+
+    end_date = subscription.end_date
+    if end_date is not None and end_date > current_time:
+        return end_date + timedelta(days=period_days)
+    return current_time + timedelta(days=period_days)
+
+
 async def _extend_existing_subscription(
     callback: types.CallbackQuery,
     db_user: User,
@@ -4674,10 +4835,13 @@ async def _extend_existing_subscription(
     from app.database.crud.transaction import create_transaction
     from app.database.crud.user import lock_user_for_pricing, subtract_user_balance
     from app.database.models import TransactionType
+    from app.services.grace_access_echo import undo_grace_overlay_echo
     from app.services.subscription_service import SubscriptionService
 
     db_user = await lock_user_for_pricing(db, db_user.id)
     texts = get_texts(db_user.language)
+    # Снимаем до возможного rollback: после него ORM-объект протухает.
+    purchase_user_id = db_user.id
 
     # Рассчитываем цену подписки (group discounts per-category)
     subscription_params = {
@@ -4698,6 +4862,10 @@ async def _extend_existing_subscription(
     from app.utils.promo_offer import get_user_active_promo_discount_percent
 
     consume_promo = get_user_active_promo_discount_percent(db_user) > 0
+    saved_promo_percent = int(getattr(db_user, 'promo_offer_discount_percent', 0) or 0) if consume_promo else 0
+    saved_promo_source = getattr(db_user, 'promo_offer_discount_source', None) if saved_promo_percent else None
+    saved_promo_expires = getattr(db_user, 'promo_offer_discount_expires_at', None) if saved_promo_percent else None
+    promo_state = (saved_promo_percent, saved_promo_source, saved_promo_expires) if saved_promo_percent else None
     logger.warning(
         'SIMPLE_SUBSCRIPTION_EXTEND_PRICE | user= | total= | base= | traffic= | devices= | servers= | discount= | device_limit',
         db_user_id=db_user.id,
@@ -4776,70 +4944,90 @@ async def _extend_existing_subscription(
         await callback.answer('⚠ Ошибка списания средств', show_alert=True)
         return
 
-    # Обновляем параметры подписки
-    current_time = datetime.now(UTC)
-    old_end_date = current_subscription.end_date
-
-    # Обновляем параметры в зависимости от типа текущей подписки
-    if current_subscription.is_trial:
-        # При продлении триальной подписки переводим её в обычную
-        current_subscription.is_trial = False
-        apply_trial_conversion_defaults(current_subscription)
-        current_subscription.status = 'active'
-        # Убираем ограничения с триальной подписки
-        current_subscription.traffic_limit_gb = traffic_limit_gb
-        current_subscription.device_limit = device_limit
-        # Если указан squad_uuid, добавляем его к существующим серверам
-        if squad_uuid and squad_uuid not in current_subscription.connected_squads:
-            # Используем += для безопасного добавления в список SQLAlchemy
-            current_subscription.connected_squads = current_subscription.connected_squads + [squad_uuid]
-    else:
-        # Для обычной подписки просто продлеваем
-        # Обновляем трафик и устройства, если нужно
-        if traffic_limit_gb != 0:  # Если не безлимит, обновляем
-            current_subscription.traffic_limit_gb = traffic_limit_gb
-        current_subscription.device_limit = max(current_subscription.device_limit, device_limit)
-        # Если указан squad_uuid и его ещё нет в подписке, добавляем
-        if squad_uuid and squad_uuid not in current_subscription.connected_squads:
-            # Используем += для безопасного добавления в список SQLAlchemy
-            current_subscription.connected_squads = current_subscription.connected_squads + [squad_uuid]
-
-    # Продлеваем подписку
-    if current_subscription.end_date > current_time:
-        # Если подписка ещё активна, добавляем дни к текущей дате окончания
-        new_end_date = current_subscription.end_date + timedelta(days=period_days)
-    else:
-        # Если подписка уже истекла, начинаем от текущего времени
-        new_end_date = current_time + timedelta(days=period_days)
-
-    current_subscription.end_date = new_end_date
-    current_subscription.updated_at = current_time
-
-    # Сохраняем изменения
+    # После списания любые ошибки до commit обязаны вернуть деньги: баланс уже
+    # закоммичен subtract_user_balance.
     try:
-        await db.commit()
-    except Exception as commit_error:
-        logger.error('Ошибка сохранения продления подписки', error=commit_error, exc_info=True)
-        await db.rollback()
-        # Compensating refund: balance was already committed by subtract_user_balance
-        try:
-            from app.database.crud.user import add_user_balance
+        # Оверлей грейса, осевший в подписке (v4.10–4.11), — не её срок: возвращаем
+        # до расчёта остатка триала и даты продления, иначе хвост посчитается от
+        # даты конца грейса. Тот же порядок, что в общем CRUD и confirm_purchase.
+        await undo_grace_overlay_echo(db, current_subscription)
 
-            await add_user_balance(
-                db,
-                db_user,
-                price_kopeks,
-                'Возврат: ошибка продления подписки',
-                create_transaction=True,
-                transaction_type=TransactionType.REFUND,
-            )
-        except Exception as refund_error:
-            logger.critical(
-                'CRITICAL: не удалось вернуть средства после ошибки продления',
-                user_id=db_user.id,
-                price_kopeks=price_kopeks,
-                refund_error=refund_error,
-            )
+        # Обновляем параметры подписки
+        current_time = datetime.now(UTC)
+        old_end_date = current_subscription.end_date
+
+        # Дельту считаем ДО сброса is_trial: помощник возвращает ноль для не-триала.
+        # Спец-ветка «оплата стартует от now + только реферальный хвост» применима
+        # только к days_only с известной базовой датой; legacy-строки и levels
+        # остаются на прежнем правиле ``end_date + period_days``.
+        is_days_only_referral_conversion = bool(
+            current_subscription.is_trial
+            and current_subscription.base_trial_end_date is not None
+            and settings.is_referral_days_only_scheme()
+        )
+        trial_carry_over = (
+            get_trial_carry_over_delta(current_subscription, current_time)
+            if is_days_only_referral_conversion
+            else timedelta()
+        )
+
+        # Обновляем параметры в зависимости от типа текущей подписки
+        if current_subscription.is_trial:
+            # При продлении триальной подписки переводим её в обычную
+            current_subscription.is_trial = False
+            # Учёт реферального остатка относится к триалу — на платной строке не нужен.
+            current_subscription.trial_referral_seconds = None
+            apply_trial_conversion_defaults(current_subscription)
+            current_subscription.status = 'active'
+            # Убираем ограничения с триальной подписки
+            current_subscription.traffic_limit_gb = traffic_limit_gb
+            current_subscription.device_limit = device_limit
+            # Если указан squad_uuid, добавляем его к существующим серверам
+            if squad_uuid and squad_uuid not in current_subscription.connected_squads:
+                # Используем += для безопасного добавления в список SQLAlchemy
+                current_subscription.connected_squads = current_subscription.connected_squads + [squad_uuid]
+        else:
+            # Для обычной подписки просто продлеваем
+            # Обновляем трафик и устройства, если нужно
+            if traffic_limit_gb != 0:  # Если не безлимит, обновляем
+                current_subscription.traffic_limit_gb = traffic_limit_gb
+            current_subscription.device_limit = max(current_subscription.device_limit, device_limit)
+            # Если указан squad_uuid и его ещё нет в подписке, добавляем
+            if squad_uuid and squad_uuid not in current_subscription.connected_squads:
+                # Используем += для безопасного добавления в список SQLAlchemy
+                current_subscription.connected_squads = current_subscription.connected_squads + [squad_uuid]
+
+        # Продлеваем подписку
+        new_end_date = _calculate_simple_extension_end_date(
+            current_subscription,
+            period_days,
+            current_time,
+            converted_days_only_trial=is_days_only_referral_conversion,
+            trial_carry_over=trial_carry_over,
+        )
+
+        current_subscription.end_date = new_end_date
+        if is_days_only_referral_conversion:
+            # Платный период стартует от момента покупки — как в общем CRUD.
+            current_subscription.start_date = current_time
+        current_subscription.updated_at = current_time
+
+        # Сохраняем изменения
+        await db.commit()
+    except Exception as purchase_error:
+        logger.error('Ошибка сохранения продления подписки', error=purchase_error, exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        await _refund_failed_purchase(
+            db,
+            db_user,
+            price_kopeks,
+            'Возврат: ошибка продления подписки',
+            promo_state=promo_state,
+            user_id=purchase_user_id,
+        )
         await callback.answer('⚠ Ошибка продления подписки', show_alert=True)
         return
     await db.refresh(current_subscription)

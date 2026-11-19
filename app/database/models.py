@@ -2646,6 +2646,17 @@ class Subscription(Base):
 
     start_date = Column(AwareDateTime(), default=func.now())
     end_date = Column(AwareDateTime(), nullable=False)
+    # Конец БАЗОВОГО бесплатного триала, без реферального бонуса приглашённого.
+    # `end_date` по-прежнему включает бонус и продления; при покупке переносится
+    # только хвост после этой даты. NULL у старых строк — их историю не
+    # реконструируем, для них действует прежний should_carry_trial_remaining_days().
+    base_trial_end_date = Column(AwareDateTime(), nullable=True)
+    # Сколько секунд из текущего `end_date` — реферальные дни (последний отрезок
+    # срока). Явный учёт источника для новых бесплатных триалов: NULL — старая
+    # строка без истории, 0 — новый триал без реферального бонуса. Позволяет не
+    # восстанавливать истёкшие/потраченные реферальные дни и не переносить
+    # бесплатные (админские/промокодные) продления как реферальные.
+    trial_referral_seconds = Column(Integer, nullable=True)
 
     traffic_limit_gb = Column(Integer, default=0)
     traffic_used_gb = Column(Float, default=0.0)

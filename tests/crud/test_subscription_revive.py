@@ -20,6 +20,9 @@ from app.database.models import SubscriptionStatus
 
 def _sub(**kw) -> MagicMock:
     s = MagicMock()
+    # Эти тесты моделируют legacy-строки: явного учёта реферального остатка нет.
+    s.trial_referral_seconds = None
+    s.base_trial_end_date = None
     for k, v in kw.items():
         setattr(s, k, v)
     return s
@@ -209,6 +212,328 @@ async def test_create_paid_subscription_does_not_revive_active(monkeypatch):
         assert str(e) == 'reached create'  # дошли до создания, не реанимировали
 
     revive.assert_not_awaited()  # active не реанимируется
+
+
+async def test_revive_expired_trial_with_living_tail_starts_from_now(monkeypatch):
+    """EXPIRED-триал с живым реферальным хвостом: платный период — now + только хвост.
+
+    Базовая дата в прошлом, общий ``end_date`` на 10 дней впереди. Покупка 30
+    дней даёт ``now+40``: платный срок стартует от покупки, а не от старого
+    общего ``end_date`` (иначе базовый остаток учитывался бы второй раз).
+    """
+    monkeypatch.setattr(sub_crud.settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(sub_crud.settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    before = datetime.now(UTC)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.EXPIRED.value,
+        end_date=before + timedelta(days=10),
+        base_trial_end_date=before - timedelta(days=5),
+        start_date=before - timedelta(days=8),
+        is_trial=True,
+        traffic_used_gb=12.0,
+        connected_squads=['sq'],
+        device_limit=1,
+        traffic_limit_gb=50,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=['sq'],
+        update_server_counters=False,
+        commit=True,
+    )
+    after = datetime.now(UTC)
+
+    assert s.is_trial is False
+    assert s.status == SubscriptionStatus.ACTIVE.value
+    assert before + timedelta(days=40) <= s.end_date <= after + timedelta(days=40)
+
+
+async def test_revive_fully_expired_trial_gets_purchase_only(monkeypatch):
+    """Полностью истёкший хвост не восстанавливается: ровно купленные 30 дней."""
+    monkeypatch.setattr(sub_crud.settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(sub_crud.settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    before = datetime.now(UTC)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.EXPIRED.value,
+        end_date=before - timedelta(days=10),
+        base_trial_end_date=before - timedelta(days=30),
+        start_date=before - timedelta(days=33),
+        is_trial=True,
+        traffic_used_gb=12.0,
+        connected_squads=['sq'],
+        device_limit=1,
+        traffic_limit_gb=50,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=['sq'],
+        update_server_counters=False,
+        commit=True,
+    )
+    after = datetime.now(UTC)
+
+    assert s.is_trial is False
+    assert s.traffic_used_gb == 0.0
+    assert before + timedelta(days=30) <= s.end_date <= after + timedelta(days=30)
+
+
+async def test_revive_living_trial_with_future_base_carries_only_referral_tail(monkeypatch):
+    """Если базовая дата ещё впереди, переносится только реферальный хвост.
+
+    База ``now+5``, общий ``end_date`` ``now+15`` (10 реферальных дней). Покупка
+    30 дней даёт ``now+40``, а не ``end_date+30 = now+45``: остаток базового
+    бесплатного триала не переносится.
+    """
+    monkeypatch.setattr(sub_crud.settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(sub_crud.settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    before = datetime.now(UTC)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.EXPIRED.value,
+        end_date=before + timedelta(days=15),
+        base_trial_end_date=before + timedelta(days=5),
+        start_date=before,
+        is_trial=True,
+        traffic_used_gb=12.0,
+        connected_squads=['sq'],
+        device_limit=1,
+        traffic_limit_gb=50,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=['sq'],
+        update_server_counters=False,
+        commit=True,
+    )
+    after = datetime.now(UTC)
+
+    assert s.is_trial is False
+    assert before + timedelta(days=40) <= s.end_date <= after + timedelta(days=40)
+
+
+async def test_revive_legacy_null_base_alive_trial_extends_from_end_date(monkeypatch):
+    """Старый триал без базовой даты (carry off) реанимируется по-прежнему от end_date."""
+    monkeypatch.setattr(sub_crud.settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(sub_crud.settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    monkeypatch.setattr(sub_crud.settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', False)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    before = datetime.now(UTC)
+    old_end = before + timedelta(days=10)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.EXPIRED.value,
+        end_date=old_end,
+        base_trial_end_date=None,
+        start_date=before - timedelta(days=8),
+        is_trial=True,
+        traffic_used_gb=12.0,
+        connected_squads=['sq'],
+        device_limit=1,
+        traffic_limit_gb=50,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=['sq'],
+        update_server_counters=False,
+        commit=True,
+    )
+
+    assert s.is_trial is False
+    assert s.end_date == old_end + timedelta(days=30)
+
+
+async def test_revive_levels_alive_trial_extends_from_end_date(monkeypatch):
+    """Схема levels: живой триал реанимируется от старого end_date, не от now."""
+    monkeypatch.setattr(sub_crud.settings, 'REFERRAL_REWARD_SCHEME', 'levels')
+    monkeypatch.setattr(sub_crud.settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    monkeypatch.setattr(sub_crud.settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', False)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    before = datetime.now(UTC)
+    old_end = before + timedelta(days=10)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.EXPIRED.value,
+        end_date=old_end,
+        base_trial_end_date=before - timedelta(days=5),
+        start_date=before - timedelta(days=8),
+        is_trial=True,
+        traffic_used_gb=12.0,
+        connected_squads=['sq'],
+        device_limit=1,
+        traffic_limit_gb=50,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=['sq'],
+        update_server_counters=False,
+        commit=True,
+    )
+
+    assert s.is_trial is False
+    assert s.end_date == old_end + timedelta(days=30)
+
+
+async def test_revive_alive_days_only_trial_restarts_paid_period(monkeypatch):
+    """Живой days_only-триал: платный период стартует от now, а не от старого end_date.
+
+    База ``now+5``, общий ``end_date`` ``now+15`` (10 реферальных дней). Покупка
+    30 дней даёт ``now+40``; ``start_date`` переставляется на now даже без
+    истечения, а накопленный трафик живой строки не сбрасывается.
+    """
+    monkeypatch.setattr(sub_crud.settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(sub_crud.settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    monkeypatch.setattr(sub_crud.settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', False)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    before = datetime.now(UTC)
+    old_start = before - timedelta(days=10)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.ACTIVE.value,
+        end_date=before + timedelta(days=15),
+        base_trial_end_date=before + timedelta(days=5),
+        start_date=old_start,
+        is_trial=True,
+        traffic_used_gb=12.0,
+        connected_squads=['sq'],
+        device_limit=1,
+        traffic_limit_gb=50,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=['sq'],
+        update_server_counters=False,
+        commit=True,
+    )
+    after = datetime.now(UTC)
+
+    assert s.is_trial is False
+    assert before <= s.start_date <= after
+    assert s.start_date != old_start
+    assert before + timedelta(days=40) <= s.end_date <= after + timedelta(days=40)
+    assert s.traffic_used_gb == 12.0  # живой трафик не сбрасываем
+
+
+async def test_revive_trial_conversion_applies_autopay_default(monkeypatch):
+    """Конверсия триала в revive получает дефолт автоплатежа."""
+    monkeypatch.setattr(type(sub_crud.settings), 'is_autopay_enabled_by_default', lambda self: True)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    past = datetime.now(UTC) - timedelta(days=2)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.EXPIRED.value,
+        end_date=past,
+        start_date=past - timedelta(days=3),
+        is_trial=True,
+        autopay_enabled=False,
+        traffic_used_gb=12.0,
+        connected_squads=['sq'],
+        device_limit=1,
+        traffic_limit_gb=50,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=['sq'],
+        update_server_counters=False,
+        commit=True,
+    )
+
+    assert s.autopay_enabled is True
+
+
+async def test_revive_paid_extension_preserves_autopay(monkeypatch):
+    """Продление уже платной подписки не трогает осознанный выбор автоплатежа."""
+    monkeypatch.setattr(type(sub_crud.settings), 'is_autopay_enabled_by_default', lambda self: True)
+    monkeypatch.setattr(sub_crud, 'deactivate_user_trial_subscriptions', AsyncMock(return_value=[]))
+    db = _db()
+    future = datetime.now(UTC) + timedelta(days=10)
+    s = _sub(
+        id=1,
+        user_id=7,
+        tariff_id=3,
+        status=SubscriptionStatus.ACTIVE.value,
+        end_date=future,
+        start_date=datetime.now(UTC),
+        is_trial=False,
+        autopay_enabled=False,
+        traffic_used_gb=20.0,
+        connected_squads=['sq'],
+        device_limit=2,
+        traffic_limit_gb=100,
+    )
+
+    await sub_crud._revive_paid_subscription(
+        db,
+        s,
+        duration_days=30,
+        traffic_limit_gb=100,
+        device_limit=2,
+        connected_squads=None,
+        update_server_counters=False,
+        commit=True,
+    )
+
+    assert s.autopay_enabled is False
 
 
 async def test_create_paid_subscription_skips_revive_without_tariff(monkeypatch):

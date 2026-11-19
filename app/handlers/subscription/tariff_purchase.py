@@ -17,12 +17,13 @@ from app.database.crud.subscription import (
     get_active_subscriptions_by_user_id,
     get_subscription_by_id_for_user,
     get_subscription_by_user_id,
+    get_trial_carry_over_delta,
 )
 from app.database.crud.tariff import get_tariff_by_id, get_tariffs_for_user
-from app.database.crud.transaction import create_transaction
+from app.database.crud.transaction import create_transaction, emit_transaction_side_effects
 from app.database.crud.user import subtract_user_balance
 from app.database.database import AsyncSessionLocal
-from app.database.models import Tariff, Transaction, TransactionType, User
+from app.database.models import Subscription, Tariff, Transaction, TransactionType, User
 from app.keyboards.inline import discounted_period_button, pad_button_labels
 from app.localization.texts import Texts, get_texts
 from app.services.admin_notification_service import AdminNotificationService
@@ -31,6 +32,7 @@ from app.services.subscription_service import SubscriptionService
 from app.services.tariff_switch_policy import remaining_days_for_switch, should_reset_used_traffic
 from app.services.user_cart_service import user_cart_service
 from app.utils.decorators import error_handler
+from app.utils.formatters import format_days_declension
 from app.utils.formatting import format_period, format_price_kopeks, format_traffic
 from app.utils.legacy_subscription import is_legacy_subscription as _legacy_subscription
 from app.utils.payment_utils import DEFAULT_TOPUP_MAX_KOPEKS, DEFAULT_TOPUP_MIN_KOPEKS
@@ -86,6 +88,56 @@ async def _persist_failed_refund(
             original_error=str(error),
             persist_error=persist_error,
         )
+
+
+async def _emit_purchase_transaction_side_effects(
+    transaction: Transaction,
+    *,
+    amount_kopeks: int,
+    user_id: int,
+    description: str,
+) -> None:
+    """Post-commit side effects of the payment journal, isolated from the request session.
+
+    ``maybe_assign_promo_group_by_total_spent`` may rollback its session on error.
+    On the request session that expires ``db_user``/``subscription`` and would
+    abort panel sync, referral hook, cart cleanup and the success screen after a
+    purchase that is already paid and committed. A separate session keeps the
+    request ORM usable; failures are logged and never block the purchase.
+    """
+    try:
+        async with AsyncSessionLocal() as side_effects_db:
+            await emit_transaction_side_effects(
+                side_effects_db,
+                transaction,
+                amount_kopeks=amount_kopeks,
+                user_id=user_id,
+                type=TransactionType.SUBSCRIPTION_PAYMENT,
+                description=description,
+            )
+    except Exception as error:
+        logger.warning(
+            'Post-commit transaction side effects failed',
+            user_id=user_id,
+            amount_kopeks=amount_kopeks,
+            error=error,
+        )
+
+
+async def _shift_lava_next_charge_after_purchase(db, subscription_id: int, days: int) -> None:
+    """Best-effort Lava next-charge shift for a manual (balance) purchase.
+
+    ``extend_subscription(commit=False)`` intentionally skips it until the caller's
+    commit; the atomic handlers call it explicitly after their commit.
+    """
+    if days <= 0:
+        return
+    try:
+        from app.services.payment.lava import shift_lava_next_charge_after_manual_extension
+
+        await shift_lava_next_charge_after_manual_extension(db, subscription_id, days)
+    except Exception as error:
+        logger.warning('Failed to shift Lava next charge on purchase', error=error)
 
 
 async def _resolve_subscription(callback, db_user, db, state=None):
@@ -605,6 +657,68 @@ def format_tariff_info_for_user(tariff: Tariff, language: str) -> str:
     ).format(premium_line=premium_line, params=params)
 
 
+def _is_referral_trial_conversion(subscription: Subscription | None) -> bool:
+    """Покупка конвертирует ``days_only``-триал с известной базовой датой.
+
+    Только в этом случае ``extend_subscription`` стартует платный срок от
+    момента покупки и переносит реферальный хвост.
+    """
+    return bool(
+        subscription is not None
+        and subscription.is_trial
+        and subscription.base_trial_end_date is not None
+        and settings.is_referral_days_only_scheme()
+    )
+
+
+def _referral_carry_over_delta(subscription: Subscription | None, now: datetime) -> timedelta:
+    if not _is_referral_trial_conversion(subscription):
+        return timedelta()
+    return get_trial_carry_over_delta(subscription, now)
+
+
+def _referral_conversion_end_date(
+    subscription: Subscription | None,
+    period_days: int,
+    now: datetime,
+) -> datetime | None:
+    """Дата окончания, которую запишет ``extend_subscription`` для конверсии.
+
+    ``None`` — это не реферальная конверсия: вызывающий оставляет прежнюю дату.
+    """
+    if not _is_referral_trial_conversion(subscription):
+        return None
+    return now + timedelta(days=period_days) + _referral_carry_over_delta(subscription, now)
+
+
+def _format_referral_carry_over_note(
+    subscription: Subscription | None,
+    language: str,
+    *,
+    now: datetime | None = None,
+) -> str:
+    """Подпись под экраном покупки: сколько реферальных дней дойдёт до тарифа.
+
+    Показываем только ``days_only``-триал с известной ``base_trial_end_date``:
+    это единственный случай, когда при оплате переносится именно реферальный
+    хвост, а не весь остаток legacy-триала. Считаем полные сутки; секундный
+    допуск скрывает микросекунды между расчётом и рендером сообщения.
+    """
+    if not _is_referral_trial_conversion(subscription):
+        return ''
+
+    moment = now or datetime.now(UTC)
+    carry_over = _referral_carry_over_delta(subscription, moment)
+    days = max(0, int((carry_over.total_seconds() + 1) // 86400))
+    if days <= 0:
+        return ''
+
+    return '\n\n' + get_texts(language).t(
+        'TARIFF_PURCHASE_REFERRAL_CARRY_OVER',
+        '<blockquote>Реферальные дни перенесутся в основной тариф — {days_text}</blockquote>',
+    ).format(days_text=format_days_declension(days, language))
+
+
 def get_daily_tariff_confirm_keyboard(
     tariff_id: int,
     language: str,
@@ -1030,6 +1144,9 @@ async def _proceed_with_selected_tariff(
         await callback.answer(texts.t('TARIFF_PURCHASE_UNAVAILABLE', 'Тариф недоступен'), show_alert=True)
         return
 
+    current_subscription = await get_subscription_by_user_id(db, db_user.id)
+    referral_carry_over_note = _format_referral_carry_over_note(current_subscription, db_user.language)
+
     # В мульти-тарифе проверяем не куплен ли уже этот тариф
     if settings.is_multi_tariff_enabled():
         from app.database.crud.subscription import get_active_subscriptions_by_user_id
@@ -1066,7 +1183,7 @@ async def _proceed_with_selected_tariff(
         traffic = format_traffic(tariff.traffic_limit_gb)
 
         if user_balance >= daily_price:
-            await callback.message.edit_text(
+            confirmation_text = (
                 texts.t(
                     'TARIFF_PURCHASE_DAILY_CONFIRM',
                     '✅ <b>Подтверждение покупки</b>\n\n'
@@ -1085,7 +1202,11 @@ async def _proceed_with_selected_tariff(
                     price=format_price_kopeks(daily_price),
                     discount=discount_text,
                     balance=format_price_kopeks(user_balance),
-                ),
+                )
+                + referral_carry_over_note
+            )
+            await callback.message.edit_text(
+                confirmation_text,
                 reply_markup=get_daily_tariff_confirm_keyboard(
                     tariff_id, db_user.language, back_callback=back_callback
                 ),
@@ -1174,6 +1295,7 @@ async def _proceed_with_selected_tariff(
                 db_user=db_user,
                 discount_percent=discount_percent,
             )
+            preview_text += referral_carry_over_note
 
             await callback.message.edit_text(
                 preview_text,
@@ -1200,7 +1322,8 @@ async def _proceed_with_selected_tariff(
                 + texts.t(
                     'TARIFF_PURCHASE_TRAFFIC_SETUP_HINT',
                     '\n\n📊 <i>После выбора периода вы сможете настроить трафик</i>',
-                ),
+                )
+                + referral_carry_over_note,
                 reply_markup=get_tariff_periods_keyboard_with_traffic(
                     tariff, db_user.language, db_user=db_user, back_callback=back_callback
                 ),
@@ -1209,14 +1332,17 @@ async def _proceed_with_selected_tariff(
         else:
             # Для обычного тарифа показываем выбор периода
             await callback.message.edit_text(
-                format_tariff_info_for_user(tariff, db_user.language),
+                format_tariff_info_for_user(tariff, db_user.language) + referral_carry_over_note,
                 reply_markup=get_tariff_periods_keyboard(
                     tariff, db_user.language, db_user=db_user, back_callback=back_callback
                 ),
                 parse_mode='HTML',
             )
 
-    await state.update_data(selected_tariff_id=tariff_id)
+    await state.update_data(
+        selected_tariff_id=tariff_id,
+        referral_carry_over_note=referral_carry_over_note,
+    )
     await callback.answer()
 
 
@@ -1256,6 +1382,7 @@ async def handle_custom_days_change(
     state_data = await state.get_data()
     current_days = state_data.get('custom_days', tariff.min_days)
     current_traffic = state_data.get('custom_traffic_gb', tariff.min_traffic_gb)
+    referral_carry_over_note = state_data.get('referral_carry_over_note', '')
 
     # Применяем изменение
     new_days = current_days + delta
@@ -1281,6 +1408,7 @@ async def handle_custom_days_change(
         db_user=db_user,
         discount_percent=discount_percent,
     )
+    preview_text += referral_carry_over_note
 
     await callback.message.edit_text(
         preview_text,
@@ -1327,6 +1455,7 @@ async def handle_custom_traffic_change(
     current_days = state_data.get('custom_days', tariff.min_days)
     current_traffic = state_data.get('custom_traffic_gb', tariff.min_traffic_gb)
     discount_percent = state_data.get('period_discount_percent', 0)
+    referral_carry_over_note = state_data.get('referral_carry_over_note', '')
 
     # Применяем изменение
     new_traffic = current_traffic + delta
@@ -1344,6 +1473,7 @@ async def handle_custom_traffic_change(
         db_user=db_user,
         discount_percent=discount_percent,
     )
+    preview_text += referral_carry_over_note
 
     await callback.message.edit_text(
         preview_text,
@@ -1694,6 +1824,7 @@ async def select_tariff_period_with_traffic(
         db_user=db_user,
         discount_percent=discount_percent,
     )
+    preview_text += (await state.get_data()).get('referral_carry_over_note', '')
 
     await callback.message.edit_text(
         preview_text,
@@ -1765,6 +1896,7 @@ async def select_tariff_period(
         round((1 - final_price / original_price) * 100) if original_price > 0 and total_discount > 0 else 0
     )
     shown_device_limit = device_limit if device_limit is not None else tariff.device_limit
+    referral_carry_over_note = _format_referral_carry_over_note(_existing_sub, db_user.language)
 
     # Проверяем баланс
     user_balance = db_user.balance_kopeks or 0
@@ -1774,7 +1906,10 @@ async def select_tariff_period(
     if user_balance >= final_price:
         # Подтверждение в том же компактном виде, что и продление: период,
         # итоговая цена и переход баланса. Тариф уже выбран на прошлом экране.
-        new_end_date = datetime.now(UTC) + timedelta(days=period)
+        now = datetime.now(UTC)
+        new_end_date = _referral_conversion_end_date(_existing_sub, period, now)
+        if new_end_date is None:
+            new_end_date = now + timedelta(days=period)
         new_end_text = format_local_datetime(new_end_date, '%d.%m.%Y', na_placeholder='—')
         # Старые локали (en/fa/ua/zh) ещё используют расширенный шаблон;
         # передаём все его плейсхолдеры, чтобы не падать на KeyError.
@@ -1784,7 +1919,7 @@ async def select_tariff_period(
                 'TARIFF_PURCHASE_DISCOUNT_SHORT_LINE', '\n🎁 Скидка: {percent}% (-{amount})'
             ).format(percent=discount_percent, amount=format_price_kopeks(total_discount))
 
-        await callback.message.edit_text(
+        confirmation_text = (
             texts.t(
                 'TARIFF_PURCHASE_CONFIRM',
                 '<tg-emoji emoji-id="5269616102698163129">📋</tg-emoji> <b>Подтверждение</b>\n\n'
@@ -1801,7 +1936,11 @@ async def select_tariff_period(
                 total=texts.format_price(final_price),
                 balance=texts.format_price(user_balance),
                 after=texts.format_price(user_balance - final_price),
-            ),
+            )
+            + referral_carry_over_note
+        )
+        await callback.message.edit_text(
+            confirmation_text,
             reply_markup=get_tariff_confirm_keyboard(tariff_id, period, db_user.language),
             parse_mode='HTML',
         )
@@ -1964,12 +2103,9 @@ async def confirm_tariff_purchase(
     except Exception:
         pass
 
-    # Списываем баланс
+    # Списание, изменение подписки и запись об оплате — одна транзакция.
+    # Любой сбой до коммита откатывает всё: возвраты и «долги» не нужны.
     consume_promo = result.promo_offer_discount > 0
-    # Save promo offer state before deduction (for restore on failure)
-    saved_promo_percent = int(getattr(db_user, 'promo_offer_discount_percent', 0) or 0) if consume_promo else 0
-    saved_promo_source = getattr(db_user, 'promo_offer_discount_source', None) if consume_promo else None
-    saved_promo_expires = getattr(db_user, 'promo_offer_discount_expires_at', None) if consume_promo else None
     try:
         success = await subtract_user_balance(
             db,
@@ -1978,35 +2114,29 @@ async def confirm_tariff_purchase(
             f'Покупка тарифа {tariff.name} на {period} дней',
             consume_promo_offer=consume_promo,
             mark_as_paid_subscription=True,
+            commit=False,
         )
         if not success:
+            await db.rollback()
             try:
                 await callback.message.edit_text(texts.t('TARIFF_PURCHASE_CHARGE_ERROR', '❌ Ошибка списания баланса'))
             except Exception:
                 pass
             return
-    except Exception as e:
-        logger.error('Ошибка списания баланса при покупке тарифа', error=e, exc_info=True)
-        try:
-            await callback.message.edit_text(texts.t('TARIFF_PURCHASE_CHARGE_ERROR', '❌ Ошибка списания баланса'))
-        except Exception:
-            pass
-        return
 
-    # Получаем список серверов из тарифа
-    squads = tariff.allowed_squads or []
+        # Получаем список серверов из тарифа
+        squads = tariff.allowed_squads or []
 
-    # Если allowed_squads пустой - значит "все серверы", получаем их
-    if not squads:
-        from app.database.crud.server_squad import get_all_server_squads
+        # Если allowed_squads пустой - значит "все серверы", получаем их
+        if not squads:
+            from app.database.crud.server_squad import get_all_server_squads
 
-        all_servers, _ = await get_all_server_squads(db, available_only=True)
-        squads = [s.squad_uuid for s in all_servers if s.squad_uuid]
+            all_servers, _ = await get_all_server_squads(db, available_only=True)
+            squads = [s.squad_uuid for s in all_servers if s.squad_uuid]
 
-    # Reuse existing_sub fetched above for device pricing
-    existing_subscription = existing_sub
+        # Reuse existing_sub fetched above for device pricing
+        existing_subscription = existing_sub
 
-    try:
         if settings.is_multi_tariff_enabled():
             if existing_subscription and existing_subscription.tariff_id == tariff.id:
                 # Extend existing subscription for this tariff
@@ -2019,6 +2149,7 @@ async def confirm_tariff_purchase(
                     traffic_limit_gb=tariff.traffic_limit_gb,
                     device_limit=effective_device_limit,
                     connected_squads=squads,
+                    commit=False,
                 )
             else:
                 # Guard: enforce MAX_ACTIVE_SUBSCRIPTIONS limit.
@@ -2029,30 +2160,8 @@ async def confirm_tariff_purchase(
                 _alive_subs = await get_active_subscriptions_by_user_id(db, db_user.id)
                 active_count = len([s for s in _alive_subs if not s.is_trial])
                 if active_count >= settings.get_max_active_subscriptions():
-                    from app.database.crud.user import add_user_balance
-
-                    refund_success = await add_user_balance(
-                        db,
-                        db_user,
-                        final_price,
-                        'Возврат: превышен лимит подписок',
-                        create_transaction=True,
-                        transaction_type=TransactionType.REFUND,
-                        commit=False,
-                    )
-                    if not refund_success:
-                        await _persist_failed_refund(
-                            user_id=db_user.id,
-                            amount_kopeks=final_price,
-                            reason='Возврат: превышен лимит подписок',
-                            error=Exception('add_user_balance returned False'),
-                        )
-                    # Restore promo offer if consumed
-                    if consume_promo and saved_promo_percent > 0:
-                        db_user.promo_offer_discount_percent = saved_promo_percent
-                        db_user.promo_offer_discount_source = saved_promo_source
-                        db_user.promo_offer_discount_expires_at = saved_promo_expires
-                    await db.commit()
+                    # Списание ещё не закоммичено — просто откатываем его.
+                    await db.rollback()
                     try:
                         await callback.message.edit_text(
                             texts.t('TARIFF_PURCHASE_MAX_SUBSCRIPTIONS', '❌ Максимум подписок: {max}').format(
@@ -2072,6 +2181,7 @@ async def confirm_tariff_purchase(
                     device_limit=tariff.device_limit,
                     connected_squads=squads,
                     tariff_id=tariff.id,
+                    commit=False,
                 )
         elif existing_subscription:
             # Legacy single-subscription: extend or switch
@@ -2088,6 +2198,7 @@ async def confirm_tariff_purchase(
                 traffic_limit_gb=tariff.traffic_limit_gb,
                 device_limit=effective_device_limit,
                 connected_squads=squads,
+                commit=False,
             )
         else:
             # Создаем новую подписку
@@ -2099,44 +2210,24 @@ async def confirm_tariff_purchase(
                 device_limit=tariff.device_limit,
                 connected_squads=squads,
                 tariff_id=tariff.id,
+                commit=False,
             )
+
+        transaction = await create_transaction(
+            db,
+            user_id=db_user.id,
+            type=TransactionType.SUBSCRIPTION_PAYMENT,
+            amount_kopeks=final_price,
+            description=f'Покупка тарифа {tariff.name} на {period} дней',
+            commit=False,
+        )
+
+        # Одна единица: списание + подписка + запись об оплате.
+        await db.commit()
     except IntegrityError as e:
         # Partial unique index violation: user already has active subscription for this tariff
         logger.warning('Тариф уже активен у пользователя', tariff_id=tariff_id, user_id=db_user.id, error=e)
         await db.rollback()
-        try:
-            from app.database.crud.user import add_user_balance
-
-            refund_success = await add_user_balance(
-                db,
-                db_user,
-                final_price,
-                'Возврат: тариф уже активен',
-                create_transaction=True,
-                transaction_type=TransactionType.REFUND,
-                commit=False,
-            )
-            if not refund_success:
-                await _persist_failed_refund(
-                    user_id=db_user.id,
-                    amount_kopeks=final_price,
-                    reason='Возврат: тариф уже активен (add_user_balance returned False)',
-                    error=Exception('add_user_balance returned False'),
-                )
-            # Restore promo offer if consumed (atomic with refund)
-            if consume_promo and saved_promo_percent > 0:
-                db_user.promo_offer_discount_percent = saved_promo_percent
-                db_user.promo_offer_discount_source = saved_promo_source
-                db_user.promo_offer_discount_expires_at = saved_promo_expires
-            await db.commit()
-        except Exception as refund_error:
-            logger.critical('CRITICAL: не удалось вернуть средства', user_id=db_user.id, refund_error=refund_error)
-            await _persist_failed_refund(
-                user_id=db_user.id,
-                amount_kopeks=final_price,
-                reason='Возврат: тариф уже активен',
-                error=refund_error,
-            )
         try:
             await callback.message.edit_text(
                 texts.t('TARIFF_PURCHASE_ALREADY_ACTIVE_SUB', '❌ У вас уже есть активная подписка на этот тариф')
@@ -2146,46 +2237,10 @@ async def confirm_tariff_purchase(
         return
     except Exception as e:
         logger.error('Ошибка создания/продления подписки при покупке тарифа', error=e, exc_info=True)
-        await db.rollback()
-        # Compensating refund: balance was already committed by subtract_user_balance
         try:
-            from app.database.crud.user import add_user_balance
-
-            refund_success = await add_user_balance(
-                db,
-                db_user,
-                final_price,
-                'Возврат: ошибка покупки тарифа',
-                create_transaction=True,
-                transaction_type=TransactionType.REFUND,
-                commit=False,
-            )
-            if not refund_success:
-                await _persist_failed_refund(
-                    user_id=db_user.id,
-                    amount_kopeks=final_price,
-                    reason='Возврат: ошибка покупки тарифа (add_user_balance returned False)',
-                    error=Exception('add_user_balance returned False'),
-                )
-            # Restore promo offer if consumed (atomic with refund)
-            if consume_promo and saved_promo_percent > 0:
-                db_user.promo_offer_discount_percent = saved_promo_percent
-                db_user.promo_offer_discount_source = saved_promo_source
-                db_user.promo_offer_discount_expires_at = saved_promo_expires
-            await db.commit()
-        except Exception as refund_error:
-            logger.critical(
-                'CRITICAL: не удалось вернуть средства после ошибки покупки тарифа',
-                user_id=db_user.id,
-                price_kopeks=final_price,
-                refund_error=refund_error,
-            )
-            await _persist_failed_refund(
-                user_id=db_user.id,
-                amount_kopeks=final_price,
-                reason='Возврат: ошибка покупки тарифа',
-                error=refund_error,
-            )
+            await db.rollback()
+        except Exception:
+            pass
         try:
             await callback.message.edit_text(
                 texts.t('TARIFF_PURCHASE_ERROR', '❌ Произошла ошибка при оформлении подписки')
@@ -2193,6 +2248,20 @@ async def confirm_tariff_purchase(
         except Exception:
             pass
         return
+
+    # ── Побочные эффекты только после успешного коммита покупки ──
+    await _emit_purchase_transaction_side_effects(
+        transaction,
+        amount_kopeks=final_price,
+        user_id=db_user.id,
+        description=f'Покупка тарифа {tariff.name} на {period} дней',
+    )
+
+    # Продление существующей подписки (или конверсия триала на месте) раньше
+    # сдвигало автосписание Lava внутри extend_subscription(commit=True).
+    # Теперь коммит делает вызывающий, поэтому сдвигаем здесь — уже после него.
+    if existing_subscription is not None or getattr(subscription, '_converted_from_trial', False):
+        await _shift_lava_next_charge_after_purchase(db, subscription.id, period)
 
     # Обновляем пользователя в Remnawave
     # При покупке тарифа ВСЕГДА сбрасываем трафик в панели
@@ -2231,18 +2300,6 @@ async def confirm_tariff_purchase(
             user_id=db_user.id,
             action='create' if _should_create else 'update',
         )
-
-    # Создаем транзакцию
-    try:
-        await create_transaction(
-            db,
-            user_id=db_user.id,
-            type=TransactionType.SUBSCRIPTION_PAYMENT,
-            amount_kopeks=final_price,
-            description=f'Покупка тарифа {tariff.name} на {period} дней',
-        )
-    except Exception as e:
-        logger.error('Ошибка создания транзакции', error=e)
 
     from app.services.referral_purchase_service import register_first_purchase_after_purchase
 
@@ -2928,7 +2985,10 @@ async def select_tariff_extend_period(
     user_balance = db_user.balance_kopeks or 0
 
     if user_balance >= final_price:
-        new_end_date = subscription.end_date + timedelta(days=period) if subscription.end_date else None
+        now = datetime.now(UTC)
+        new_end_date = _referral_conversion_end_date(subscription, period, now)
+        if new_end_date is None:
+            new_end_date = subscription.end_date + timedelta(days=period) if subscription.end_date else None
         new_end_text = format_local_datetime(new_end_date, '%d.%m.%Y', na_placeholder='—')
 
         await callback.message.edit_text(
@@ -3094,7 +3154,9 @@ async def confirm_tariff_extend(
     # экран подписки всё равно обновится.
 
     try:
-        # Списываем баланс
+        # Списание идёт в ТОЙ ЖЕ транзакции, что и продление, и запись об
+        # оплате: коммит ниже сохраняет их одной единицей, а любой сбой до него
+        # откатывает всё — без компенсирующих возвратов и без долгов.
         success = await subtract_user_balance(
             db,
             db_user,
@@ -3102,8 +3164,10 @@ async def confirm_tariff_extend(
             f'Продление тарифа {tariff.name} на {period} дней',
             consume_promo_offer=consume_promo,
             mark_as_paid_subscription=True,
+            commit=False,
         )
         if not success:
+            await db.rollback()
             try:
                 await callback.message.edit_text(texts.t('TARIFF_PURCHASE_CHARGE_ERROR', '❌ Ошибка списания баланса'))
             except Exception:
@@ -3125,96 +3189,26 @@ async def confirm_tariff_extend(
             tariff_id=tariff.id if was_trial else None,
             traffic_limit_gb=tariff.traffic_limit_gb if was_trial else None,
             device_limit=actual_device_limit if was_trial else None,
+            commit=False,
         )
 
-        # Обновляем пользователя в Remnawave
-        try:
-            subscription_service = SubscriptionService()
-            _should_create = await should_create_panel_account(db, subscription, db_user)
-
-            if _should_create:
-                await subscription_service.create_remnawave_user(
-                    db,
-                    subscription,
-                    reset_traffic=settings.RESET_TRAFFIC_ON_PAYMENT or was_trial,
-                    reset_reason='конвертация триала' if was_trial else 'продление тарифа',
-                )
-            else:
-                await subscription_service.update_remnawave_user(
-                    db,
-                    subscription,
-                    reset_traffic=settings.RESET_TRAFFIC_ON_PAYMENT or was_trial,
-                    reset_reason='конвертация триала' if was_trial else 'продление тарифа',
-                )
-        except Exception as e:
-            logger.error('Ошибка обновления Remnawave', error=e)
-            from app.services.remnawave_retry_queue import remnawave_retry_queue
-
-            remnawave_retry_queue.enqueue(
-                subscription_id=subscription.id,
-                user_id=db_user.id,
-                action='create',
-            )
-
-        # Создаем транзакцию
-        await create_transaction(
+        transaction = await create_transaction(
             db,
             user_id=db_user.id,
             type=TransactionType.SUBSCRIPTION_PAYMENT,
             amount_kopeks=final_price,
             description=f'Продление тарифа {tariff.name} на {period} дней',
+            commit=False,
         )
 
-        from app.services.referral_purchase_service import register_first_purchase_after_purchase
-
-        await register_first_purchase_after_purchase(
-            referee_id=db_user.id,
-            subscription_id=subscription.id,
-            duration_days=period,
-            paid_amount_kopeks=final_price,
-            source='bot_tariff_extend',
-            bot=callback.bot,
-        )
-
-        # Отправляем уведомление админу
-        try:
-            admin_notification_service = AdminNotificationService(callback.bot)
-            await admin_notification_service.send_subscription_purchase_notification(
-                db,
-                db_user,
-                subscription,
-                None,  # Транзакция отсутствует, оплата с баланса
-                period,
-                was_trial_conversion=was_trial,
-                amount_kopeks=final_price,
-                purchase_type='renewal',
-            )
-        except Exception as e:
-            logger.error('Ошибка отправки уведомления админу', error=e)
-
-        # Очищаем корзину после успешной покупки (per-subscription в multi-tariff)
-        try:
-            _cart_sub_id = getattr(subscription, 'id', None) if subscription else None
-            if _cart_sub_id and settings.is_multi_tariff_enabled():
-                await user_cart_service.delete_subscription_cart(db_user.id, _cart_sub_id)
-            else:
-                await user_cart_service.delete_user_cart(db_user.id)
-            logger.info('Корзина очищена после продления тарифа для пользователя', telegram_id=db_user.telegram_id)
-        except Exception as e:
-            logger.error('Ошибка очистки корзины', error=e)
-
-        await state.clear()
-
-        # Экрана успеха больше нет: тост и обновлённый экран подписки.
-        from .purchase import show_subscription_info
-
-        try:
-            await callback.answer(f'Подписка продлена на {period} дн.')
-        except Exception:
-            pass
-        await show_subscription_info(callback, db_user, db)
+        # Одна единица: списание + новый срок + запись об оплате.
+        await db.commit()
     except Exception as e:
         logger.error('Ошибка при продлении тарифа', error=e, exc_info=True)
+        try:
+            await db.rollback()
+        except Exception:
+            pass
         try:
             await callback.message.edit_text(
                 texts.t('TARIFF_RENEW_ERROR', '❌ Произошла ошибка при продлении подписки')
@@ -3225,6 +3219,97 @@ async def confirm_tariff_extend(
             await callback.answer('⚠️ Ошибка продления')
         except Exception:
             pass
+        return
+
+    # ── Побочные эффекты только после успешного коммита покупки ──
+    await _emit_purchase_transaction_side_effects(
+        transaction,
+        amount_kopeks=final_price,
+        user_id=db_user.id,
+        description=f'Продление тарифа {tariff.name} на {period} дней',
+    )
+
+    # Ручное продление сдвигает ближайшее автосписание Lava (best-effort):
+    # extend_subscription делает это сам только при commit=True.
+    await _shift_lava_next_charge_after_purchase(db, subscription.id, period)
+
+    # Обновляем пользователя в Remnawave
+    try:
+        subscription_service = SubscriptionService()
+        _should_create = await should_create_panel_account(db, subscription, db_user)
+
+        if _should_create:
+            await subscription_service.create_remnawave_user(
+                db,
+                subscription,
+                reset_traffic=settings.RESET_TRAFFIC_ON_PAYMENT or was_trial,
+                reset_reason='конвертация триала' if was_trial else 'продление тарифа',
+            )
+        else:
+            await subscription_service.update_remnawave_user(
+                db,
+                subscription,
+                reset_traffic=settings.RESET_TRAFFIC_ON_PAYMENT or was_trial,
+                reset_reason='конвертация триала' if was_trial else 'продление тарифа',
+            )
+    except Exception as e:
+        logger.error('Ошибка обновления Remnawave', error=e)
+        from app.services.remnawave_retry_queue import remnawave_retry_queue
+
+        remnawave_retry_queue.enqueue(
+            subscription_id=subscription.id,
+            user_id=db_user.id,
+            action='create',
+        )
+
+    from app.services.referral_purchase_service import register_first_purchase_after_purchase
+
+    await register_first_purchase_after_purchase(
+        referee_id=db_user.id,
+        subscription_id=subscription.id,
+        duration_days=period,
+        paid_amount_kopeks=final_price,
+        source='bot_tariff_extend',
+        bot=callback.bot,
+    )
+
+    # Отправляем уведомление админу
+    try:
+        admin_notification_service = AdminNotificationService(callback.bot)
+        await admin_notification_service.send_subscription_purchase_notification(
+            db,
+            db_user,
+            subscription,
+            None,  # Транзакция отсутствует, оплата с баланса
+            period,
+            was_trial_conversion=was_trial,
+            amount_kopeks=final_price,
+            purchase_type='renewal',
+        )
+    except Exception as e:
+        logger.error('Ошибка отправки уведомления админу', error=e)
+
+    # Очищаем корзину после успешной покупки (per-subscription в multi-tariff)
+    try:
+        _cart_sub_id = getattr(subscription, 'id', None) if subscription else None
+        if _cart_sub_id and settings.is_multi_tariff_enabled():
+            await user_cart_service.delete_subscription_cart(db_user.id, _cart_sub_id)
+        else:
+            await user_cart_service.delete_user_cart(db_user.id)
+        logger.info('Корзина очищена после продления тарифа для пользователя', telegram_id=db_user.telegram_id)
+    except Exception as e:
+        logger.error('Ошибка очистки корзины', error=e)
+
+    await state.clear()
+
+    # Экрана успеха больше нет: тост и обновлённый экран подписки.
+    from .purchase import show_subscription_info
+
+    try:
+        await callback.answer(f'Подписка продлена на {period} дн.')
+    except Exception:
+        pass
+    await show_subscription_info(callback, db_user, db)
 
 
 # ==================== Переключение тарифов ====================
@@ -5690,7 +5775,12 @@ async def return_to_saved_tariff_cart(
         )
     else:  # tariff_purchase
         period = cart_data.get('period_days', 30)
-        new_end_date = datetime.now(UTC) + timedelta(days=period)
+        _cart_sub_id = cart_data.get('subscription_id')
+        _existing_sub = await get_subscription_by_id_for_user(db, _cart_sub_id, db_user.id) if _cart_sub_id else None
+        now = datetime.now(UTC)
+        new_end_date = _referral_conversion_end_date(_existing_sub, period, now)
+        if new_end_date is None:
+            new_end_date = now + timedelta(days=period)
         new_end_text = format_local_datetime(new_end_date, '%d.%m.%Y', na_placeholder='—')
         # Старые локали (en/fa/ua/zh) ещё используют расширенный шаблон;
         # передаём все его плейсхолдеры, чтобы не падать на KeyError.

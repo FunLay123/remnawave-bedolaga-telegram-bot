@@ -490,6 +490,7 @@ async def handle_simple_subscription_pay_with_balance(
                 traffic_limit_gb=subscription_params['traffic_limit_gb'],
                 device_limit=subscription_params['device_limit'],
                 connected_squads=[resolved_squad_uuid] if resolved_squad_uuid else None,
+                convert_trial=True,
             )
 
             # Если текущая подписка была пробной, и мы обновляем её
@@ -2249,6 +2250,7 @@ async def confirm_simple_subscription_purchase(
                 traffic_limit_gb=subscription_params['traffic_limit_gb'],
                 device_limit=subscription_params['device_limit'],
                 connected_squads=[resolved_squad_uuid] if resolved_squad_uuid else None,
+                convert_trial=True,
             )
 
             # Если текущая подписка была пробной, и мы обновляем её

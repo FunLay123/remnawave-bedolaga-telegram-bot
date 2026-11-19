@@ -3927,7 +3927,11 @@ async def activate_subscription_trial_endpoint(
             logger.error('Ошибка получения триального тарифа', error=e)
 
     # Бонус приглашённому — поверх тарифной либо глобальной длительности.
-    trial_duration = get_effective_trial_days(user, trial_duration or settings.TRIAL_DURATION_DAYS)
+    base_trial_duration = trial_duration or settings.TRIAL_DURATION_DAYS
+    trial_duration = get_effective_trial_days(user, base_trial_duration)
+    # Снимок в тот же момент, что и срок: create_trial_subscription не
+    # пересчитывает бонус после await.
+    applied_trial_referral_days = max(0, trial_duration - max(0, int(base_trial_duration)))
 
     try:
         subscription = await create_trial_subscription(
@@ -3938,6 +3942,7 @@ async def activate_subscription_trial_endpoint(
             traffic_limit_gb=trial_traffic_limit,
             connected_squads=trial_squads,
             tariff_id=tariff_id_for_trial,
+            trial_referral_days=applied_trial_referral_days,
         )
     except Exception as error:  # pragma: no cover - defensive logging
         logger.error('Failed to activate trial subscription for user', user_id=user.id, error=error)

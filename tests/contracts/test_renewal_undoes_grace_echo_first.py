@@ -45,9 +45,6 @@ EXEMPT: dict[str, str] = {
     'app/handlers/subscription/tariff_purchase.py::confirm_daily_tariff_switch': (
         'переход на суточный: срок «сейчас + сутки», сквады тарифа'
     ),
-    'app/services/subscription_auto_purchase_service.py::_auto_purchase_daily_tariff': (
-        'суточный тариф: срок «сейчас + сутки», сквады тарифа'
-    ),
 }
 
 

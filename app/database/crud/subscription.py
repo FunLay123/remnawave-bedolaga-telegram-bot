@@ -165,10 +165,10 @@ def apply_trial_conversion_defaults(subscription: Subscription) -> None:
     мог, и затирать тут нечего: реальное значение по ``DEFAULT_AUTOPAY_ENABLED``
     подписка должна получать ровно в момент, когда становится платной.
 
-    Вызывать ТОЛЬКО там, где строка действительно БЫЛА триалом. На продлении уже
-    платной подписки это затрёт осознанный выбор пользователя — поэтому
-    ``_revive_paid_subscription`` и админское продление, где ``is_trial = False``
-    ставится и для не-триалов, сюда не заходят.
+    Вызывать ТОЛЬКО там, где строка действительно БЫЛА триалом (снимок ``was_trial``
+    до сброса ``is_trial``). На продлении уже платной подписки это затрёт осознанный
+    выбор пользователя, поэтому админское продление и ``_revive_paid_subscription``
+    вызывают помощник только для настоящих конверсий триала — под тем же guard.
     """
     subscription.autopay_enabled = settings.is_autopay_enabled_by_default()
 
@@ -182,12 +182,26 @@ async def create_trial_subscription(
     squad_uuid: str = None,
     connected_squads: list[str] = None,
     tariff_id: int | None = None,
+    *,
+    duration_days_include_referral_bonus: bool = False,
+    trial_referral_days: int | None = None,
 ) -> Subscription:
     """Создает триальную подписку.
 
     Args:
         connected_squads: Список UUID сквадов (если указан, squad_uuid игнорируется)
         tariff_id: ID тарифа (для режима тарифов)
+        duration_days_include_referral_bonus: ``duration_days`` уже включает
+            реферальный бонус приглашённого (пути, использующие
+            ``get_effective_trial_days``). Тогда база считается по сроку без
+            этого бонуса. По умолчанию (admin/webapi/promocode) переданный срок
+            считается базовым. Устаревший fallback: бонус пересчитывается от
+            конфига/пригласившего в момент вызова — новые live-пути передают
+            ``trial_referral_days``.
+        trial_referral_days: фактически применённый реферальный бонус, снятый
+            вызывающим в тот же момент, когда считался ``duration_days``.
+            Имеет приоритет и не пересчитывается из изменяемых настроек/связи
+            после расчёта срока.
     """
     duration_days = duration_days or settings.TRIAL_DURATION_DAYS
     # 0 ГБ — это осознанный БЕЗЛИМИТ (валидное значение), поэтому отличаем
@@ -197,6 +211,34 @@ async def create_trial_subscription(
         traffic_limit_gb = settings.TRIAL_TRAFFIC_LIMIT_GB
     if device_limit is None:
         device_limit = settings.TRIAL_DEVICE_LIMIT
+
+    # Базовый срок — без реферального бонуса приглашённого. Бонус учитываем
+    # только там, где вызывающий уже добавил его в duration_days; иначе
+    # переданный срок и есть база (admin/webapi/promocode бонус не применяют).
+    # ``trial_referral_seconds`` фиксирует фактически выданный бонус сразу при
+    # активации: позже его нельзя выводить из полного срока, потому что срок
+    # меняют и бесплатные продления, и реферальные начисления.
+    base_duration_days = duration_days
+    trial_referral_seconds = 0 if settings.is_referral_days_only_scheme() else None
+    if trial_referral_days is not None:
+        # Явный снимок снимает гонку с изменяемым конфигом/пригласившим: между
+        # расчётом duration_days и этим вызовом есть await (db.get и т.п.), и
+        # пересчёт здесь мог бы записать другой бонус, чем уже заложен в срок.
+        applied_referral_days = max(0, min(int(trial_referral_days), max(0, int(duration_days))))
+        base_duration_days = max(0, int(duration_days) - applied_referral_days)
+        if settings.is_referral_days_only_scheme():
+            trial_referral_seconds = int(applied_referral_days * 86400)
+    elif duration_days_include_referral_bonus:
+        from app.services.trial_activation_service import get_applied_trial_referral_bonus_days
+
+        trial_user = await db.get(User, user_id)
+        applied_referral_days = min(
+            max(0, int(duration_days)),
+            get_applied_trial_referral_bonus_days(trial_user),
+        )
+        base_duration_days = max(0, int(duration_days) - applied_referral_days)
+        if settings.is_referral_days_only_scheme():
+            trial_referral_seconds = int(applied_referral_days * 86400)
 
     # Если переданы connected_squads, используем их.
     # Иначе используем squad_uuid или все доступные сквады по умолчанию.
@@ -219,7 +261,11 @@ async def create_trial_subscription(
         except Exception as error:
             logger.error('Не удалось получить сквад для триальной подписки пользователя', user_id=user_id, error=error)
 
-    end_date = datetime.now(UTC) + timedelta(days=duration_days)
+    # Один момент времени для start_date/end_date/base_trial_end_date: иначе
+    # разница end_date - base_trial_end_date теряла бы микросекунды и перенос
+    # переставал бы быть точным до секунд.
+    now = datetime.now(UTC)
+    end_date = now + timedelta(days=duration_days)
 
     # Check for existing PENDING trial subscription (retry after failed payment)
     # In multi-tariff mode, only reuse a subscription for the SAME tariff to avoid
@@ -235,8 +281,10 @@ async def create_trial_subscription(
 
     if existing and existing.is_trial and existing.status == SubscriptionStatus.PENDING.value:
         existing.status = SubscriptionStatus.ACTIVE.value
-        existing.start_date = datetime.now(UTC)
+        existing.start_date = now
         existing.end_date = end_date
+        existing.base_trial_end_date = now + timedelta(days=base_duration_days)
+        existing.trial_referral_seconds = trial_referral_seconds
         existing.traffic_limit_gb = traffic_limit_gb
         existing.device_limit = device_limit
         existing.connected_squads = final_squads
@@ -275,8 +323,10 @@ async def create_trial_subscription(
         user_id=user_id,
         status=SubscriptionStatus.ACTIVE.value,
         is_trial=True,
-        start_date=datetime.now(UTC),
+        start_date=now,
         end_date=end_date,
+        base_trial_end_date=now + timedelta(days=base_duration_days),
+        trial_referral_seconds=trial_referral_seconds,
         traffic_limit_gb=traffic_limit_gb,
         device_limit=device_limit,
         connected_squads=final_squads,
@@ -364,11 +414,25 @@ async def _revive_paid_subscription(
     # Оверлей грейса, осевший в подписке (v4.10–4.11), — не её срок: вернуть до расчёта.
     from app.services.grace_access_echo import undo_grace_overlay_echo
 
+    # Реанимация тоже пишет срок: перечитываем его под локом, чтобы не продлить
+    # от устаревшего end_date после чужого коммита.
+    await _lock_subscription_row(db, subscription, include_term=True)
     await undo_grace_overlay_echo(db, subscription)
     now = datetime.now(UTC)
     was_alive = subscription.end_date is not None and subscription.end_date > now
+    # Снимок нужен ДО сброса ``is_trial``: помощник возвращает ноль для не-триала.
+    # Спец-ветка «now + только реферальный хвост» — только для days_only с
+    # известной базовой датой. Старые строки без базы и схема ``levels``
+    # сохраняют прежнюю revive-логику: живой срок продлевается от ``end_date``.
+    was_trial = bool(subscription.is_trial)
+    is_referral_trial_conversion = bool(
+        was_trial and subscription.base_trial_end_date is not None and settings.is_referral_days_only_scheme()
+    )
+    trial_carry_over = get_trial_carry_over_delta(subscription, now) if is_referral_trial_conversion else timedelta()
 
     subscription.is_trial = False
+    # Учёт реферального остатка относился к триалу; на платной строке он не нужен.
+    subscription.trial_referral_seconds = None
     subscription.status = SubscriptionStatus.ACTIVE.value
     subscription.traffic_limit_gb = traffic_limit_gb
     if device_limit is not None:
@@ -376,11 +440,23 @@ async def _revive_paid_subscription(
     if connected_squads:
         subscription.connected_squads = list(connected_squads)
 
-    base_date = subscription.end_date if was_alive else now
-    if not was_alive:
+    if was_trial:
+        # Триал не мог включать автоплатёж — дефолт выставляем ровно на конверсии,
+        # но не на продлении уже платной строки (там осознанный выбор пользователя).
+        apply_trial_conversion_defaults(subscription)
+
+    if is_referral_trial_conversion:
+        # Платный период триала стартует от покупки и переносит только хвост.
+        subscription.end_date = now + timedelta(days=duration_days) + trial_carry_over
         subscription.start_date = now
-        subscription.traffic_used_gb = 0.0
-    subscription.end_date = base_date + timedelta(days=duration_days)
+        if not was_alive:
+            subscription.traffic_used_gb = 0.0
+    else:
+        base_date = subscription.end_date if was_alive else now
+        if not was_alive:
+            subscription.start_date = now
+            subscription.traffic_used_gb = 0.0
+        subscription.end_date = base_date + timedelta(days=duration_days)
     subscription.updated_at = now
 
     if commit:
@@ -775,6 +851,12 @@ async def replace_subscription(
     subscription.is_trial = is_trial
     subscription.start_date = current_time
     subscription.end_date = current_time + timedelta(days=duration_days)
+    # Сброс базовой даты триала: строка могла раньше быть конвертированным
+    # триалом с устаревшей ``base_trial_end_date``. Админский/webapi-триал
+    # выдаётся без реферального бонуса, поэтому база совпадает с концом срока,
+    # а учтённый реферальный остаток начинается с нуля (старый не наследуем).
+    subscription.base_trial_end_date = subscription.end_date if is_trial else None
+    subscription.trial_referral_seconds = 0 if is_trial and settings.is_referral_days_only_scheme() else None
     subscription.traffic_limit_gb = traffic_limit_gb
     subscription.traffic_used_gb = 0.0
 
@@ -852,7 +934,12 @@ async def replace_subscription(
     return subscription
 
 
-async def _lock_subscription_row(db: AsyncSession, subscription: Subscription) -> None:
+async def _lock_subscription_row(
+    db: AsyncSession,
+    subscription: Subscription,
+    *,
+    include_term: bool = False,
+) -> None:
     """Берёт `SELECT ... FOR UPDATE` lock на строку Subscription и обновляет
     атрибуты, чувствительные к гонке с `add_subscription_traffic`.
 
@@ -861,12 +948,43 @@ async def _lock_subscription_row(db: AsyncSession, subscription: Subscription) -
     только для записи, но не для чтения. Refresh подтягивает свежие значения,
     взятые уже под lock'ом, поэтому helper'ы видят актуальный state.
 
+    ``include_term`` дополнительно перечитывает срок и триальное состояние
+    (``end_date``/``start_date``/``is_trial``/``status``/учёт реферального
+    остатка): покупка обязана считать перенос от уже закоммиченного срока, даже
+    если этот объект загружен раньше. Атрибуты, которые вызывающий изменил в
+    этой же транзакции намеренно (есть pending history), не перезаписываем.
+
     Идемпотентно: повторный lock в той же транзакции — noop (Postgres держит
     лок до конца транзакции).
     """
     await db.execute(select(Subscription.id).where(Subscription.id == subscription.id).with_for_update())
     # Подтягиваем поля, которые могут быть обновлены конкурентным add_subscription_traffic
     await db.refresh(subscription, ['traffic_limit_gb', 'purchased_traffic_gb', 'traffic_reset_at'])
+    if include_term:
+        term_fields = [field for field in _TERM_FIELDS if not _has_pending_change(subscription, field)]
+        if term_fields:
+            await db.refresh(subscription, term_fields)
+
+
+_TERM_FIELDS = (
+    'end_date',
+    'start_date',
+    'is_trial',
+    'status',
+    'base_trial_end_date',
+    'trial_referral_seconds',
+)
+
+
+def _has_pending_change(instance, field: str) -> bool:
+    """Есть ли у атрибута незакоммиченное изменение в текущей транзакции."""
+    try:
+        state = sa_inspect(instance, raiseerr=False)
+        history = state.attrs[field].history if state is not None else None
+    except Exception:
+        return False
+    return bool(history is not None and history.has_changes())
+
 
 
 async def _housekeep_expired_purchases(
@@ -1107,6 +1225,48 @@ def should_carry_trial_remaining_days() -> bool:
     return bool(settings.TRIAL_ADD_REMAINING_DAYS_TO_PAID and not settings.TARIFF_SWITCH_RESET_FREE_DAYS)
 
 
+def get_trial_carry_over_delta(subscription: Subscription, now: datetime) -> timedelta:
+    """Неиспользованный остаток триала, который переносится на покупку.
+
+    Единый расчёт для всех путей покупки. Для ``days_only`` с явным учётом
+    реферального остатка (``trial_referral_seconds``) переносится последний
+    отрезок срока: не больше учтённых реферальных секунд и не больше реально
+    оставшегося срока. Истёкшие или потраченные реферальные дни не
+    восстанавливаются, бесплатные продления их не увеличивают.
+
+    Для строк, где явного учёта нет, но известна ``base_trial_end_date``,
+    переносится только хвост после неё — часть срока после
+    ``max(now, base_trial_end_date)``. Старые строки без обоих полей и схема
+    ``levels`` сохраняют прежнее поведение
+    ``should_carry_trial_remaining_days()``. Не-триал и отсутствующий
+    ``end_date`` не переносят ничего.
+    """
+    if subscription is None or not subscription.is_trial:
+        return timedelta()
+
+    end_date = subscription.end_date
+    if end_date is None:
+        return timedelta()
+
+    days_only = settings.is_referral_days_only_scheme()
+    tracked_referral_seconds = getattr(subscription, 'trial_referral_seconds', None)
+    if tracked_referral_seconds is not None and days_only:
+        live_seconds = max(0.0, (end_date - now).total_seconds())
+        return timedelta(seconds=min(max(0, int(tracked_referral_seconds)), live_seconds))
+
+    base_trial_end_date = subscription.base_trial_end_date
+    if base_trial_end_date is not None and days_only:
+        anchor = max(now, base_trial_end_date)
+    elif should_carry_trial_remaining_days():
+        anchor = now
+    else:
+        return timedelta()
+
+    remaining = end_date - anchor
+    return max(timedelta(), remaining)
+
+
+
 def _should_carry_remaining_days(*, is_trial: bool, source_is_free: bool) -> bool:
     """Переносить ли остаток дней при СМЕНЕ тарифа на новый срок.
 
@@ -1274,6 +1434,11 @@ async def add_reward_days(
     if locked is None:
         return None
 
+    # Строка могла быть изменена конкурентной сессией после её загрузки в
+    # identity map: перечитываем срок/триальное состояние под локом, иначе
+    # начисление перезапишет чужое продление старым end_date.
+    await _lock_subscription_row(db, locked, include_term=True)
+
     status = (locked.status or '').lower()
     if status in (SubscriptionStatus.PENDING.value, SubscriptionStatus.DISABLED.value):
         return None
@@ -1291,6 +1456,19 @@ async def add_reward_days(
 
     now = datetime.now(UTC)
     base = locked.end_date if locked.end_date and locked.end_date > now else now
+
+    # Реферальные дни продлевают (или заново начинают) реферальный хвост срока.
+    # Учёт ведём для новых days_only-триалов; у legacy-строк поля нет, и их
+    # прежнее поведение не меняем.
+    if (
+        locked.is_trial
+        and settings.is_referral_days_only_scheme()
+        and getattr(locked, 'trial_referral_seconds', None) is not None
+    ):
+        live_seconds = max(0.0, (locked.end_date - now).total_seconds()) if locked.end_date else 0.0
+        tracked_seconds = min(float(locked.trial_referral_seconds or 0), live_seconds)
+        locked.trial_referral_seconds = int(tracked_seconds + timedelta(days=days).total_seconds())
+
     locked.end_date = base + timedelta(days=days)
 
     if status == SubscriptionStatus.EXPIRED.value:
@@ -1311,7 +1489,7 @@ async def extend_subscription(
     traffic_limit_gb: int | None = None,
     device_limit: int | None = None,
     connected_squads: list[str] | None = None,
-    convert_trial: bool = True,
+    convert_trial: bool | None = None,
     reset_used_traffic: bool | None = None,
     commit: bool = True,
 ) -> Subscription:
@@ -1325,11 +1503,11 @@ async def extend_subscription(
         traffic_limit_gb: Лимит трафика ГБ (опционально, для режима тарифов)
         device_limit: Лимит устройств (опционально, для режима тарифов)
         connected_squads: Список UUID сквадов (опционально, для режима тарифов)
-        convert_trial: снимать ли триальный флаг при передаче tariff_id.
-            True (по умолчанию) — для НАСТОЯЩИХ покупок тарифа. Передавайте
-            False для бесплатного релейбла/смены тарифа без оплаты, иначе триал
-            превратится в фантомную платную подписку и попадёт в авто-продление
-            (баг #629889).
+        convert_trial: снимать ли триальный флаг при покупке.
+            None (по умолчанию) — прежнее поведение: конвертация только при
+            переданном tariff_id; без него вызов считается бесплатным продлением.
+            True — НАСТОЯЩАЯ покупка, в том числе классической подписки без
+            tariff_id. False — бесплатный релейбл/смена тарифа без оплаты.
         reset_used_traffic: решение вызывающего, обнулять ли израсходованный
             трафик при переданном ``traffic_limit_gb``. Вызывающий тем же решением
             сбрасывает (или нет) счётчик в панели — иначе бот показывает расход 0,
@@ -1342,7 +1520,10 @@ async def extend_subscription(
     # Защищает от гонки с параллельным add_subscription_traffic (тот тоже берёт lock).
     # Повторный lock в той же транзакции — noop (SubscriptionRenewalService уже мог
     # взять lock через with_for_update).
-    await _lock_subscription_row(db, subscription)
+    # Срок и триальное состояние перечитываем тоже: покупка должна считать перенос
+    # от уже закоммиченного другим запросом end_date/реферального остатка, а не от
+    # identity-map снимка, загруженного до чужого коммита.
+    await _lock_subscription_row(db, subscription, include_term=True)
 
     if days > 0:
         # Оверлей грейса, осевший в подписке (v4.10–4.11 принимали его за продление
@@ -1376,12 +1557,59 @@ async def extend_subscription(
         SubscriptionStatus.LIMITED.value,
     ) or (subscription.end_date is not None and subscription.end_date <= current_time)
 
+    # Спец-ветка «покупка при живом триале стартует от now + только
+    # реферальный хвост» применима ТОЛЬКО к days_only с известной базовой
+    # датой. Старые строки без ``base_trial_end_date`` и схема ``levels``
+    # обязаны остаться на прежних generic-ветках (same-tariff продлевает от
+    # ``end_date``, tariff-change решает через ``should_carry``). Считать
+    # дельту нужно ДО сброса ``is_trial`` ниже: помощник возвращает ноль
+    # для не-триала.
+    should_convert_trial = bool(
+        subscription.is_trial and (convert_trial is True or (convert_trial is None and tariff_id is not None))
+    )
+    is_referral_trial_conversion = bool(
+        should_convert_trial
+        and subscription.base_trial_end_date is not None
+        and settings.is_referral_days_only_scheme()
+    )
+    trial_carry_over = (
+        get_trial_carry_over_delta(subscription, current_time) if is_referral_trial_conversion else timedelta()
+    )
+
+    # Бесплатное (нереферальное) продление не должно превращать истёкший или
+    # чужой хвост в переносимый реферальный остаток: оставляем только тот, что
+    # ещё жив сейчас. Новые дни такого продления реферальными не считаются —
+    # их добавляет только add_reward_days.
+    if (
+        days > 0
+        and subscription.is_trial
+        and not should_convert_trial
+        and settings.is_referral_days_only_scheme()
+        and getattr(subscription, 'trial_referral_seconds', None) is not None
+        and subscription.end_date is not None
+    ):
+        live_referral_seconds = max(0.0, (subscription.end_date - current_time).total_seconds())
+        subscription.trial_referral_seconds = int(
+            min(float(subscription.trial_referral_seconds or 0), live_referral_seconds)
+        )
+
     if is_tariff_change:
         logger.info('🔄 Обнаружена СМЕНА тарифа', tariff_id=subscription.tariff_id, tariff_id_2=tariff_id)
 
     if days < 0:
         subscription.end_date = subscription.end_date + timedelta(days=days)
         logger.info('📅 Срок подписки уменьшен', abs=abs(days), end_date=subscription.end_date)
+    elif is_referral_trial_conversion:
+        # Конверсия триала: платный период стартует от покупки, а переносится
+        # только реферальный хвост — один раз. Иначе при том же тарифе generic
+        # ветка прибавила бы дни к полному ``end_date`` и второй раз учла базу.
+        subscription.end_date = current_time + timedelta(days=days) + trial_carry_over
+        subscription.start_date = current_time
+        logger.info(
+            '🎓 Конверсия триала: срок с текущей даты + дней + реферальный остаток',
+            days=days,
+            carry_over_seconds=int(trial_carry_over.total_seconds()),
+        )
     elif is_tariff_change:
         # При СМЕНЕ тарифа сохраняем оставшееся время активной подписки.
         # НЕ переносим дни, если исходная подписка — триал (без
@@ -1461,17 +1689,31 @@ async def extend_subscription(
         subscription.tariff_id = tariff_id
         logger.info('📦 Обновлен тариф подписки', old_tariff_id=old_tariff_id, tariff_id=tariff_id)
 
-        # При покупке тарифа сбрасываем триальный статус — но ТОЛЬКО для настоящих
-        # покупок. Бесплатный релейбл/смена тарифа без оплаты должны передавать
-        # convert_trial=False, иначе триал станет фантомной платной подпиской и
-        # попадёт в авто-продление (баг #629889).
-        if subscription.is_trial and convert_trial:
-            subscription.is_trial = False
-            # Transient marker (not persisted): lets purchase handlers report the
-            # payment as a trial→paid conversion without a signature change.
-            subscription._converted_from_trial = True
-            apply_trial_conversion_defaults(subscription)
-            logger.info('🎓 Подписка конвертирована из триала в платную', subscription_id=subscription.id)
+    # Явная оплата конвертирует и классический триал без tariff_id. По умолчанию
+    # отсутствие tariff_id по-прежнему означает бесплатное продление: иначе
+    # реферальные/админские дни превращали бы триал в фантомную платную подписку.
+    if should_convert_trial:
+        subscription.is_trial = False
+        # Учёт реферального остатка относился к триалу; на платной строке он
+        # не нужен и не должен пережить конверсию.
+        subscription.trial_referral_seconds = None
+        # Transient marker (not persisted): lets purchase handlers report the
+        # payment as a trial→paid conversion without a signature change.
+        subscription._converted_from_trial = True
+        apply_trial_conversion_defaults(subscription)
+        logger.info('🎓 Подписка конвертирована из триала в платную', subscription_id=subscription.id)
+
+    if (
+        days < 0
+        and subscription.is_trial
+        and getattr(subscription, 'trial_referral_seconds', None) is not None
+        and subscription.end_date is not None
+    ):
+        # Сокращение срока не может оставить «реферальными» больше, чем осталось.
+        remaining_seconds = max(0.0, (subscription.end_date - current_time).total_seconds())
+        subscription.trial_referral_seconds = int(
+            min(float(subscription.trial_referral_seconds or 0), remaining_seconds)
+        )
 
     if traffic_limit_gb is not None:
         old_traffic = subscription.traffic_limit_gb
@@ -3069,11 +3311,24 @@ async def activate_pending_trial_subscription(
     # Пересчитываем end_date на основе исходной длительности если есть
     if duration_days:
         pending_subscription.end_date = current_time + timedelta(days=duration_days)
+        # Pending-триал создаётся с уже применённым бонусом приглашённого.
+        # База и явный учёт реферального остатка должны сдвинуться вместе со
+        # start_date, иначе при последующей покупке referral-хвост сгорит
+        # (или будет посчитан от устаревшей даты).
+        from app.services.trial_activation_service import get_applied_trial_referral_bonus_days
+
+        trial_user = await db.get(User, user_id)
+        applied_referral_days = min(int(duration_days), get_applied_trial_referral_bonus_days(trial_user))
+        base_duration_days = max(0, int(duration_days) - applied_referral_days)
+        pending_subscription.base_trial_end_date = pending_subscription.start_date + timedelta(days=base_duration_days)
+        pending_subscription.trial_referral_seconds = (
+            int(applied_referral_days * 86400) if settings.is_referral_days_only_scheme() else None
+        )
     elif pending_subscription.end_date and pending_subscription.end_date < current_time:
         # Если end_date в прошлом, пересчитываем
-        from app.config import settings
-
         pending_subscription.end_date = current_time + timedelta(days=settings.TRIAL_DURATION_DAYS)
+        pending_subscription.base_trial_end_date = pending_subscription.end_date
+        pending_subscription.trial_referral_seconds = 0 if settings.is_referral_days_only_scheme() else None
 
     await db.commit()
     await db.refresh(pending_subscription)
@@ -3438,6 +3693,20 @@ async def get_active_subscriptions_by_user_id(db: AsyncSession, user_id: int) ->
         )
         .where(
             Subscription.user_id == user_id,
+            Subscription.status.in_(_ALIVE_SUBSCRIPTION_STATUSES_TUPLE),
+        )
+        .order_by(Subscription.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_active_trial_subscriptions_by_user_id(db: AsyncSession, user_id: int) -> list[Subscription]:
+    """Get alive trial rows without eager-loading unrelated user/tariff data."""
+    result = await db.execute(
+        select(Subscription)
+        .where(
+            Subscription.user_id == user_id,
+            Subscription.is_trial.is_(True),
             Subscription.status.in_(_ALIVE_SUBSCRIPTION_STATUSES_TUPLE),
         )
         .order_by(Subscription.created_at.desc())

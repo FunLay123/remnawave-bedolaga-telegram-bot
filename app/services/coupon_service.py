@@ -240,6 +240,9 @@ async def _grant_subscription_days(
             traffic_limit_gb=tariff.traffic_limit_gb,
             device_limit=tariff.device_limit,
             connected_squads=squads,
+            # Бесплатная выдача купона не является покупкой: живой триал
+            # остаётся триалом и не проходит платный перенос хвоста.
+            convert_trial=False,
             commit=False,
         )
         return subscription, True

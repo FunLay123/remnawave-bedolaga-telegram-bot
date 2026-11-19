@@ -1563,6 +1563,7 @@ async def activate_purchase(db: AsyncSession, purchase_token: str, *, skip_notif
                     traffic_limit_gb=tariff.traffic_limit_gb,
                     device_limit=tariff.device_limit,
                     connected_squads=squads,
+                    convert_trial=True,
                     commit=False,
                 )
             elif existing_for_tariff:

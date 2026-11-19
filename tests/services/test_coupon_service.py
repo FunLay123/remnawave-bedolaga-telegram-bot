@@ -305,6 +305,7 @@ async def test_grant_extends_active_subscription(monkeypatch: pytest.MonkeyPatch
     kwargs = extend.await_args.kwargs
     assert kwargs['commit'] is False, 'the caller owns the transaction'
     assert kwargs['tariff_id'] == 3
+    assert kwargs['convert_trial'] is False, 'free grant must not convert a live trial'
 
 
 @pytest.mark.asyncio

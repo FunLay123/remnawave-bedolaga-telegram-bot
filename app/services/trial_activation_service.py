@@ -49,16 +49,43 @@ def is_trial_available_for_user(user: User) -> bool:
     )
 
 
+def _applied_referral_trial_bonus(user: User) -> int:
+    """Реферальный бонус, который реально добавляется к базовому триалу.
+
+    Те же условия, что и в ``get_effective_trial_days``: программа включена,
+    схема ``days_only``, пользователь пришёл по реферальной ссылке.
+    """
+    if not settings.is_referral_program_enabled() or not settings.is_referral_days_only_scheme():
+        return 0
+    if getattr(user, 'referred_by_id', None) is None:
+        return 0
+    return max(0, int(settings.REFERRAL_TRIAL_BONUS_DAYS))
+
+
+def get_applied_trial_referral_bonus_days(user: User) -> int:
+    """Сколько реферальных дней фактически применяется к триалу пользователя."""
+    return _applied_referral_trial_bonus(user)
+
+
 def get_effective_trial_days(user: User, base_days: int) -> int:
     """Базовая длительность триала плюс бонус приглашённому."""
     base = max(0, int(base_days or 0))
     if base <= 0:
         return 0
-    if not settings.is_referral_program_enabled() or not settings.is_referral_days_only_scheme():
-        return base
-    if getattr(user, 'referred_by_id', None) is None:
-        return base
-    return base + max(0, int(settings.REFERRAL_TRIAL_BONUS_DAYS))
+    return base + _applied_referral_trial_bonus(user)
+
+
+def get_base_trial_duration_days(user: User, total_days: int) -> int:
+    """Срок триала без реферального бонуса приглашённого.
+
+    ``total_days`` — уже собранный полный срок (например, результат
+    ``get_effective_trial_days``). Вычитается только фактически применимый
+    бонус; результат не опускается ниже нуля.
+    """
+    total = max(0, int(total_days or 0))
+    if total <= 0:
+        return 0
+    return max(0, total - _applied_referral_trial_bonus(user))
 
 
 async def get_effective_trial_days_from_db(

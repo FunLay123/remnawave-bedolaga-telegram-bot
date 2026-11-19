@@ -3,8 +3,10 @@
 Классическая покупка (`MiniAppSubscriptionPurchaseService.submit_purchase`)
 раньше при конверсии триала считала базу продления от его `end_date` и
 добавляла остаток ещё и в `bonus_period` — остаток триала учитывался дважды.
-Теперь при `was_trial_conversion` база — «сейчас», а обычное продление
-платной подписки по-прежнему идёт от её `end_date`.
+
+Теперь все пути используют общий помощник `get_trial_carry_over_delta`:
+в `days_only` с известной базовой датой переносится только реферальный хвост,
+а платное продление по-прежнему идёт от `end_date`.
 """
 
 from __future__ import annotations
@@ -53,13 +55,20 @@ def _pricing(period_days: int = 30) -> SimpleNamespace:
     )
 
 
-def _subscription(*, is_trial: bool, start_date: datetime, end_date: datetime) -> SimpleNamespace:
+def _subscription(
+    *,
+    is_trial: bool,
+    start_date: datetime,
+    end_date: datetime,
+    base_trial_end_date: datetime | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=7,
         user_id=1,
         is_trial=is_trial,
         start_date=start_date,
         end_date=end_date,
+        base_trial_end_date=base_trial_end_date,
         status='active',
         traffic_limit_gb=0,
         device_limit=1,
@@ -82,7 +91,13 @@ def _user() -> SimpleNamespace:
     )
 
 
-def _patch_purchase_dependencies(monkeypatch) -> None:
+def _enable_days_only(monkeypatch) -> None:
+    monkeypatch.setattr(settings, 'REFERRAL_REWARD_SCHEME', 'days_only')
+    monkeypatch.setattr(settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    monkeypatch.setattr(settings, 'TARIFF_SWITCH_RESET_FREE_DAYS', False)
+
+
+def _patch_purchase_dependencies(monkeypatch) -> AsyncMock:
     monkeypatch.setattr(type(settings), 'is_multi_tariff_enabled', lambda self: False)
     monkeypatch.setattr(
         'app.services.subscription_purchase_service.get_texts',
@@ -101,10 +116,6 @@ def _patch_purchase_dependencies(monkeypatch) -> None:
         lambda subscription: None,
     )
     monkeypatch.setattr(
-        'app.services.subscription_purchase_service.should_carry_trial_remaining_days',
-        lambda: True,
-    )
-    monkeypatch.setattr(
         'app.services.subscription_purchase_service.SubscriptionService',
         DummySubscriptionService,
     )
@@ -120,40 +131,71 @@ def _patch_purchase_dependencies(monkeypatch) -> None:
         'app.database.crud.subscription.deactivate_user_trial_subscriptions',
         AsyncMock(return_value=[]),
     )
+    # Сервис читает именно триалы через get_active_trial_subscriptions_by_user_id;
+    # патч другого имени проходил только потому, что MagicMock молча итерировался пустым.
+    trials_lookup = AsyncMock(return_value=[])
+    monkeypatch.setattr(
+        'app.database.crud.subscription.get_active_trial_subscriptions_by_user_id',
+        trials_lookup,
+    )
     monkeypatch.setattr(
         'app.services.referral_purchase_service.register_first_purchase_after_purchase',
         AsyncMock(),
     )
+    return trials_lookup
 
 
 async def _submit(monkeypatch, subscription: SimpleNamespace):
-    _patch_purchase_dependencies(monkeypatch)
+    trials_lookup = _patch_purchase_dependencies(monkeypatch)
     db = AsyncMock(spec=AsyncSession)
     locked = MagicMock()
     locked.scalar_one_or_none.return_value = subscription
     db.execute = AsyncMock(return_value=locked)
     context = SimpleNamespace(user=_user(), subscription=subscription, payload={})
     result = await MiniAppSubscriptionPurchaseService().submit_purchase(db, context, _pricing())
-    return db, result
+    return db, result, trials_lookup
 
 
-async def test_trial_conversion_counts_remaining_trial_once(monkeypatch):
+async def test_trial_conversion_carries_only_referral_tail(monkeypatch):
+    """База 1 день, реферальный хвост 19: покупка 30 дней даёт now+49, не now+50."""
+    _enable_days_only(monkeypatch)
     before = datetime.now(UTC)
-    trial_end = before + timedelta(days=2)
     subscription = _subscription(
         is_trial=True,
-        start_date=before - timedelta(days=7),
-        end_date=trial_end,
+        start_date=before,
+        end_date=before + timedelta(days=20),
+        base_trial_end_date=before + timedelta(days=1),
     )
 
-    db, result = await _submit(monkeypatch, subscription)
+    db, result, trials_lookup = await _submit(monkeypatch, subscription)
+    after = datetime.now(UTC)
 
     assert result['was_trial_conversion'] is True
-    # 30 купленных дней + 2 оставшихся триальных, но остаток ровно один раз:
-    # end = now + 30 + (trial_end - now) == trial_end + 30.
-    assert subscription.end_date == trial_end + timedelta(days=30)
-    assert before <= subscription.start_date <= datetime.now(UTC)
+    # 30 купленных + только 19 реферальных; базовый день не переносится.
+    assert before + timedelta(days=49) <= subscription.end_date <= after + timedelta(days=49)
+    assert subscription.end_date < before + timedelta(days=50)
+    assert before <= subscription.start_date <= after
     db.commit.assert_awaited()
+    trials_lookup.assert_awaited_once()
+
+
+async def test_referral_tail_carries_even_when_trial_add_is_disabled(monkeypatch):
+    """``TRIAL_ADD_REMAINING_DAYS_TO_PAID=false`` не сжигает реферальный хвост days_only."""
+    _enable_days_only(monkeypatch)
+    monkeypatch.setattr(settings, 'TRIAL_ADD_REMAINING_DAYS_TO_PAID', False)
+    before = datetime.now(UTC)
+    subscription = _subscription(
+        is_trial=True,
+        start_date=before,
+        end_date=before + timedelta(days=20),
+        base_trial_end_date=before + timedelta(days=1),
+    )
+
+    _, result, _ = await _submit(monkeypatch, subscription)
+    after = datetime.now(UTC)
+
+    assert result['was_trial_conversion'] is True
+    assert before + timedelta(days=49) <= subscription.end_date <= after + timedelta(days=49)
 
 
 async def test_paid_extension_still_extends_from_end_date(monkeypatch):
@@ -166,7 +208,7 @@ async def test_paid_extension_still_extends_from_end_date(monkeypatch):
         end_date=paid_end,
     )
 
-    _, result = await _submit(monkeypatch, subscription)
+    _, result, _ = await _submit(monkeypatch, subscription)
 
     assert result['was_trial_conversion'] is False
     assert subscription.end_date == paid_end + timedelta(days=30)

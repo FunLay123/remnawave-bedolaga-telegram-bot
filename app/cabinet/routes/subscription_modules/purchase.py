@@ -26,9 +26,10 @@ from app.database.crud.subscription import (
     create_trial_subscription,
     decrement_subscription_server_counts,
     extend_subscription,
+    get_active_trial_subscriptions_by_user_id,
     get_subscription_by_id_for_user,
     get_subscription_by_user_id,
-    should_carry_trial_remaining_days,
+    get_trial_carry_over_delta,
 )
 from app.database.crud.tariff import get_tariff_by_id, get_tariffs_for_user
 from app.database.crud.transaction import create_transaction
@@ -1029,9 +1030,10 @@ async def purchase_tariff(
             # --- Trial cleanup: find and kill all trials BEFORE creating/extending ---
             from app.database.crud.subscription import deactivate_user_trial_subscriptions
 
-            # Collect remaining trial seconds (перенос — по общему правилу:
-            # TARIFF_SWITCH_RESET_FREE_DAYS перебивает TRIAL_ADD_REMAINING_DAYS_TO_PAID).
-            _bonus_seconds = 0
+            # Collect remaining referral tails from OTHER trials. Снимок делается
+            # ДО деактивации: она сбрасывает is_trial, после чего общий помощник
+            # всегда вернул бы ноль (и хвост бы сгорел).
+            _saved_trial_tails: dict[int, timedelta] = {}
             _now_trial = datetime.now(UTC)
             # В мульти-тарифе create-ветка ниже (нет живой подписки покупаемого
             # тарифа) НЕ должна глушить живой триал здесь: create_paid_subscription
@@ -1040,7 +1042,7 @@ async def purchase_tariff(
             # спрятали кандидата от конверсии и вернули старое поведение — новый
             # панельный юзер + мёртвый триал, висящий в кабинете. Его остаток
             # дней переносит extend_subscription внутри конверсии, поэтому в
-            # _bonus_seconds кандидат не попадает — двойного начисления нет.
+            # _saved_trial_tails кандидат не попадает — двойного начисления нет.
             # resolve_trial_conversion_candidate повторяет приоритеты
             # create_paid_subscription (в т.ч. вернёт None, когда сработает
             # revive-ветка #3004) — тогда триал глушится по-старому: с переносом
@@ -1050,19 +1052,30 @@ async def purchase_tariff(
                 from app.database.crud.subscription import resolve_trial_conversion_candidate
 
                 _conversion_trial = await resolve_trial_conversion_candidate(db, user.id, tariff.id)
+
+            # Текущую подписку и кандидата конверсии исключаем: их хвост уже
+            # учтён центральной конверсией (extend_subscription/create_paid_subscription).
+            _excluded_trial_ids = {
+                _id
+                for _id in (subscription.id if subscription else None, getattr(_conversion_trial, 'id', None))
+                if _id is not None
+            }
+            for _trial in await get_active_trial_subscriptions_by_user_id(db, user.id):
+                if not _trial.is_trial or _trial.id in _excluded_trial_ids:
+                    continue
+                _saved_trial_tails[_trial.id] = get_trial_carry_over_delta(_trial, _now_trial)
+
             killed_trials = await deactivate_user_trial_subscriptions(
                 db,
                 user.id,
                 exclude_subscription_id=subscription.id if subscription else getattr(_conversion_trial, 'id', None),
             )
-            if should_carry_trial_remaining_days():
-                for _kt in killed_trials:
-                    if _kt.end_date and _kt.end_date > _now_trial:
-                        _bonus_seconds += max(0, (_kt.end_date - _now_trial).total_seconds())
+            # Только сохранённые дельты и только для реально убитых строк по id.
+            _bonus_seconds = sum(_saved_trial_tails.get(_kt.id, timedelta()).total_seconds() for _kt in killed_trials)
 
             # Защитная ветка: собственный триал исключён из deactivate выше и сюда
             # НЕ попадает — его конвертацию (is_trial=False) выполняет
-            # extend_subscription (convert_trial=True по умолчанию). Ветка оживёт,
+            # extend_subscription (конвертация разрешена при переданном tariff_id). Ветка оживёт,
             # только если exclude_subscription_id перестанут передавать: тогда
             # убитый триал нужно реанимировать перед extend, иначе продление
             # отработает по DISABLED-строке.
@@ -1577,7 +1590,11 @@ async def activate_trial(
         trial_squads = [trial_squad_uuid] if trial_squad_uuid else []
 
     # Бонус приглашённому — поверх тарифной либо глобальной длительности.
-    trial_duration = get_effective_trial_days(user, trial_duration)
+    base_trial_duration = trial_duration
+    trial_duration = get_effective_trial_days(user, base_trial_duration)
+    # Снимок в тот же момент, что и срок: create_trial_subscription не
+    # пересчитывает бонус после await.
+    applied_trial_referral_days = max(0, trial_duration - max(0, int(base_trial_duration)))
 
     # Create trial subscription
     subscription = await create_trial_subscription(
@@ -1588,6 +1605,7 @@ async def activate_trial(
         device_limit=trial_device_limit,
         connected_squads=trial_squads or None,
         tariff_id=tariff_id_for_trial,
+        trial_referral_days=applied_trial_referral_days,
     )
 
     logger.info('Trial subscription activated for user', user_id=user.id)

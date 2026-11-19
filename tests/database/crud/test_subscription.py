@@ -112,6 +112,7 @@ async def test_extend_subscription_default_converts_trial_on_purchase(monkeypatc
         is_trial=True,
         start_date=now,
         end_date=now + timedelta(days=1),
+        base_trial_end_date=None,
         tariff_id=1,
         traffic_limit_gb=10,
         traffic_used_gb=0.0,

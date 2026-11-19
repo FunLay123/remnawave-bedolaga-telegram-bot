@@ -17,7 +17,7 @@ from app.database.crud.subscription import (
     add_subscription_servers,
     apply_trial_conversion_defaults,
     create_paid_subscription,
-    should_carry_trial_remaining_days,
+    get_trial_carry_over_delta,
 )
 from app.database.crud.subscription_conversion import (
     create_subscription_conversion,
@@ -1083,6 +1083,21 @@ class MiniAppSubscriptionPurchaseService:
         was_trial_conversion = False
         now = datetime.now(UTC)
 
+        # Снимок реферальных хвостов ДО создания/конверсии: и
+        # ``create_paid_subscription``, и ``_convert_trial_subscription_to_paid``
+        # деактивируют остальные триалы внутри себя, поэтому снимок после них
+        # видел бы уже ``is_trial=False`` и терял хвосты. Текущая подписка
+        # исключается — её хвост считает bonus_period/центральная конверсия.
+        from app.database.crud.subscription import get_active_trial_subscriptions_by_user_id
+
+        _saved_trial_tails: dict[int, timedelta] = {}
+        for _trial in await get_active_trial_subscriptions_by_user_id(db, user.id):
+            if not _trial.is_trial:
+                continue
+            if subscription is not None and _trial.id == subscription.id:
+                continue
+            _saved_trial_tails[_trial.id] = get_trial_carry_over_delta(_trial, now)
+
         if subscription:
             # Оверлей грейса, осевший в подписке (v4.10–4.11), — не её срок: вернуть до расчёта.
             from app.services.grace_access_echo import undo_grace_overlay_echo
@@ -1092,10 +1107,16 @@ class MiniAppSubscriptionPurchaseService:
             if subscription.is_trial:
                 was_trial_conversion = True
                 trial_duration = (now - subscription.start_date).days
-                if should_carry_trial_remaining_days() and subscription.end_date:
-                    remaining = subscription.end_date - now
-                    if remaining.total_seconds() > 0:
-                        bonus_period = remaining
+                # Единый расчёт: в days_only переносится только реферальный хвост,
+                # базовый триал не переносится; старые строки/схема levels
+                # сохраняют прежнее поведение should_carry.
+                bonus_period = get_trial_carry_over_delta(subscription, now)
+                if bonus_period.total_seconds() > 0:
+                    logger.info(
+                        'Trial conversion carries referral tail',
+                        subscription_id=subscription.id,
+                        bonus_seconds=int(bonus_period.total_seconds()),
+                    )
                 try:
                     await create_subscription_conversion(
                         db=db,
@@ -1165,21 +1186,39 @@ class MiniAppSubscriptionPurchaseService:
 
         killed_trials = await deactivate_user_trial_subscriptions(db, user.id, exclude_subscription_id=subscription.id)
 
-        # Add remaining trial time from OTHER killed trials (current trial already handled above)
-        if settings.TRIAL_ADD_REMAINING_DAYS_TO_PAID and killed_trials:
-            extra_seconds = 0
-            for _kt in killed_trials:
-                if _kt.end_date and _kt.end_date > now:
-                    extra_seconds += max(0, (_kt.end_date - now).total_seconds())
-            if extra_seconds > 0:
-                subscription.end_date = subscription.end_date + timedelta(seconds=extra_seconds)
-                await db.commit()
-                await db.refresh(subscription)
+        # Хвосты, деактивированные как внешней чисткой выше, так и внутренней
+        # (create_paid_subscription/конверсия): снимок был взят до создания.
+        # Фильтр DISABLED не даёт принять параллельно купленную платную строку
+        # за убитый триал. Возвращённая подписка исключена — её хвост уже учтён.
+        extra_seconds = 0.0
+        killed_trials_by_id = {_trial.id: _trial for _trial in killed_trials}
+        if _saved_trial_tails:
+            _deactivated_rows = await db.execute(
+                select(Subscription).where(
+                    Subscription.id.in_(list(_saved_trial_tails)),
+                    Subscription.is_trial.is_(False),
+                    Subscription.status == SubscriptionStatus.DISABLED.value,
+                )
+            )
+            _deactivated_trials = list(_deactivated_rows.scalars().all())
+            _deactivated_ids = {_trial.id for _trial in _deactivated_trials}
+            extra_seconds = sum(
+                _tail.total_seconds()
+                for _trial_id, _tail in _saved_trial_tails.items()
+                if _trial_id in _deactivated_ids and _trial_id != subscription.id
+            )
+            for _trial in _deactivated_trials:
+                if _trial.id != subscription.id:
+                    killed_trials_by_id.setdefault(_trial.id, _trial)
+        if extra_seconds > 0:
+            subscription.end_date = subscription.end_date + timedelta(seconds=extra_seconds)
+            await db.commit()
+            await db.refresh(subscription)
 
         subscription_service = SubscriptionService()
 
-        # Disable killed trials on RemnaWave panel
-        for trial_sub in killed_trials:
+        # Disable BOTH externally and internally killed trials on RemnaWave panel.
+        for trial_sub in killed_trials_by_id.values():
             try:
                 _trial_panel_id = trial_sub.remnawave_id
                 if _trial_panel_id is None and not settings.is_multi_tariff_enabled():
