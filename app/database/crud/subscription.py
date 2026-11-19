@@ -865,9 +865,8 @@ async def _lock_subscription_row(db: AsyncSession, subscription: Subscription) -
     лок до конца транзакции).
     """
     await db.execute(select(Subscription.id).where(Subscription.id == subscription.id).with_for_update())
-    # Подтягиваем поля, которые могут быть обновлены конкурентным add_subscription_traffic,
-    # и tariff_id: по нему replace_subscription решает, менять ли снимок премиум-лимитов.
-    await db.refresh(subscription, ['traffic_limit_gb', 'purchased_traffic_gb', 'traffic_reset_at', 'tariff_id'])
+    # Подтягиваем поля, которые могут быть обновлены конкурентным add_subscription_traffic
+    await db.refresh(subscription, ['traffic_limit_gb', 'purchased_traffic_gb', 'traffic_reset_at'])
 
 
 async def _housekeep_expired_purchases(
@@ -1140,7 +1139,13 @@ async def _is_free_source_tariff(db: AsyncSession, tariff_id: int) -> bool:
         return False
 
 
-async def _drop_orphan_premium_states(db: AsyncSession, subscription: Subscription, new_tariff) -> None:
+async def _drop_orphan_premium_states(
+    db: AsyncSession,
+    subscription: Subscription,
+    new_tariff,
+    *,
+    raise_on_error: bool = False,
+) -> None:
     """Убрать состояния премиум-лимита, которых нет в новом тарифе.
 
     Состояние живёт на паре «подписка + премиум-сквад» и хранит флаг `is_limited`
@@ -1192,7 +1197,11 @@ async def _drop_orphan_premium_states(db: AsyncSession, subscription: Subscripti
         )
     except Exception as error:
         # Уборка вспомогательная: ронять из-за неё смену тарифа нельзя. Строки
-        # доберёт проход воркера — он ищет ровно такие состояния.
+        # доберёт проход воркера — он ищет ровно такие состояния. Общий helper
+        # просит пробросить исключение, чтобы откатить savepoint и не оставить
+        # сессию в failed-транзакции.
+        if raise_on_error:
+            raise
         logger.warning(
             'Не удалось убрать премиум-лимиты при смене тарифа',
             subscription_id=getattr(subscription, 'id', None),
@@ -1211,11 +1220,20 @@ async def refresh_premium_states_for_tariff(
     лимитов оставшихся. Обе операции вспомогательные: их сбой не должен ронять
     смену тарифа — ближайший проход воркера доберёт расхождение.
     """
-    await _drop_orphan_premium_states(db, subscription, tariff)
+    # Сбрасываем уже накопленные изменения (смену тарифа и лимитов) до
+    # savepoint: begin_nested() флашит очередь внутри точки сохранения, и её
+    # откат вместе с вспомогательным сбоем отменил бы саму смену тарифа.
+    await db.flush()
     try:
-        from app.database.crud.premium_traffic import sync_premium_state_limits
+        # Savepoint: сбой вспомогательного чтения/записи (например, старая БД
+        # без таблицы премиум-трафика) не должен оставить основную транзакцию
+        # в failed-состоянии и откатить уже оплаченную смену тарифа.
+        async with db.begin_nested():
+            await _drop_orphan_premium_states(db, subscription, tariff, raise_on_error=True)
+            from app.database.crud.premium_traffic import sync_premium_state_limits
 
-        updated = await sync_premium_state_limits(db, subscription.id, tariff)
+            updated = await sync_premium_state_limits(db, subscription.id, tariff)
+            await db.flush()
     except Exception as error:
         logger.warning(
             'Не удалось обновить снимки премиум-лимитов при смене тарифа',
