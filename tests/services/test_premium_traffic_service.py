@@ -1,5 +1,6 @@
 """Воркер премиум-трафика: подсчёт, снятие, возврат, устойчивость к сбоям."""
 
+import asyncio
 import contextlib
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -2248,3 +2249,62 @@ class TestOpenGraceOverlay:
             assert stats['cleaned'] == 0
             state = await get_state(db, 1, SQUAD)
             assert state is not None and state.is_limited is True
+
+
+def _empty_stats():
+    return {'checked': 0, 'limited': 0, 'restored': 0, 'warned': 0, 'cleaned': 0, 'errors': 0}
+
+
+async def test_request_pass_runs_the_next_pass_without_waiting_for_the_interval(monkeypatch):
+    service = PremiumTrafficService()
+    monkeypatch.setattr(service, 'get_check_interval_seconds', lambda: 3600)
+    first_pass = asyncio.Event()
+    second_pass = asyncio.Event()
+    passes = 0
+
+    async def _process_once():
+        nonlocal passes
+        passes += 1
+        if passes == 1:
+            first_pass.set()
+        elif passes == 2:
+            second_pass.set()
+        return _empty_stats()
+
+    monkeypatch.setattr(service, 'process_once', _process_once)
+    task = asyncio.create_task(service.start_monitoring())
+    try:
+        await asyncio.wait_for(first_pass.wait(), timeout=1)
+        service.request_pass()
+        service.request_pass()
+        await asyncio.wait_for(second_pass.wait(), timeout=1)
+    finally:
+        service.stop()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert passes == 2  # два вызова подряд схлопнулись в один проход
+
+
+async def test_stop_interrupts_the_sleep_and_ends_the_loop(monkeypatch):
+    service = PremiumTrafficService()
+    monkeypatch.setattr(service, 'get_check_interval_seconds', lambda: 3600)
+    first_pass = asyncio.Event()
+
+    async def _process_once():
+        first_pass.set()
+        return _empty_stats()
+
+    monkeypatch.setattr(service, 'process_once', _process_once)
+    task = asyncio.create_task(service.start_monitoring())
+    await asyncio.wait_for(first_pass.wait(), timeout=1)
+    service.stop()
+    await asyncio.wait_for(task, timeout=1)
+
+
+def test_request_pass_invalidates_the_panel_user_cache():
+    service = PremiumTrafficService()
+    service._panel_users[42] = (0.0, object())
+
+    service.request_pass(panel_user_id=42)
+
+    assert 42 not in service._panel_users

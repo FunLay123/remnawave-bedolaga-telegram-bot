@@ -147,6 +147,7 @@ class PremiumTrafficService:
 
     def __init__(self) -> None:
         self._running = False
+        self._wake_event = asyncio.Event()
         self._bot: Bot | None = None
         self._nodes_cache: dict[str, tuple[float, list[str]]] = {}
         # Живёт между проходами, а не внутри одного: см. PANEL_USER_CACHE_TTL_SECONDS.
@@ -157,6 +158,17 @@ class PremiumTrafficService:
 
     def is_enabled(self) -> bool:
         return bool(getattr(settings, 'PREMIUM_TRAFFIC_ENABLED', True))
+
+    def request_pass(self, *, panel_user_id: int | None = None) -> None:
+        """Разбудить цикл для внеочередного прохода.
+
+        Вызывается после покупки, когда панель уже получила новый тариф и
+        сбросила трафик. Будится единственный цикл: конкурентных проходов не
+        появляется, а несколько вызовов подряд схлопываются в один.
+        """
+        if panel_user_id is not None:
+            self.invalidate_panel_user(panel_user_id)
+        self._wake_event.set()
 
     def get_check_interval_seconds(self) -> int:
         raw = getattr(settings, 'PREMIUM_TRAFFIC_CHECK_INTERVAL_SECONDS', DEFAULT_INTERVAL_SECONDS)
@@ -176,16 +188,24 @@ class PremiumTrafficService:
         logger.info('🔄 Запуск учёта премиум-трафика', interval_seconds=interval)
 
         while self._running:
+            # Сбрасываем перед проходом: событие, пришедшее во время прохода,
+            # разбудит wait_for ниже и даст ещё один проход без ожидания.
+            self._wake_event.clear()
             try:
                 stats = await self.process_once()
                 if stats['limited'] or stats['restored'] or stats['cleaned'] or stats['errors']:
                     logger.info('📊 Проход по премиум-трафику', **stats)
             except Exception as error:
                 logger.error('Ошибка в цикле учёта премиум-трафика', error=error, exc_info=True)
-            await asyncio.sleep(interval)
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
+            except TimeoutError:
+                pass
 
     def stop(self) -> None:
         self._running = False
+        # Не ждём окончания интервала при остановке приложения.
+        self._wake_event.set()
 
     # ------------------------------------------------------------- главное
 
