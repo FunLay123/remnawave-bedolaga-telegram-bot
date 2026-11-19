@@ -4,11 +4,11 @@
 
 ## Структура
 
-- `5min/` — последние 12 копий (1 час)
-- `hourly/` — последние 24 копии (1 сутки)
-- `daily/` — последние 30 копий
-- `weekly/` — последние 12 копий
-- `monthly/` — последние 12 копий
+- `5min/` — последние 12 пар (1 час)
+- `hourly/` — последние 24 пары (1 сутки)
+- `daily/` — последние 30 пар
+- `weekly/` — последние 12 пар
+- `monthly/` — последние 12 пар
 
 В каждой папке лежат пары:
 
@@ -23,6 +23,7 @@
 ```
 
 Если контейнер перезапустился в ту же минуту, имя получает суффикс `_2`.
+В Drive имена без `.bin`: в конфиге crypt стоит `suffix = none`.
 
 ## Шифрование
 
@@ -35,66 +36,84 @@
 
 Без пароля и конфига файлы не расшифровать. Этот `README.md` не зашифрован.
 
-## Скачать копию
+## Если стек ещё работает
+
+Определи команду compose (добавь свои `-f` файлы):
 
 ```bash
-rclone copyto gcrypt:5min/26_January_2026_22-30.dump ./db.dump
-rclone copyto gcrypt:5min/26_January_2026_22-30.env.bak ./.env.restore
+DC="docker compose -f docker-compose.yml -f docker-compose.local.yml -f docker-compose.asteria.yml"
 ```
 
-Если remote `gcrypt` указывает на `gdrive:remnawave-bot`, этого достаточно.
-Если конфиг называется иначе — используй своё имя remote.
+Скачай нужную пару через контейнер `backup` — у него уже есть rclone-конфиг:
+
+```bash
+$DC exec backup rclone copyto gcrypt:5min/26_January_2026_22-30.dump /backups/restore.dump
+$DC exec backup rclone copyto gcrypt:5min/26_January_2026_22-30.env.bak /backups/env.restore
+$DC cp backup:/backups/restore.dump ./db.dump
+$DC cp backup:/backups/env.restore ./.env.restore
+```
 
 ## Восстановить базу
 
-1. Останови бота:
+1. Останови бота и бэкапы, чтобы цикл не снял полувосстановленную базу:
 
 ```bash
-docker compose stop bot
+$DC stop bot backup
 ```
 
-2. Положи дамп в контейнер `backup`:
+2. Восстанови дамп через контейнер `postgres` (там есть `pg_restore`):
 
 ```bash
-docker compose cp ./db.dump backup:/backups/restore.dump
+cat ./db.dump | $DC exec -T postgres sh -c \
+  'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --no-privileges'
 ```
 
-3. Восстанови дамп (у контейнера `backup` есть `pg_restore`):
+`pg_restore` читает custom-формат из stdin. `--clean --if-exists` удаляет
+существующие объекты перед восстановлением.
+
+3. Запусти сервисы и убери дамп:
 
 ```bash
-docker compose exec -T backup sh -c \
-  'pg_restore -U "$PGUSER" -d "$PGDATABASE" --clean --if-exists --no-owner --no-privileges /backups/restore.dump'
+$DC start bot backup
+rm -f ./db.dump
 ```
-
-Либо восстанови на хосте, если установлен `pg_restore`:
-
-```bash
-pg_restore --clean --if-exists --no-owner --no-privileges -d "$DATABASE_URL" ./db.dump
-```
-
-4. Запусти бота:
-
-```bash
-docker compose start bot
-```
-
-`--clean --if-exists` удаляет существующие объекты перед восстановлением.
-Бота лучше остановить, чтобы он не писал в базу во время восстановления.
-Если используешь несколько `-f` файлов compose, добавь их в каждую команду.
 
 ## Восстановить `.env`
 
 ```bash
-docker compose stop bot
+$DC stop bot backup
 cp ./.env.restore ./.env
 chmod 600 .env
-docker compose up -d bot
+$DC up -d
+rm -f ./.env.restore
 ```
+
+`up -d` нужен, потому что переменные подставляются в контейнеры при создании.
+Если в восстановленном `.env` другой `POSTGRES_PASSWORD`, существующая база его
+не подхватит: оставь старый пароль или смени пароль пользователя в PostgreSQL.
+
+## Новый хост
+
+Если сервера больше нет:
+
+1. Поставь rclone и создай remote `gdrive`/`gcrypt` по сохранённому токену и
+   паролю (или скопируй сохранённый `rclone.conf`).
+2. Скачай самый свежий `.env.bak` и положи его как `.env` рядом с compose.
+3. Подними только базу: `$DC up -d postgres`.
+4. Скачай дамп и восстанови его:
+
+```bash
+rclone copyto gcrypt:5min/26_January_2026_22-30.dump ./db.dump
+cat ./db.dump | $DC exec -T postgres sh -c \
+  'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner --no-privileges'
+```
+
+5. Подними остальное: `$DC up -d`, затем `rm -f ./db.dump`.
 
 ## Проверка
 
 ```bash
-docker compose exec -T postgres sh -c \
+$DC exec -T postgres sh -c \
   'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT count(*) FROM users;"'
 ```
 

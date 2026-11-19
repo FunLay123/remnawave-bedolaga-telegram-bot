@@ -28,8 +28,27 @@ else
 fi
 DOCS_PREFIX="$RCLONE_DOCS_REMOTE:$BACKUP_GDRIVE_FOLDER"
 
+valid_keep() {
+    case "${1:-}" in
+        ''|*[!0-9]*) return 1 ;;
+        *[!0]*) return 0 ;;
+    esac
+    return 1
+}
+
 drop_newest() {
-    tail -n +$(($1 + 1))
+    keep=${1:-0}
+    if ! valid_keep "$keep"; then
+        echo "drop_newest: invalid keep=$keep" >&2
+        return 1
+    fi
+    tail -n +$((keep + 1))
+}
+
+select_prune_names() {
+    keep=$1
+    suffix=$2
+    grep "|.*${suffix}$" | sort -r | cut -d'|' -f2- | drop_newest "$keep"
 }
 
 timestamp_name() {
@@ -38,6 +57,15 @@ timestamp_name() {
 
 log() {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] $*"
+}
+
+validate_keep() {
+    name=$1
+    value=$2
+    if ! valid_keep "$value"; then
+        log "invalid $name=$value; must be a positive integer"
+        exit 1
+    fi
 }
 
 unique_base() {
@@ -53,28 +81,36 @@ unique_base() {
 
 dump_database() {
     base=$(unique_base)
-    tmp="$PENDING/.${base}.dump.tmp"
-    final="$PENDING/${base}.dump"
+    dump_tmp="$PENDING/.${base}.dump.tmp"
+    dump_final="$PENDING/${base}.dump"
+    env_tmp="$PENDING/.${base}.env.tmp"
+    env_final="$PENDING/${base}.env.bak"
 
-    if ! pg_dump --no-owner --no-privileges --no-password -Fc -f "$tmp"; then
-        rm -f "$tmp"
+    if ! pg_dump --no-owner --no-privileges --no-password -Fc -f "$dump_tmp"; then
+        rm -f "$dump_tmp"
         log "dump FAILED"
         return 1
     fi
 
-    if [ ! -s "$tmp" ]; then
-        rm -f "$tmp"
+    if [ ! -s "$dump_tmp" ]; then
+        rm -f "$dump_tmp"
         log "dump FAILED: empty file"
         return 1
     fi
 
-    mv "$tmp" "$final"
-
-    if [ -f "$ENV_FILE" ] && cp "$ENV_FILE" "$PENDING/${base}.env.bak"; then
-        log "dump: ${base}.dump + .env"
-    else
-        log "dump: ${base}.dump (env copy FAILED)"
+    if ! cp "$ENV_FILE" "$env_tmp"; then
+        rm -f "$dump_tmp" "$env_tmp"
+        log "dump FAILED: env snapshot"
+        return 1
     fi
+
+    if ! mv "$dump_tmp" "$dump_final" || ! mv "$env_tmp" "$env_final"; then
+        rm -f "$dump_tmp" "$env_tmp" "$dump_final" "$env_final"
+        log "dump FAILED: cannot finalize pair"
+        return 1
+    fi
+
+    log "dump: ${base}.dump + .env"
 }
 
 upload_pending() {
@@ -104,10 +140,7 @@ prune_remote() {
 
     rclone lsf "$REMOTE_PREFIX/$dir" --files-only --format "tp" --separator "|" \
         --time-format "2006-01-02T15:04:05" 2>/dev/null \
-        | grep "|.*${suffix}$" \
-        | sort -r \
-        | cut -d'|' -f2- \
-        | drop_newest "$keep" \
+        | select_prune_names "$keep" "$suffix" \
         | while IFS= read -r name; do
             [ -n "$name" ] || continue
             rclone deletefile "$REMOTE_PREFIX/$dir/$name" --drive-use-trash=false \
@@ -130,17 +163,24 @@ copy_tier() {
     base=$(basename "$newest" .dump)
     env_file="$LOCAL/${base}.env.bak"
 
-    if rclone copyto "$newest" "$REMOTE_PREFIX/$dir/$(basename "$newest")"; then
-        if [ -f "$env_file" ]; then
-            rclone copyto "$env_file" "$REMOTE_PREFIX/$dir/$(basename "$env_file")" \
-                || log "tier env copy FAILED: $dir/$(basename "$env_file")"
-        fi
-        echo "$value" > "$STATE/$marker"
-        prune_remote "$dir" "$keep" ".dump"
-        prune_remote "$dir" "$keep" ".env.bak"
-    else
+    if ! rclone copyto "$newest" "$REMOTE_PREFIX/$dir/$(basename "$newest")"; then
         log "tier copy FAILED: $dir/$(basename "$newest")"
+        return 0
     fi
+
+    if [ ! -f "$env_file" ]; then
+        log "tier env missing: $dir/$base"
+        return 0
+    fi
+
+    if ! rclone copyto "$env_file" "$REMOTE_PREFIX/$dir/$(basename "$env_file")"; then
+        log "tier env copy FAILED: $dir/$(basename "$env_file")"
+        return 0
+    fi
+
+    echo "$value" > "$STATE/$marker"
+    prune_remote "$dir" "$keep" ".dump"
+    prune_remote "$dir" "$keep" ".env.bak"
 }
 
 prune_local() {
@@ -197,6 +237,53 @@ run_self_test() {
         return 1
     fi
 
+    if ! valid_keep 12; then
+        echo "self-test FAIL: valid_keep rejected 12" >&2
+        return 1
+    fi
+    if valid_keep 0; then
+        echo "self-test FAIL: valid_keep accepted 0" >&2
+        return 1
+    fi
+    if valid_keep abc; then
+        echo "self-test FAIL: valid_keep accepted abc" >&2
+        return 1
+    fi
+    if valid_keep ''; then
+        echo "self-test FAIL: valid_keep accepted empty" >&2
+        return 1
+    fi
+    if valid_keep 00; then
+        echo "self-test FAIL: valid_keep accepted 00" >&2
+        return 1
+    fi
+
+    listing=$(i=1; while [ "$i" -le 13 ]; do
+        printf '2026-01-%02dT00:00:00|26_January_2026_00-%02d.dump\n' "$i" "$i"
+        i=$((i + 1))
+    done)
+    out=$(printf '%s\n' "$listing" | select_prune_names 12 ".dump")
+    if [ "$out" != "26_January_2026_00-01.dump" ]; then
+        echo "self-test FAIL: dump prune expected 00-01, got $out" >&2
+        return 1
+    fi
+
+    listing=$(i=1; while [ "$i" -le 13 ]; do
+        printf '2026-01-%02dT00:00:00|26_January_2026_00-%02d.env.bak\n' "$i" "$i"
+        i=$((i + 1))
+    done)
+    out=$(printf '%s\n' "$listing" | select_prune_names 12 ".env.bak")
+    if [ "$out" != "26_January_2026_00-01.env.bak" ]; then
+        echo "self-test FAIL: env prune expected 00-01, got $out" >&2
+        return 1
+    fi
+
+    out=$(printf '2026-01-01T00:00:00|b.dump\n2026-01-01T00:00:00|a.dump\n' | select_prune_names 1 ".dump")
+    if [ "$out" != "a.dump" ]; then
+        echo "self-test FAIL: tie prune expected a.dump, got $out" >&2
+        return 1
+    fi
+
     tmp=$(mktemp -d)
     : > "$tmp/01_January_2026_00-00.dump"
     collision=$(
@@ -222,6 +309,17 @@ main() {
         log "RCLONE_CONFIG_GDRIVE_TOKEN / RCLONE_CONFIG_GCRYPT_PASSWORD are empty; configure .env"
         exit 1
     fi
+
+    if [ ! -f "$ENV_FILE" ] || [ ! -r "$ENV_FILE" ]; then
+        log "ENV_FILE $ENV_FILE is missing or unreadable; refusing to start"
+        exit 1
+    fi
+
+    validate_keep KEEP_5MIN "$KEEP_5MIN"
+    validate_keep KEEP_HOURLY "$KEEP_HOURLY"
+    validate_keep KEEP_DAILY "$KEEP_DAILY"
+    validate_keep KEEP_WEEKLY "$KEEP_WEEKLY"
+    validate_keep KEEP_MONTHLY "$KEEP_MONTHLY"
 
     [ "$DUMP_INTERVAL_SECONDS" -gt 0 ] 2>/dev/null || DUMP_INTERVAL_SECONDS=300
     [ "$UPLOAD_INTERVAL_SECONDS" -gt 0 ] 2>/dev/null || UPLOAD_INTERVAL_SECONDS=300

@@ -532,6 +532,7 @@ Insert after the `bot` service, before the top-level `volumes:` block:
       RCLONE_CONFIG_GCRYPT_REMOTE: 'gdrive:${BACKUP_GDRIVE_FOLDER:-remnawave-bot}'
       RCLONE_CONFIG_GCRYPT_FILENAME_ENCRYPTION: 'off'
       RCLONE_CONFIG_GCRYPT_DIRECTORY_NAME_ENCRYPTION: 'false'
+      RCLONE_CONFIG_GCRYPT_SUFFIX: 'none'
       RCLONE_CONFIG_GCRYPT_PASSWORD: '${RCLONE_CONFIG_GCRYPT_PASSWORD:-}'
     volumes:
       - ./.env:/src/.env:ro
@@ -696,3 +697,17 @@ $DC exec -T postgres sh -c 'dropdb -U "$POSTGRES_USER" remnawave_bot_restore'
 ```
 
 Expected: restore exits 0, `users` count is non-zero, drop succeeds.
+
+## Review fixes (2026-11-19)
+
+The final review found and the fix pass addressed:
+
+- `KEEP_*` must be positive integers; `drop_newest` refuses invalid values. Added `valid_keep` and `validate_keep`, plus self-tests.
+- `select_prune_names` is factored and self-tested for `.dump` / `.env.bak`, 13→12, tie and invalid keep.
+- `dump_database` writes dump and `.env` to temp files and finalizes both; a failed env snapshot fails the dump instead of producing an orphan.
+- `copy_tier` only marks the period and prunes after both the dump and `.env` copies succeed.
+- `ENV_FILE` must exist and be readable at startup.
+- `RCLONE_CONFIG_GCRYPT_SUFFIX=none` so Drive names stay `*.dump` / `*.env.bak`.
+- Restore docs use the backup container for rclone, define `DC`, stop `bot` and `backup` during restore, and include a fresh-host order.
+
+Deferred minors (recorded in the ledger): readme retry semantics, rclone listing error logging, head-of-line blocking, local pair split on partial upload, rclone config warning noise, healthcheck path derived from `BACKUP_DIR`, single-file `.env` mount replacement, restore cleanup and timeouts.
