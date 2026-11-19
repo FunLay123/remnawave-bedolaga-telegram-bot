@@ -370,6 +370,8 @@ async def test_tariff_switch_leaves_admin_closed_squad_untouched(monkeypatch):
         state.used_bytes = state.limit_bytes
         state.is_limited = True
         state.closed_at = NOW
+        state.notified_80 = True
+        state.notified_90 = True
         await db.commit()
 
         await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 20}}))
@@ -378,6 +380,8 @@ async def test_tariff_switch_leaves_admin_closed_squad_untouched(monkeypatch):
         reread = await get_state(db, 1, SQUAD)
         assert reread.limit_bytes == 5 * BYTES_IN_GB
         assert reread.closed_at == NOW
+        assert reread.notified_80 is True
+        assert reread.notified_90 is True
 
 
 async def test_tariff_switch_ignores_squad_absent_from_new_tariff(monkeypatch):
@@ -390,3 +394,81 @@ async def test_tariff_switch_ignores_squad_absent_from_new_tariff(monkeypatch):
 
         assert changed == 0
         assert (await get_state(db, 1, SQUAD)).limit_bytes == 5 * BYTES_IN_GB
+
+
+async def test_tariff_switch_rearms_warning_for_a_limited_squad(monkeypatch):
+    """Новый, больший потолок должен снова предупредить о 90 %.
+
+    Флаг `notified_90` остался с трёхгигабайтного периода: если его не снять,
+    клиент не получит предупреждение на новом лимите и узнает об исчерпании
+    только когда сквад уже отключат.
+    """
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.used_bytes = state.total_limit_bytes
+        state.is_limited = True
+        state.notified_80 = True
+        state.notified_90 = True
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 20}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.limit_bytes == 20 * BYTES_IN_GB
+        assert reread.notified_80 is False
+        assert reread.notified_90 is False
+
+
+async def test_tariff_switch_keeps_warning_when_raised_limit_still_exhausted(monkeypatch):
+    """Подняли 5 → 10 ГБ, но израсходовано 20: свободного места нет, флаг не трогаем."""
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.used_bytes = 20 * BYTES_IN_GB
+        state.is_limited = True
+        state.notified_80 = True
+        state.notified_90 = True
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 10}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.limit_bytes == 10 * BYTES_IN_GB
+        assert reread.notified_80 is True
+        assert reread.notified_90 is True
+
+
+async def test_tariff_switch_rearms_warning_for_an_open_squad_on_raise(monkeypatch):
+    """Как и докупка: больший потолок — новый порог 90 %, предупреждение заново."""
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.used_bytes = 4 * BYTES_IN_GB
+        state.notified_80 = True
+        state.notified_90 = True
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 20}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.notified_80 is False
+        assert reread.notified_90 is False
+
+
+async def test_tariff_switch_does_not_rearm_warning_when_limit_is_lowered(monkeypatch):
+    """Понижение не создаёт новую квоту — старое предупреждение остаётся в силе."""
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db, limit_bytes=20 * BYTES_IN_GB)
+        state.used_bytes = BYTES_IN_GB
+        state.notified_80 = True
+        state.notified_90 = True
+        await db.commit()
+
+        await sync_premium_state_limits(db, 1, _tariff({SQUAD: {'traffic_limit_gb': 5}}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.limit_bytes == 5 * BYTES_IN_GB
+        assert reread.notified_80 is True
+        assert reread.notified_90 is True

@@ -254,11 +254,19 @@ async def sync_premium_state_limits(
         config = premium.get(state.squad_uuid)
         if config is None or state.closed_at is not None:
             continue
-        if state.is_limited and config.limit_bytes <= (state.limit_bytes or 0):
+        old_limit = state.limit_bytes or 0
+        new_limit = config.limit_bytes
+        if state.is_limited and new_limit <= old_limit:
             continue
-        if state.limit_bytes != config.limit_bytes:
-            state.limit_bytes = config.limit_bytes
+        if old_limit != new_limit:
+            state.limit_bytes = new_limit
             changed += 1
+            if new_limit > old_limit and not state.is_exhausted:
+                # Новый, больший потолок — новый порог 90 %. Без сброса флаг
+                # остался бы погашенным с прошлого, меньшего лимита, и клиент
+                # не получил бы предупреждение на новой квоте.
+                state.notified_80 = False
+                state.notified_90 = False
     return changed
 
 

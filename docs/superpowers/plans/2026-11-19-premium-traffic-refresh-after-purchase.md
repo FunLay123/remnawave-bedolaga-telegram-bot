@@ -593,9 +593,10 @@ git commit -m "docs: describe premium traffic refresh after purchase"
   changes: mini-app switch, daily purchase/switch in the bot, daily
   auto-purchase, and coupon grant. `replace_subscription` now refreshes
   `tariff_id` under the row lock before deciding whether to sync.
-- Deferred minors: `notified_80/90` reset on a raised limited ceiling; a
-  savepoint around the sync for DBAPI-level isolation; the stop test's
-  `try/finally`.
+- `notified_80/90` are reset when a raised ceiling leaves free space, so the
+  new larger quota gets its own 90 % warning. Covered by
+  `tests/crud/test_premium_traffic_state.py`.
+- Deferred minor: the stop test's `try/finally`.
 - `replace_subscription` refreshes the snapshot for same-tariff replacements too:
   an expired subscription may be replaced after the tariff's premium limit was
   edited, and the old `previous_tariff_id` gate skipped that case. Covered by
