@@ -52,12 +52,13 @@ class PaymentCommonMixin:
     """Mixin с базовой логикой, которую используют остальные платёжные блоки."""
 
     async def build_topup_success_keyboard(self, user: Any) -> InlineKeyboardMarkup:
-        """Главное меню и, если доступно, прямое продление текущей подписки.
+        """Главное меню и следующий шаг по текущей подписке.
 
+        Обычную подписку можно продлить, триал — только купить заново, поэтому
+        для триала показываем тот же маршрут покупки, что и на экране подписки.
         Возврат к корзине/черновику оформления здесь намеренно не предлагается:
         в этой поставке сохранённая корзина, checkout-черновик и gift-корзина
-        не используются. Кнопка продления использует тот же маршрут и дизайн,
-        что и одноимённая кнопка на экране подписки.
+        не используются.
         """
         texts = get_texts(user.language if user else 'ru')
         buttons = [
@@ -70,6 +71,7 @@ class PaymentCommonMixin:
         try:
             subscription = _pick_current_subscription(user)
             can_renew = _can_offer_direct_renewal(subscription)
+            is_trial = subscription is not None and bool(getattr(subscription, 'is_trial', False))
         except Exception as error:
             # Недогруженная связь не должна мешать отправке подтверждения оплаты.
             logger.warning(
@@ -78,6 +80,7 @@ class PaymentCommonMixin:
                 error_type=type(error).__name__,
             )
             can_renew = False
+            is_trial = False
 
         if can_renew:
             callback_data = (
@@ -89,6 +92,16 @@ class PaymentCommonMixin:
                     callback_data=callback_data,
                     style='primary',
                     icon_custom_emoji_id='5334552404736104314',
+                )
+            )
+        elif is_trial:
+            buttons.append(
+                apply_button_style(
+                    InlineKeyboardButton(
+                        text=texts.MENU_BUY_SUBSCRIPTION,
+                        callback_data='subscription_upgrade',
+                    ),
+                    'subscription:upgrade',
                 )
             )
 

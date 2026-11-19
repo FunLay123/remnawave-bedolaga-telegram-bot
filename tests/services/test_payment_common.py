@@ -173,6 +173,35 @@ async def test_success_keyboard_adds_renew_next_to_main_menu(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
+async def test_success_keyboard_trial_offers_buy_subscription(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Триал не продлевается, но после пополнения должен вести к покупке подписки."""
+    monkeypatch.setattr(settings, 'SALES_MODE', 'tariffs')
+    monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', False)
+    monkeypatch.setattr(settings, 'MAIN_MENU_MODE', 'default')
+    subscription = SimpleNamespace(
+        id=7,
+        is_trial=True,
+        is_active=True,
+        tariff_id=1,
+        tariff=SimpleNamespace(is_active=True, is_daily=False),
+    )
+    user = SimpleNamespace(id=42, language='ru', subscription=subscription)
+    service = PaymentCommonMixin()
+
+    keyboard = await service.build_topup_success_keyboard(user)
+    snapshot = await service._ensure_user_snapshot(555, user)
+    snapshot_keyboard = await service.build_topup_success_keyboard(snapshot)
+
+    for result in (keyboard, snapshot_keyboard):
+        assert _callbacks(result) == ['back_to_menu', 'subscription_upgrade']
+        main_menu, buy = result.inline_keyboard[0]
+        assert main_menu.callback_data == 'back_to_menu'
+        assert buy.text == 'Купить подписку'
+        assert buy.style == 'primary'
+        assert buy.icon_custom_emoji_id == '5334552404736104314'
+
+
+@pytest.mark.asyncio
 async def test_success_keyboard_multi_tariff_renew_targets_current_subscription(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -199,7 +228,6 @@ async def test_success_keyboard_multi_tariff_renew_targets_current_subscription(
 @pytest.mark.parametrize(
     ('is_trial', 'tariff_id', 'tariff'),
     [
-        pytest.param(True, 1, SimpleNamespace(is_active=True, is_daily=False), id='trial'),
         pytest.param(False, None, None, id='legacy'),
         pytest.param(False, 1, SimpleNamespace(is_active=False, is_daily=False), id='inactive-tariff'),
         pytest.param(False, 1, SimpleNamespace(is_active=True, is_daily=True), id='daily'),
