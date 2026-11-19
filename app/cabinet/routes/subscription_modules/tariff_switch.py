@@ -497,6 +497,11 @@ async def switch_tariff(
         subscription.is_daily_paused = False
 
     subscription.updated_at = datetime.now(UTC)
+
+    from app.database.crud.subscription import refresh_premium_states_for_tariff
+
+    await refresh_premium_states_for_tariff(db, subscription, new_tariff)
+
     await db.commit()
 
     # Emit deferred side-effects after atomic commit

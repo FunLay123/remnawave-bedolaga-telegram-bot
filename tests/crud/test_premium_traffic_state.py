@@ -218,6 +218,26 @@ async def test_new_period_keeps_ack_when_not_given(monkeypatch):
         assert state.panel_reset_ack_at == NOW
 
 
+async def test_new_period_updates_closed_limit_but_keeps_access_blocked(monkeypatch):
+    """Админское закрытие сильнее нового периода, но снимок лимита идёт за тарифом.
+
+    Пользователь видит объём нового тарифа, однако `closed_at` и `is_limited`
+    остаются, а расход подтянут к новому потолку — сам воркер сквад не откроет.
+    """
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)  # 5 ГБ
+        state.used_bytes = state.total_limit_bytes
+        state.is_limited = True
+        state.closed_at = NOW
+
+        start_new_period(state, period_start_at=NOW + timedelta(days=30), limit_bytes=20 * BYTES_IN_GB)
+
+        assert state.limit_bytes == 20 * BYTES_IN_GB
+        assert state.used_bytes == 20 * BYTES_IN_GB
+        assert state.is_limited is True
+        assert state.closed_at == NOW
+
+
 async def test_limited_squads_are_listed_for_the_subscription(monkeypatch):
     async with memory_session(monkeypatch, TABLES) as db:
         limited = await _new_state(db, squad_uuid=SQUAD)

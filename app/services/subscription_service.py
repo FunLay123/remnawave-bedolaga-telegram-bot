@@ -42,21 +42,17 @@ from app.utils.subscription_utils import (
 logger = structlog.get_logger(__name__)
 
 
-def _request_premium_traffic_refresh(
+def request_premium_traffic_refresh(
     subscription: Subscription,
     panel_user_id: int | None,
-    *,
-    reset_traffic: bool,
 ) -> None:
-    """Разбудить воркер премиум-трафика после синхронизации покупки с панелью.
+    """Разбудить воркер премиум-трафика после покупки или синхронизации.
 
-    Вызывается после коммита и после сброса трафика в панели: воркер увидит
-    новый ``lastTrafficResetAt`` и начнёт новый премиум-период сразу, а не через
-    интервал. Без премиум-сквадов в тарифе проход не нужен. Сбой пробуждения не
-    должен ломать уже оплаченную покупку.
+    Вызывается после коммита: воркер увидит новый тариф (и новый
+    ``lastTrafficResetAt``, если панель его выставила) и начнёт период сразу, а
+    не через интервал. Без премиум-сквадов в тарифе проход не нужен. Сбой
+    пробуждения не должен ломать уже оплаченную покупку.
     """
-    if not reset_traffic:
-        return
     try:
         from app.utils.premium_traffic import get_premium_squads_for_tariff
 
@@ -69,6 +65,17 @@ def _request_premium_traffic_refresh(
         premium_traffic_service.request_pass(panel_user_id=panel_user_id)
     except Exception as error:
         logger.warning('Не удалось запросить внеочередной проход премиум-трафика', error=error)
+
+
+def _request_premium_traffic_refresh(
+    subscription: Subscription,
+    panel_user_id: int | None,
+    *,
+    reset_traffic: bool,
+) -> None:
+    """Пробуждение только для синхронизаций, которые сбросили трафик в панели."""
+    if reset_traffic:
+        request_premium_traffic_refresh(subscription, panel_user_id)
 
 
 @dataclass

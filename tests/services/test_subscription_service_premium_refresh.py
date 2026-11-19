@@ -34,6 +34,18 @@ def test_premium_tariff_wakes_the_worker_with_the_panel_id(monkeypatch):
     assert calls == [42]
 
 
+def test_public_refresh_wakes_without_a_reset_flag(monkeypatch):
+    """Delivered purchase may not reset panel traffic — the wake is still needed."""
+    calls = _fake_service(monkeypatch)
+
+    subscription_service.request_premium_traffic_refresh(
+        _subscription({SQUAD: {'traffic_limit_gb': 20}}),
+        42,
+    )
+
+    assert calls == [42]
+
+
 def test_sync_without_traffic_reset_does_not_wake_the_worker(monkeypatch):
     calls = _fake_service(monkeypatch)
 

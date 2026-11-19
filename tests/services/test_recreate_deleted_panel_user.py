@@ -227,6 +227,26 @@ async def test_update_addresses_panel_by_numeric_id(monkeypatch):
     service.create_remnawave_user.assert_not_awaited()
 
 
+async def test_update_requests_premium_refresh_only_after_traffic_reset(monkeypatch):
+    updated_user = SimpleNamespace(subscription_url='https://sub.example/u', happ_crypto_link=None)
+    api = AsyncMock()
+    api.update_user.return_value = updated_user
+    service = _setup_subscription_service(monkeypatch, api)
+    calls = []
+    monkeypatch.setattr(
+        'app.services.subscription_service.request_premium_traffic_refresh',
+        lambda subscription, panel_user_id: calls.append(panel_user_id),
+    )
+
+    db = _session()
+    await service.update_remnawave_user(db, _make_subscription(), reset_traffic=True)
+    assert calls == [777]
+
+    calls.clear()
+    await service.update_remnawave_user(db, _make_subscription(), reset_traffic=False)
+    assert calls == []
+
+
 async def test_update_skips_panel_when_no_panel_id(monkeypatch):
     """Пустой ``remnawave_id`` — обновлять нечего: запроса в панель быть не должно
     (иначе клиент отбил бы его RemnaWaveInvalidUserIdError)."""
@@ -1142,6 +1162,52 @@ async def test_create_does_not_break_on_the_partial_unique_index(monkeypatch):
         assert (await db.get(SubModel, 20)).remnawave_id is None, 'нельзя дублировать id второй строке'
         assert (await db.get(SubModel, 10)).remnawave_id == 77, 'у соседа id забирать тоже нельзя'
         assert (await db.get(UserModel, 1)).remnawave_id == 77, 'адресация остаётся через пользователя'
+
+
+@pytest.mark.asyncio
+async def test_create_requests_premium_refresh_only_after_traffic_reset(monkeypatch):
+    from app.database.models import Subscription as SubModel, User as UserModel
+    from tests.fixtures.sqlite_memory import memory_session
+
+    monkeypatch.setattr(Settings, 'is_multi_tariff_enabled', lambda self: False)
+
+    async with memory_session(monkeypatch, [UserModel.__table__, SubModel.__table__]) as db:
+        db.add(UserModel(id=1, telegram_id=100, status='active'))
+        now = datetime.now(UTC)
+        db.add(
+            SubModel(
+                id=20,
+                user_id=1,
+                status='active',
+                end_date=now + timedelta(days=5),
+                remnawave_short_id='sid20',
+            )
+        )
+        await db.commit()
+
+        service = SubscriptionService()
+        target = await db.get(SubModel, 20)
+        updated = SimpleNamespace(id=77, short_uuid='s77', subscription_url='https://s/u', happ_crypto_link=None)
+        calls = []
+        monkeypatch.setattr(
+            'app.services.subscription_service.request_premium_traffic_refresh',
+            lambda subscription, panel_user_id: calls.append(panel_user_id),
+        )
+        monkeypatch.setattr(
+            'app.services.subscription_service.get_user_by_id', AsyncMock(return_value=await db.get(UserModel, 1))
+        )
+        monkeypatch.setattr('app.services.subscription_service.resolve_hwid_device_limit_for_payload', lambda s: None)
+        monkeypatch.setattr(service, 'validate_and_clean_subscription', AsyncMock(return_value=True))
+        monkeypatch.setattr(service, '_create_or_update_remnawave_user_single', AsyncMock(return_value=updated))
+        monkeypatch.setattr(service, '_create_or_update_remnawave_user_multi', AsyncMock(return_value=updated))
+        _patch_api_client(monkeypatch, service, AsyncMock())
+
+        await service.create_remnawave_user(db, target, reset_traffic=True)
+        assert calls == [77]
+
+        calls.clear()
+        await service.create_remnawave_user(db, target, reset_traffic=False)
+        assert calls == []
 
 
 async def test_stale_panel_id_still_gets_rescued_by_short_uuid(monkeypatch):

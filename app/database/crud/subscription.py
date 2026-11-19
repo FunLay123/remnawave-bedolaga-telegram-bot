@@ -768,6 +768,7 @@ async def replace_subscription(
 
     new_autopay_enabled = subscription.autopay_enabled if autopay_enabled is None else autopay_enabled
     new_autopay_days_before = subscription.autopay_days_before if autopay_days_before is None else autopay_days_before
+    previous_tariff_id = subscription.tariff_id
 
     if tariff_id is not None:
         subscription.tariff_id = tariff_id
@@ -798,6 +799,13 @@ async def replace_subscription(
     subscription.autopay_enabled = new_autopay_enabled
     subscription.autopay_days_before = new_autopay_days_before
     subscription.updated_at = current_time
+
+    if tariff_id is not None and tariff_id != previous_tariff_id:
+        from app.database.crud.tariff import get_tariff_by_id
+
+        new_tariff = await get_tariff_by_id(db, tariff_id)
+        if new_tariff is not None:
+            await refresh_premium_states_for_tariff(db, subscription, new_tariff)
 
     if commit:
         await db.commit()
@@ -1192,6 +1200,38 @@ async def _drop_orphan_premium_states(db: AsyncSession, subscription: Subscripti
         )
 
 
+async def refresh_premium_states_for_tariff(
+    db: AsyncSession,
+    subscription: Subscription,
+    tariff: object | None,
+) -> int:
+    """Привести состояния премиум-лимитов к новому тарифу подписки.
+
+    Убирает строки сквадов, которых нет в новом тарифе, и подтягивает снимки
+    лимитов оставшихся. Обе операции вспомогательные: их сбой не должен ронять
+    смену тарифа — ближайший проход воркера доберёт расхождение.
+    """
+    await _drop_orphan_premium_states(db, subscription, tariff)
+    try:
+        from app.database.crud.premium_traffic import sync_premium_state_limits
+
+        updated = await sync_premium_state_limits(db, subscription.id, tariff)
+    except Exception as error:
+        logger.warning(
+            'Не удалось обновить снимки премиум-лимитов при смене тарифа',
+            subscription_id=subscription.id,
+            error=error,
+        )
+        return 0
+    if updated:
+        logger.info(
+            '💠 Смена тарифа: лимиты премиум-сквадов обновлены',
+            subscription_id=subscription.id,
+            updated_count=updated,
+        )
+    return updated
+
+
 async def add_reward_days(
     db: AsyncSession,
     subscription: Subscription,
@@ -1525,17 +1565,7 @@ async def extend_subscription(
             subscription.last_daily_charge_at = None
             logger.info('🔄 Переход с суточного тарифа: очищены daily флаги')
 
-        await _drop_orphan_premium_states(db, subscription, new_tariff)
-
-        from app.database.crud.premium_traffic import sync_premium_state_limits
-
-        updated_limits = await sync_premium_state_limits(db, subscription.id, new_tariff)
-        if updated_limits:
-            logger.info(
-                '💠 Смена тарифа: лимиты премиум-сквадов обновлены',
-                subscription_id=subscription.id,
-                updated_count=updated_limits,
-            )
+        await refresh_premium_states_for_tariff(db, subscription, new_tariff)
 
     # В режиме fixed_with_topup при продлении базовый лимит возвращаем к
     # fixed_limit, но активные TrafficPurchase сохраняем (накопительно).

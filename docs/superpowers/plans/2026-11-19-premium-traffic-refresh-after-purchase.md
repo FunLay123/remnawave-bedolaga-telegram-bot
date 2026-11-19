@@ -20,7 +20,7 @@
 
 ## Review Focus
 
-- Ручное закрытие админом (`closed_at`) переживает смену тарифа и пробуждение воркера; лимит не меняется, доступ не возвращается.
+- Ручное закрытие админом (`closed_at`) и блокировка доступа переживают смену тарифа и пробуждение воркера; снимок лимита в новом периоде следует за тарифом, как у всех.
 - Автоснятый за расход сквад при апгрейде на больший лимит получает право на возврат, при даунгрейде — остаётся снятым.
 - Несколько покупок подряд не рождают параллельные проходы: один `Event`, один цикл, лишние пробуждения схлопываются.
 - Синхронизация без `reset_traffic` (устройства, сквады, рутинный апдейт) не будит воркер.
@@ -559,3 +559,22 @@ Expected: PASS, без новых warning'ов про необработанны
 git add docs/premium-traffic-limits.md docs/superpowers/specs/2026-11-19-premium-traffic-refresh-after-purchase-design.md docs/superpowers/plans/2026-11-19-premium-traffic-refresh-after-purchase.md
 git commit -m "docs: describe premium traffic refresh after purchase"
 ```
+
+---
+
+## Fix pass after review
+
+- Снимок лимита вынесен в `refresh_premium_states_for_tariff` и подключён во все
+  пути смены тарифа: `extend_subscription`, `replace_subscription` (guest-покупка)
+  и кабинетный `tariff_switch`.
+- `request_premium_traffic_refresh` разделён на публичный helper без гейта и
+  приватную reset-обёртку; guest-доставка зовёт публичный после своего коммита.
+- Добавлены интеграционные тесты на реальные `extend_subscription` и
+  `replace_subscription`, а также тесты call-site для `create_remnawave_user` и
+  `update_remnawave_user`.
+- Семантика `closed_at`: закрытие и блокировка переживают смену тарифа; снимок
+  лимита в новом периоде следует за тарифом. Закреплено тестом
+  `test_new_period_updates_closed_limit_but_keeps_access_blocked`.
+- Отложенные Minor: сброс `notified_80/90` при поднятии лимита снятому скваду;
+  транзиентная перезапись снимка уже идущим проходом; `try/finally` в тесте
+  `stop`.

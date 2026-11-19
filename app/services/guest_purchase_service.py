@@ -51,7 +51,7 @@ from app.services.registration_access_service import (
     RegistrationChannel,
     VerifiedRegistrationIdentity,
 )
-from app.services.subscription_service import SubscriptionService
+from app.services.subscription_service import SubscriptionService, request_premium_traffic_refresh
 from app.utils.gift_links import GIFT_TOKEN_MIN_PREFIX_LENGTH
 
 
@@ -1647,6 +1647,14 @@ async def activate_purchase(db: AsyncSession, purchase_token: str, *, skip_notif
         # Single atomic commit: subscription + purchase status + user changes
         await db.commit()
         await db.refresh(purchase, attribute_names=['landing', 'user', 'buyer'])
+
+        # Покупка могла заменить/продлить подписку без сброса трафика в панели.
+        # Снимок белых списков уже обновлён, но воркер должен увидеть новый
+        # тариф сразу — иначе снятый за расход сквад ждёт до пяти минут.
+        _panel_user_id = (
+            subscription.remnawave_id if settings.is_multi_tariff_enabled() else user.remnawave_id
+        )
+        request_premium_traffic_refresh(subscription, _panel_user_id)
 
         # Create transaction so promo group auto-assignment and contest tracking work.
         # Skip for gift recipients — they didn't pay, so their spending shouldn't be inflated.
