@@ -591,18 +591,33 @@ git commit -m "docs: describe premium traffic refresh after purchase"
   `test_explicit_tariff_avoids_an_expired_lazy_relationship`.
 - The same snapshot refresh is wired into the remaining user-facing tariff
   changes: mini-app switch, daily purchase/switch in the bot, daily
-  auto-purchase, and coupon grant. `replace_subscription` now refreshes
-  `tariff_id` under the row lock before deciding whether to sync.
+  auto-purchase, and coupon grant. `replace_subscription` syncs whenever
+  `tariff_id` is passed; `_lock_subscription_row` deliberately does not refresh
+  `tariff_id`, because that refresh would overwrite the pending tariff change
+  before the premium helper sees it.
 - `notified_80/90` are reset when a raised ceiling leaves free space, so the
   new larger quota gets its own 90 % warning. Covered by
   `tests/crud/test_premium_traffic_state.py`.
-- Deferred minor: the stop test's `try/finally`.
 - `replace_subscription` refreshes the snapshot for same-tariff replacements too:
   an expired subscription may be replaced after the tariff's premium limit was
   edited, and the old `previous_tariff_id` gate skipped that case. Covered by
   `test_replace_subscription_refreshes_same_tariff_after_limit_edit`.
 - The premium helper runs in a savepoint with a pre-flush: a failure (for
   example, an old DB without `subscription_premium_traffic`) rolls back only the
-  helper and cannot undo the tariff switch. `_lock_subscription_row` does not
-  refresh `tariff_id` — that refresh would overwrite the pending tariff change
-  before the premium helper sees it.
+  helper and cannot undo the tariff switch.
+
+## Third review fix pass
+
+- Added real-DB regression tests for the savepoint: a failing
+  `sync_premium_state_limits` and a failing `delete_states_for_squads` both leave
+  the new `tariff_id` committed and roll back only the premium rows.
+- Added a call-site test that `activate_purchase` passes the explicit `tariff`
+  to the wake; the existing gift tests did not assert the call.
+- Guest wake now uses the same panel id as the worker in single-tariff mode
+  (`subscription.remnawave_id or user.remnawave_id`).
+- Added the `extra_bytes` interaction test for the warning rearm and wrapped the
+  stop test in `try/finally`.
+- Corrected the savepoint comment and documented the guest wake without a panel
+  reset.
+- Deferred minors: coupon grant does not wake the worker; the warning rearm
+  reads states without `FOR UPDATE` (one notification of transient impact).
