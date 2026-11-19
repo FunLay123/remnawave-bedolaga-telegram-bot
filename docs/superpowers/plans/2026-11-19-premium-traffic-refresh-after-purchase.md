@@ -600,3 +600,8 @@ git commit -m "docs: describe premium traffic refresh after purchase"
   an expired subscription may be replaced after the tariff's premium limit was
   edited, and the old `previous_tariff_id` gate skipped that case. Covered by
   `test_replace_subscription_refreshes_same_tariff_after_limit_edit`.
+- The premium helper runs in a savepoint with a pre-flush: a failure (for
+  example, an old DB without `subscription_premium_traffic`) rolls back only the
+  helper and cannot undo the tariff switch. `_lock_subscription_row` does not
+  refresh `tariff_id` — that refresh would overwrite the pending tariff change
+  before the premium helper sees it.
