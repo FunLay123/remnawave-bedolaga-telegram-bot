@@ -173,19 +173,39 @@ async def test_success_keyboard_adds_renew_next_to_main_menu(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_success_keyboard_trial_offers_buy_subscription(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ('sales_mode', 'tariff_id', 'tariff', 'multi_tariff'),
+    [
+        pytest.param('tariffs', 1, SimpleNamespace(is_active=True, is_daily=False), False, id='tariffs'),
+        pytest.param('classic', None, None, False, id='classic'),
+        pytest.param('tariffs', None, None, False, id='tariffs-without-tariff'),
+        pytest.param('tariffs', 1, SimpleNamespace(is_active=True, is_daily=False), True, id='multi-tariff'),
+    ],
+)
+async def test_success_keyboard_trial_offers_buy_subscription(
+    monkeypatch: pytest.MonkeyPatch,
+    sales_mode: str,
+    tariff_id: int | None,
+    tariff: SimpleNamespace | None,
+    multi_tariff: bool,
+) -> None:
     """Триал не продлевается, но после пополнения должен вести к покупке подписки."""
-    monkeypatch.setattr(settings, 'SALES_MODE', 'tariffs')
-    monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', False)
+    monkeypatch.setattr(settings, 'SALES_MODE', sales_mode)
+    monkeypatch.setattr(settings, 'MULTI_TARIFF_ENABLED', multi_tariff)
     monkeypatch.setattr(settings, 'MAIN_MENU_MODE', 'default')
     subscription = SimpleNamespace(
         id=7,
         is_trial=True,
         is_active=True,
-        tariff_id=1,
-        tariff=SimpleNamespace(is_active=True, is_daily=False),
+        tariff_id=tariff_id,
+        tariff=tariff,
     )
-    user = SimpleNamespace(id=42, language='ru', subscription=subscription)
+    user = SimpleNamespace(
+        id=42,
+        language='ru',
+        subscription=subscription,
+        subscriptions=[subscription],
+    )
     service = PaymentCommonMixin()
 
     keyboard = await service.build_topup_success_keyboard(user)
