@@ -162,10 +162,6 @@ def build_days_only_referral_screen(
             terms_lines.append(
                 f'  {" и ".join(sides)}\n     за первую покупку от {min_period_days} {_days_word(min_period_days)}'
             )
-        # Бонус за первую покупку активен, но суточные тарифы в нём не
-        # участвуют — человек с суточной подпиской не должен ждать награды,
-        # которую система ему не выдаст.
-        terms_lines.append('  Суточные тарифы не участвуют в бонусе за первую покупку.')
     terms_block = ''
     if terms_lines:
         terms_block = f'{TERMS} <b>За каждого друга</b>\n' + '\n'.join(terms_lines) + '\n\n'

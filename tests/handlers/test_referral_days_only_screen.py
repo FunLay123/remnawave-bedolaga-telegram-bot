@@ -124,29 +124,11 @@ def test_terms_block_uses_referral_settings(monkeypatch):
     assert 'за первую покупку от 60 дней' in text
 
 
-def test_daily_tariff_note_shown_when_first_purchase_bonus_is_active(monkeypatch):
-    """Активный бонус за первую покупку обязан предупредить про суточные тарифы."""
+def test_daily_tariff_note_not_shown(monkeypatch):
+    """Предупреждение про суточные тарифы в бонусе не выводится."""
     monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 0)
     monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFEREE_DAYS', 7)
     monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFERRER_DAYS', 3)
-    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS', 30)
-
-    user = _user(subscriptions=[_sub(SubscriptionStatus.ACTIVE.value)])
-    text, _keyboard = build_days_only_referral_screen(
-        user=user,
-        summary={'invited_count': 0, 'paid_referrals_count': 0, 'total_earned_days': 0},
-        bot_referral_link='https://t.me/bot?start=ref_ABC123',
-        trial_available=False,
-    )
-
-    assert 'Суточные тарифы не участвуют в бонусе за первую покупку.' in text
-
-
-def test_daily_tariff_note_absent_when_first_purchase_bonus_is_zero(monkeypatch):
-    """При нулевом бонусе за первую покупку предупреждение не показывается."""
-    monkeypatch.setattr(settings, 'REFERRAL_TRIAL_BONUS_DAYS', 3)
-    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFEREE_DAYS', 0)
-    monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_REFERRER_DAYS', 0)
     monkeypatch.setattr(settings, 'REFERRAL_FIRST_PURCHASE_MIN_PERIOD_DAYS', 30)
 
     user = _user(subscriptions=[_sub(SubscriptionStatus.ACTIVE.value)])
