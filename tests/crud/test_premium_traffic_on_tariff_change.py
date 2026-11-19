@@ -136,3 +136,29 @@ async def test_replace_subscription_refreshes_premium_snapshot(monkeypatch):
         await db.commit()
 
         assert await _premium_limit(db) == 20 * BYTES_IN_GB
+
+
+async def test_replace_subscription_refreshes_same_tariff_after_limit_edit(monkeypatch):
+    """Expired subscription replaced on the same tariff still takes its new limit."""
+    _configure(monkeypatch)
+    async with memory_session(monkeypatch, TABLES) as db:
+        await _seed(db)
+        tariff = await db.get(Tariff, 1)
+        tariff.server_traffic_limits = {SQUAD: {'traffic_limit_gb': 20}}
+        await db.commit()
+        subscription = await db.get(Subscription, 10)
+
+        await replace_subscription(
+            db,
+            subscription,
+            duration_days=30,
+            traffic_limit_gb=20,
+            device_limit=3,
+            connected_squads=[SQUAD],
+            is_trial=False,
+            tariff_id=1,
+            commit=False,
+        )
+        await db.commit()
+
+        assert await _premium_limit(db) == 20 * BYTES_IN_GB

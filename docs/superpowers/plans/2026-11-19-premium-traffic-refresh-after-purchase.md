@@ -596,3 +596,7 @@ git commit -m "docs: describe premium traffic refresh after purchase"
 - Deferred minors: `notified_80/90` reset on a raised limited ceiling; a
   savepoint around the sync for DBAPI-level isolation; the stop test's
   `try/finally`.
+- `replace_subscription` refreshes the snapshot for same-tariff replacements too:
+  an expired subscription may be replaced after the tariff's premium limit was
+  edited, and the old `previous_tariff_id` gate skipped that case. Covered by
+  `test_replace_subscription_refreshes_same_tariff_after_limit_edit`.

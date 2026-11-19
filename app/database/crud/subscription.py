@@ -768,7 +768,6 @@ async def replace_subscription(
 
     new_autopay_enabled = subscription.autopay_enabled if autopay_enabled is None else autopay_enabled
     new_autopay_days_before = subscription.autopay_days_before if autopay_days_before is None else autopay_days_before
-    previous_tariff_id = subscription.tariff_id
 
     if tariff_id is not None:
         subscription.tariff_id = tariff_id
@@ -800,7 +799,7 @@ async def replace_subscription(
     subscription.autopay_days_before = new_autopay_days_before
     subscription.updated_at = current_time
 
-    if tariff_id is not None and tariff_id != previous_tariff_id:
+    if tariff_id is not None:
         from app.database.crud.tariff import get_tariff_by_id
 
         new_tariff = await get_tariff_by_id(db, tariff_id)
