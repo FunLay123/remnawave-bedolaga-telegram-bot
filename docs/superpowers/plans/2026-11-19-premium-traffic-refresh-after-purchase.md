@@ -578,3 +578,21 @@ git commit -m "docs: describe premium traffic refresh after purchase"
 - Отложенные Minor: сброс `notified_80/90` при поднятии лимита снятому скваду;
   транзиентная перезапись снимка уже идущим проходом; `try/finally` в тесте
   `stop`.
+
+## Second review fix pass
+
+- Guest `fulfill_purchase` (landing, expired subscription) now passes
+  `tariff_id` into `replace_subscription` instead of pre-assigning it, and wakes
+  the worker after its final commit. Regression test:
+  `tests/services/test_guest_purchase_fulfillment.py`.
+- `request_premium_traffic_refresh` accepts an explicit `tariff` object; guest
+  `activate_purchase` passes it because `db.refresh(subscription)` expires the
+  lazy relationship. Covered by
+  `test_explicit_tariff_avoids_an_expired_lazy_relationship`.
+- The same snapshot refresh is wired into the remaining user-facing tariff
+  changes: mini-app switch, daily purchase/switch in the bot, daily
+  auto-purchase, and coupon grant. `replace_subscription` now refreshes
+  `tariff_id` under the row lock before deciding whether to sync.
+- Deferred minors: `notified_80/90` reset on a raised limited ceiling; a
+  savepoint around the sync for DBAPI-level isolation; the stop test's
+  `try/finally`.

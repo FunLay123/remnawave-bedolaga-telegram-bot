@@ -1360,6 +1360,11 @@ async def _auto_purchase_daily_tariff(
             existing_subscription.last_daily_charge_at = datetime.now(UTC)
             existing_subscription.is_daily_paused = False
             existing_subscription.end_date = datetime.now(UTC) + timedelta(days=1)
+
+            from app.database.crud.subscription import refresh_premium_states_for_tariff
+
+            await refresh_premium_states_for_tariff(db, existing_subscription, tariff)
+
             await db.commit()
             await db.refresh(existing_subscription)
             subscription = existing_subscription

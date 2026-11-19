@@ -254,10 +254,10 @@ async def _grant_subscription_days(
             device_limit=tariff.device_limit,
             connected_squads=squads,
             is_trial=False,
+            tariff_id=tariff.id,
             update_server_counters=True,
             commit=False,
         )
-        subscription.tariff_id = tariff.id
         return subscription, False
 
     subscription = await create_paid_subscription(

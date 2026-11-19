@@ -2431,6 +2431,10 @@ async def confirm_daily_tariff_purchase(
             existing_subscription.purchased_traffic_gb = 0
             existing_subscription.traffic_reset_at = None
 
+            from app.database.crud.subscription import refresh_premium_states_for_tariff
+
+            await refresh_premium_states_for_tariff(db, existing_subscription, tariff)
+
             await db.commit()
             await db.refresh(existing_subscription)
             subscription = existing_subscription
@@ -4238,6 +4242,10 @@ async def confirm_daily_tariff_switch(
         if reset_used_traffic:
             subscription.traffic_used_gb = 0.0
 
+        from app.database.crud.subscription import refresh_premium_states_for_tariff
+
+        await refresh_premium_states_for_tariff(db, subscription, tariff)
+
         await db.commit()
         await db.refresh(subscription)
 
@@ -5264,6 +5272,10 @@ async def confirm_instant_switch(
             subscription.is_trial = False
             subscription.is_daily_paused = False
             subscription.last_daily_charge_at = datetime.now(UTC)
+
+        from app.database.crud.subscription import refresh_premium_states_for_tariff
+
+        await refresh_premium_states_for_tariff(db, subscription, new_tariff)
 
         await db.commit()
         await db.refresh(subscription)

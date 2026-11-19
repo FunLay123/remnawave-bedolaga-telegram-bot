@@ -866,8 +866,9 @@ async def _lock_subscription_row(db: AsyncSession, subscription: Subscription) -
     лок до конца транзакции).
     """
     await db.execute(select(Subscription.id).where(Subscription.id == subscription.id).with_for_update())
-    # Подтягиваем поля, которые могут быть обновлены конкурентным add_subscription_traffic
-    await db.refresh(subscription, ['traffic_limit_gb', 'purchased_traffic_gb', 'traffic_reset_at'])
+    # Подтягиваем поля, которые могут быть обновлены конкурентным add_subscription_traffic,
+    # и tariff_id: по нему replace_subscription решает, менять ли снимок премиум-лимитов.
+    await db.refresh(subscription, ['traffic_limit_gb', 'purchased_traffic_gb', 'traffic_reset_at', 'tariff_id'])
 
 
 async def _housekeep_expired_purchases(

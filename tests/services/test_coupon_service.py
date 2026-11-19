@@ -324,7 +324,7 @@ async def test_grant_replaces_expired_subscription(monkeypatch: pytest.MonkeyPat
     assert kwargs['commit'] is False
     assert kwargs['duration_days'] == 30
     assert renewed is False, 'replacing an expired subscription is an activation, not a renewal'
-    assert subscription.tariff_id == 3, 'replaced subscription must be reassigned to the batch tariff'
+    assert kwargs['tariff_id'] == 3, 'replaced subscription must be reassigned to the batch tariff'
 
 
 @pytest.mark.asyncio

@@ -26,7 +26,11 @@
    автоснятого сквада (`is_limited`, `closed_at IS NULL`) поднятие лимита
    разрешает воркеру вернуть его, опускание оставляет прежний потолок. Общий
    helper вызывают все пути смены тарифа: `extend_subscription`,
-   `replace_subscription` (guest-покупка) и кабинетный `tariff_switch`.
+   `replace_subscription` (guest `fulfill_purchase`/`activate_purchase`), кабинетный
+   `tariff_switch`, mini-app switch, daily-покупка/свитч в боте и автопокупка.
+   Guest-доставка передаёт `tariff_id` внутрь `replace_subscription` и зовёт
+   `request_premium_traffic_refresh(tariff=...)` после своего коммита: связь
+   `subscription.tariff` там уже погашена `db.refresh`.
 3. После успешной синхронизации с панелью с `reset_traffic=True` в
    `SubscriptionService.create_remnawave_user` и `update_remnawave_user` вызываем
    `request_premium_traffic_refresh(...)`, если у текущего тарифа есть

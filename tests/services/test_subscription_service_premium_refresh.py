@@ -46,6 +46,28 @@ def test_public_refresh_wakes_without_a_reset_flag(monkeypatch):
     assert calls == [42]
 
 
+def test_explicit_tariff_avoids_an_expired_lazy_relationship(monkeypatch):
+    """After db.refresh(subscription) the tariff attribute can raise on access.
+
+    The guest path must pass the already-loaded tariff, otherwise MissingGreenlet
+    is swallowed by the helper's except and the wake silently never happens.
+    """
+    calls = _fake_service(monkeypatch)
+
+    class _SubscriptionWithExpiredTariff:
+        @property
+        def tariff(self):
+            raise RuntimeError('lazy load after refresh')
+
+    subscription_service.request_premium_traffic_refresh(
+        _SubscriptionWithExpiredTariff(),
+        42,
+        tariff=SimpleNamespace(server_traffic_limits={SQUAD: {'traffic_limit_gb': 20}}),
+    )
+
+    assert calls == [42]
+
+
 def test_sync_without_traffic_reset_does_not_wake_the_worker(monkeypatch):
     calls = _fake_service(monkeypatch)
 

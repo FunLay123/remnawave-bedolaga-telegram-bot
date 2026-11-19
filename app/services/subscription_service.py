@@ -45,6 +45,8 @@ logger = structlog.get_logger(__name__)
 def request_premium_traffic_refresh(
     subscription: Subscription,
     panel_user_id: int | None,
+    *,
+    tariff: object | None = None,
 ) -> None:
     """Разбудить воркер премиум-трафика после покупки или синхронизации.
 
@@ -52,11 +54,16 @@ def request_premium_traffic_refresh(
     ``lastTrafficResetAt``, если панель его выставила) и начнёт период сразу, а
     не через интервал. Без премиум-сквадов в тарифе проход не нужен. Сбой
     пробуждения не должен ломать уже оплаченную покупку.
+
+    ``tariff`` передаётся явно, когда связь ``subscription.tariff`` могла быть
+    погашена ``db.refresh(subscription)``: ленивая загрузка в async-сессии
+    подняла бы MissingGreenlet, и пробуждение молча не случилось бы.
     """
     try:
         from app.utils.premium_traffic import get_premium_squads_for_tariff
 
-        if not get_premium_squads_for_tariff(getattr(subscription, 'tariff', None)):
+        resolved_tariff = tariff if tariff is not None else getattr(subscription, 'tariff', None)
+        if not get_premium_squads_for_tariff(resolved_tariff):
             return
         from app.services.premium_traffic_service import premium_traffic_service
 

@@ -563,8 +563,9 @@ async def fulfill_purchase(
             squads = [s.squad_uuid for s in all_servers if s.squad_uuid]
 
         if existing_subscription is not None:
-            # Expired/inactive subscription — replace it
-            existing_subscription.tariff_id = tariff.id
+            # Expired/inactive subscription — replace it. tariff_id передаём
+            # внутрь, иначе replace_subscription не увидит смену тарифа и не
+            # обновит снимок белых списков.
             subscription = await replace_subscription(
                 db,
                 existing_subscription,
@@ -573,6 +574,7 @@ async def fulfill_purchase(
                 device_limit=tariff.device_limit,
                 connected_squads=squads,
                 is_trial=False,
+                tariff_id=tariff.id,
                 update_server_counters=True,
             )
         else:
@@ -618,6 +620,11 @@ async def fulfill_purchase(
 
         await db.commit()
         await db.refresh(purchase, attribute_names=['landing', 'user', 'buyer'])
+
+        _panel_user_id = (
+            subscription.remnawave_id if settings.is_multi_tariff_enabled() else user.remnawave_id
+        )
+        request_premium_traffic_refresh(subscription, _panel_user_id, tariff=tariff)
 
         # Save Yandex CID from Redis → DB BEFORE create_transaction, so the
         # central purchase hook fired from create_transaction (every completed
@@ -1654,7 +1661,7 @@ async def activate_purchase(db: AsyncSession, purchase_token: str, *, skip_notif
         _panel_user_id = (
             subscription.remnawave_id if settings.is_multi_tariff_enabled() else user.remnawave_id
         )
-        request_premium_traffic_refresh(subscription, _panel_user_id)
+        request_premium_traffic_refresh(subscription, _panel_user_id, tariff=tariff)
 
         # Create transaction so promo group auto-assignment and contest tracking work.
         # Skip for gift recipients — they didn't pay, so their spending shouldn't be inflated.
