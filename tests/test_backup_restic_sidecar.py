@@ -579,6 +579,11 @@ def test_restore_bash_blocks_are_syntactically_valid() -> None:
             assert result.returncode == 0, f'{path.name} bash block {index}:\n{result.stderr}\n{block}'
 
 
+def _section(text: str, start_marker: str, end_marker: str) -> str:
+    start = text.index(start_marker)
+    return text[start : text.index(end_marker, start)]
+
+
 def _restore_db_expression(path: Path) -> str:
     match = re.search(r'^RESTORE_DB=(.+)$', path.read_text(encoding='utf-8'), flags=re.MULTILINE)
     assert match, f'RESTORE_DB assignment missing in {path}'
@@ -610,15 +615,73 @@ def test_restore_runbooks_use_snapshot_variable_and_container_user() -> None:
         assert '<snapshot-id>' not in text
         assert 'SNAPSHOT_ID' in text
         assert 'read -r SNAPSHOT_ID' in text
-        assert 'restic --no-cache snapshots' in text
-        assert 'restic --no-cache check' in text
-        assert 'restic --no-cache ls "$SNAPSHOT_ID"' in text
-        assert 'restic --no-cache dump "$SNAPSHOT_ID"' in text
+        assert '--entrypoint restic backup' in text
+        assert '--no-cache snapshots' in text
+        assert '--no-cache check' in text
+        assert '--no-cache ls "$SNAPSHOT_ID"' in text
+        assert '--no-cache dump "$SNAPSHOT_ID"' in text
         assert '$DC exec backup restic snapshots' not in text
         assert '$DC exec backup restic dump' not in text
         assert 'exec -T postgres sh -c' in text
         assert 'restore_db="$1" -U "$POSTGRES_USER"' in text
         assert 'restore_db="$RESTORE_DB" -U "$POSTGRES_USER"' not in text
+        assert '--entrypoint sh bot' in text
+        assert '--entrypoint sh backup' in text
+        assert 'exec -T postgres sh -c \'printf "%s" "$POSTGRES_DB"\'' not in text
+
+
+@pytest.mark.skipif(BASH is None, reason='bash is not available')
+def test_cutover_ordering_and_rollback_file_restore(tmp_path: Path) -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        if path.name == 'backups-google-drive.md':
+            text = _section(text, '### 8.3.', '### 8.4.')
+        else:
+            text = _section(text, '## 3.', '## 4.')
+        copy_index = text.index('install -m 600 .env "$ENV_BACKUP"')
+        edit_index = text.index('Set exactly in .env: POSTGRES_DB=')
+        pause_index = text.index('read -r _')
+        preflight_index = text.index('PRE_BOT_DB=')
+        start_index = text.index('$DC up -d --no-deps --force-recreate bot backup')
+        rollback_index = text.index('install -m 600 "$ENV_BACKUP" .env')
+
+        assert copy_index < edit_index < pause_index < preflight_index < start_index
+        assert start_index < rollback_index
+
+        original = 'ORIGINAL_DB=old-db\n'
+        (tmp_path / '.env').write_text(original, encoding='utf-8')
+        rollback = tmp_path / 'rollback.env'
+        script = (
+            f'ENV_BACKUP={shlex.quote(str(rollback))}\n'
+            'install -m 600 .env "$ENV_BACKUP"\n'
+            'printf "NEW_DB=new-db\\n" > .env\n'
+            'install -m 600 "$ENV_BACKUP" .env\n'
+        )
+        result = subprocess.run(  # noqa: S603 - fixed bash binary
+            [BASH, '-c', script],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / '.env').read_text(encoding='utf-8') == original
+
+
+def test_new_host_reads_snapshot_before_installing_env() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        if path.name == 'backups-google-drive.md':
+            text = _section(text, '### 8.4.', '## 9.')
+        else:
+            text = _section(text, '## 4.', '## Важно')
+        read_index = text.index('--no-cache snapshots')
+        install_env_index = text.index('install -m 600 "$RESTORE_DIR/.env" .env')
+        assert read_index < install_env_index
+        assert '--entrypoint restic backup' in text
+        assert 'up -d --no-deps postgres redis' in text
+        assert 'pg_isready -U "$POSTGRES_USER" -d postgres' in text
+        assert 'redis-cli ping' in text
 
 
 def test_cutover_and_rollback_unset_host_db_and_verify_effective_config() -> None:
@@ -640,7 +703,7 @@ def test_restore_runbooks_clarify_tar_members_and_check_lock() -> None:
         text = path.read_text(encoding='utf-8')
         assert 'В каталоге должны быть ровно `db.dump` и `.env`' not in text
         assert 'tar' in text.lower()
-        assert 'restic check' in text
+        assert '--no-cache check' in text
         assert 'lock' in text.lower()
         assert 'одноразовый бот' not in text
 
