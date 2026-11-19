@@ -42,6 +42,35 @@ from app.utils.subscription_utils import (
 logger = structlog.get_logger(__name__)
 
 
+def _request_premium_traffic_refresh(
+    subscription: Subscription,
+    panel_user_id: int | None,
+    *,
+    reset_traffic: bool,
+) -> None:
+    """Разбудить воркер премиум-трафика после синхронизации покупки с панелью.
+
+    Вызывается после коммита и после сброса трафика в панели: воркер увидит
+    новый ``lastTrafficResetAt`` и начнёт новый премиум-период сразу, а не через
+    интервал. Без премиум-сквадов в тарифе проход не нужен. Сбой пробуждения не
+    должен ломать уже оплаченную покупку.
+    """
+    if not reset_traffic:
+        return
+    try:
+        from app.utils.premium_traffic import get_premium_squads_for_tariff
+
+        if not get_premium_squads_for_tariff(getattr(subscription, 'tariff', None)):
+            return
+        from app.services.premium_traffic_service import premium_traffic_service
+
+        if not premium_traffic_service.is_enabled():
+            return
+        premium_traffic_service.request_pass(panel_user_id=panel_user_id)
+    except Exception as error:
+        logger.warning('Не удалось запросить внеочередной проход премиум-трафика', error=error)
+
+
 @dataclass
 class PropagateSquadsResult:
     """Результат применения скводов тарифа к подпискам."""
@@ -296,6 +325,12 @@ class SubscriptionService:
                         user.remnawave_id = updated_user.id
 
                 await db.commit()
+
+                _request_premium_traffic_refresh(
+                    subscription,
+                    updated_user.id,
+                    reset_traffic=reset_traffic,
+                )
 
                 logger.info('✅ Создан/обновлен RemnaWave пользователь для подписки', subscription_id=subscription.id)
                 logger.info('🔗 Ссылка на подписку', subscription_url=updated_user.subscription_url)
@@ -706,6 +741,12 @@ class SubscriptionService:
                 subscription.subscription_crypto_link = updated_user.happ_crypto_link
                 await link_subscription_panel_identity(db, subscription, remnawave_id)
                 await db.commit()
+
+                _request_premium_traffic_refresh(
+                    subscription,
+                    remnawave_id,
+                    reset_traffic=reset_traffic,
+                )
 
                 status_text = 'активным' if is_actually_active else 'истёкшим'
                 logger.info(
