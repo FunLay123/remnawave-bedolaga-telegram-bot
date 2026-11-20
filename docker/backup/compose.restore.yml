@@ -1,0 +1,21 @@
+# Standalone snapshot reader: works before the application's .env exists.
+services:
+  backup:
+    build:
+      context: .
+    environment:
+      RESTIC_REPOSITORY: '${BACKUP_RESTIC_REPOSITORY:-rclone:gdrive:remnawave-restic}'
+      RESTIC_PASSWORD_FILE: /run/secrets/restic-password
+      RCLONE_CONFIG: /config/rclone/rclone.conf
+    volumes:
+      - type: bind
+        source: '${BACKUP_RCLONE_CONFIG_DIR:-/etc/remnawave-backup/rclone}'
+        target: /config/rclone
+        bind:
+          create_host_path: false
+      - type: bind
+        source: '${BACKUP_RESTIC_PASSWORD_FILE:-/etc/remnawave-backup/restic-password}'
+        target: /run/secrets/restic-password
+        read_only: true
+        bind:
+          create_host_path: false

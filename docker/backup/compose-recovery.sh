@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a project-checked Docker Compose command from an ordered, validated
-# Compose file list, optionally preflighting the shared panel network.
+# Compose file list, optionally preflighting the shared panel network before up.
 #
 # This helper is intentionally host-side and Bash-only. It never sources an
 # env file or recovered manifest, never evals a file list, and never prints
@@ -51,9 +51,8 @@ Usage:
   --file NAME            use a project-root basename selected by the operator
   --verify-live-match    require the restored files.list and bytes to match the
                          live project's ordered config_files; no Docker command
-  --preflight-network    render effective config before the command; no-op when
-                         remnawave-network is absent or Compose-managed, unless
-                         --require-panel-network is set
+  --preflight-network    render effective config before up; non-up commands are
+                         not gated by panel-network availability
   --require-panel-network  fail unless remnawave-network is external: true
   --panel-project NAME   require the external network's
                          com.docker.compose.project label to equal NAME
@@ -282,6 +281,14 @@ preflight_network() {
     fi
 }
 
+command_needs_preflight() {
+    local argument
+    for argument in "$@"; do
+        [ "$argument" = up ] && return 0
+    done
+    return 1
+}
+
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --project)
@@ -397,8 +404,8 @@ if [ "$PRINT_FILES" -eq 1 ]; then
     exit 0
 fi
 
-[ "$PREFLIGHT" -eq 1 ] && preflight_network
+[ "$PREFLIGHT" -eq 1 ] && command_needs_preflight "${COMPOSE_ARGS[@]}" && preflight_network
 if [ "${#COMPOSE_ARGS[@]}" -eq 0 ]; then
     exit 0
 fi
-exec docker compose "${DC[@]}" "${COMPOSE_ARGS[@]}"
+exec "${DC[@]}" "${COMPOSE_ARGS[@]}"

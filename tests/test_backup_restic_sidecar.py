@@ -131,6 +131,10 @@ case "${1:-}" in
         exit 0
         ;;
     compose)
+        if [ "${2:-}" = docker ]; then
+            echo 'duplicate docker compose prefix' >&2
+            exit 2
+        fi
         case " $* " in
             *' config '*)
                 [ "${FAKE_COMPOSE_CONFIG_FAIL:-0}" = 1 ] && exit 1
@@ -1560,7 +1564,8 @@ def test_cutover_ordering_and_rollback_file_restore(tmp_path: Path) -> None:
 
 def test_new_host_reads_snapshot_before_installing_env() -> None:
     for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
-        text = path.read_text(encoding='utf-8')
+        full_text = path.read_text(encoding='utf-8')
+        text = full_text
         if path.name == 'backups-google-drive.md':
             text = _section(text, '### 8.4.', '## 9.')
         else:
@@ -1568,10 +1573,72 @@ def test_new_host_reads_snapshot_before_installing_env() -> None:
         read_index = text.index('--no-cache snapshots')
         install_env_index = text.index('install -m 600 "$RESTORE_DIR/.env" .env')
         assert read_index < install_env_index
-        assert '--entrypoint restic backup' in text
+        bootstrap = text[:install_env_index]
+        assert 'compose.restore.yml' in full_text
+        assert 'dc_bootstrap()' in full_text
+        assert 'dc_trusted --profile backup' not in bootstrap
+        assert '--entrypoint restic backup' in bootstrap
+        assert text.index('dc_recover --profile backup build bot backup') > install_env_index
         assert 'up -d --no-deps postgres redis' in text
         assert 'pg_isready -U "$POSTGRES_USER" -d postgres' in text
         assert 'redis-cli ping' in text
+
+
+def test_restore_bootstrap_does_not_depend_on_the_application() -> None:
+    path = ROOT / 'docker' / 'backup' / 'compose.restore.yml'
+    assert path.is_file(), 'fresh-host restore needs a standalone Compose file'
+    config = yaml.safe_load(path.read_text(encoding='utf-8'))
+    assert set(config['services']) == {'backup'}
+    backup = config['services']['backup']
+    assert backup['build']['context'] == '.'
+    assert not {'env_file', 'depends_on', 'networks', 'ports', 'network_mode'} & backup.keys()
+    assert set(backup['environment']) == {'RESTIC_REPOSITORY', 'RESTIC_PASSWORD_FILE', 'RCLONE_CONFIG'}
+    assert len(backup['volumes']) == 2
+    assert 'networks' not in config and 'volumes' not in config
+
+
+@pytest.mark.skipif(BASH is None, reason='Bash is required for runbook tests')
+def test_runbook_network_preflight_only_gates_up(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'base.yml').write_text('services: {}\n', encoding='utf-8')
+    env = _compose_recovery_env(tmp_path, FAKE_COMPOSE_CONFIG_FAIL='1', PANEL_NETWORK_REQUIRED='1')
+    env['EXPECTED_COMPOSE_PROJECT'] = 'custom'
+    for doc in (ROOT / 'docs/backups-google-drive.md', ROOT / 'docker/backup/RESTORE.md'):
+        wrappers = next(block for block in _bash_blocks(doc) if 'dc_trusted()' in block)
+        for command in ('stop bot backup', '--profile backup run --rm backup snapshots', 'exec -T postgres true'):
+            result = subprocess.run(  # noqa: S603 - fixed Bash, repository code, synthetic Docker
+                [
+                    BASH,
+                    '-c',
+                    f'{wrappers}\nPROJECT_DIR=$1\nTRUSTED_COMPOSE_FILES=(base.yml)\ndc_trusted {command}',
+                    'bash',
+                    str(project),
+                ],
+                cwd=ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert result.returncode == 0, result.stderr
+        result = subprocess.run(  # noqa: S603 - fixed Bash, repository code, synthetic Docker
+            [
+                BASH,
+                '-c',
+                f'{wrappers}\nPROJECT_DIR=$1\nTRUSTED_COMPOSE_FILES=(base.yml)\ndc_trusted up -d backup',
+                'bash',
+                str(project),
+            ],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode != 0
+        assert 'cannot render effective Compose config' in result.stderr
+        assert not any(call.endswith('up -d backup') for call in _fake_docker_calls(env))
 
 
 def test_cutover_and_rollback_unset_host_db_and_verify_effective_config() -> None:

@@ -81,6 +81,13 @@ dc_trusted() {
     bash docker/backup/compose-recovery.sh "${args[@]}" -- "$@"
 }
 
+dc_bootstrap() {
+    docker compose --env-file /dev/null \
+      --project-directory "$PROJECT_DIR/docker/backup" \
+      -p "${EXPECTED_COMPOSE_PROJECT}-recovery" \
+      -f "$PROJECT_DIR/docker/backup/compose.restore.yml" "$@"
+}
+
 dc_recover() {
     if [ -f "$RESTORE_DIR/compose/files.list" ]; then
         dc_restored "$@"
@@ -100,8 +107,9 @@ deployment добавь проверенный override. Если `--live` не 
 ## 1. Прочитать снапшот и проверить live order до остановки
 
 Сначала читаем `snapshots`/`dump` одноразовым Restic, **не останавливая**
-bot/backup: dump read-only, snapshot атомарен. `dc_live` проверяет project,
-containers и network до каждой команды. После проверки snapshot list/bytes можно
+bot/backup: dump read-only, snapshot атомарен. `dc_live` проверяет project и
+containers до каждой команды, а network — перед `up`. После проверки snapshot
+list/bytes можно
 останавливать writers.
 
 ```bash
@@ -318,7 +326,9 @@ trusted inputs. Пример (не выполнять вслепую): `docker-c
 
 1. Восстанови из офлайн-копии `rclone.conf` и файл пароля Restic. Не выполняй
    `restic init`.
-2. Собери образы и прочитай снапшот:
+2. До установки application `.env` используй только standalone backup Compose.
+   Он не читает application stack, не подключает panel network и не запускает
+   `backup` loop. Собери только backup image и прочитай снапшот:
 
 ```bash
 set -euo pipefail
@@ -331,7 +341,7 @@ read -r -a TRUSTED_COMPOSE_FILES
     exit 1
 }
 
-dc_trusted --profile backup build bot backup
+dc_bootstrap build backup
 
 RECOVERY_ROOT=${RECOVERY_ROOT:-/var/lib/remnawave-recovery}
 install -d -m 700 "$RECOVERY_ROOT"
@@ -341,14 +351,14 @@ install -d -m 700 "$RESTORE_DIR"
 # export BACKUP_RCLONE_CONFIG_DIR='/etc/remnawave-backup/rclone'
 # export BACKUP_RESTIC_PASSWORD_FILE='/etc/remnawave-backup/restic-password'
 
-dc_trusted --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache snapshots
+dc_bootstrap run --rm --no-deps -T --entrypoint restic backup   --no-cache snapshots
 if [ -z "${SNAPSHOT_ID:-}" ]; then
     printf 'Snapshot ID: '
     read -r SNAPSHOT_ID
 fi
 [ -n "$SNAPSHOT_ID" ] || { echo 'SNAPSHOT_ID is required' >&2; exit 1; }
-dc_trusted --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache check
-dc_trusted --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar   > "$RESTORE_DIR/remnawave-backup.tar"
+dc_bootstrap run --rm --no-deps -T --entrypoint restic backup   --no-cache check
+dc_bootstrap run --rm --no-deps -T --entrypoint restic backup   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar   > "$RESTORE_DIR/remnawave-backup.tar"
 
 sh docker/backup/restore-compose.sh   --archive "$RESTORE_DIR/remnawave-backup.tar"   --inspect
 printf 'Snapshot kind [compose/legacy]: '
@@ -416,6 +426,7 @@ fi
 
 ```bash
 install -m 600 "$RESTORE_DIR/.env" .env
+dc_recover --profile backup build bot backup
 ```
 
 5. Preflight и запуск базовых сервисов. `dc_recover` already includes
