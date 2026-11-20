@@ -1,8 +1,13 @@
 # Восстановление Restic-бэкапа Remnawave Bot
 
 Один снапшот содержит `remnawave-backup.tar`, внутри — `db.dump` (PostgreSQL
-custom format) и `.env` с того же 5-минутного цикла. Restic-репозиторий отдельный
-от старых папок `5min/`, `hourly/` и т.д.
+custom format) и `.env` с того же 5-минутного цикла. Если включён
+`BACKUP_COMPOSE_FILES`, в том же tar есть `compose/project-name`,
+`compose/files.list` и выбранные Compose-файлы в порядке списка.
+`BACKUP_COMPOSE_PROJECT` backup получает из `COMPOSE_PROJECT_NAME`; задавай его
+явно вместе с `-p`. Restic-репозиторий отдельный от старых папок `5min/`,
+`hourly/` и т.д.; старые двухфайловые снапшоты остаются доступны через data-only
+restore.
 
 Выполняй шаги 1–3 в одном shell с `set -eu`: после ошибки нельзя продолжать, а
 `trap` удалит приватные артефакты при выходе. Не используй `pg_restore --clean`
@@ -44,17 +49,43 @@ $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
 $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
   > "$RESTORE_DIR/remnawave-backup.tar"
-tar -C "$RESTORE_DIR" -xf "$RESTORE_DIR/remnawave-backup.tar"
-chmod 600 "$RESTORE_DIR/db.dump" "$RESTORE_DIR/.env"
-tar -tvf "$RESTORE_DIR/remnawave-backup.tar"
+
+if [ -z "${EXPECTED_COMPOSE_PROJECT:-}" ]; then
+    printf 'Expected Compose project: '
+    read -r EXPECTED_COMPOSE_PROJECT
+fi
+[ -n "$EXPECTED_COMPOSE_PROJECT" ] || {
+  echo 'EXPECTED_COMPOSE_PROJECT is required' >&2
+  exit 1
+}
+sh docker/backup/restore-compose.sh \
+  --archive "$RESTORE_DIR/remnawave-backup.tar" \
+  --project "$EXPECTED_COMPOSE_PROJECT" \
+  --output "$RESTORE_DIR"
+
+# Старый двухфайловый снапшот (например первый утверждённый 16e67daf) не
+# содержит Compose metadata. Только для него — явный data-only путь:
+# sh docker/backup/restore-compose.sh \
+#   --archive "$RESTORE_DIR/remnawave-backup.tar" \
+#   --legacy-data-only \
+#   --output "$RESTORE_DIR"
+
+cat "$RESTORE_DIR/compose/project-name" 2>/dev/null || true
+cat "$RESTORE_DIR/compose/files.list" 2>/dev/null || true
 file "$RESTORE_DIR/db.dump"
 $DC exec -T postgres pg_restore --list < "$RESTORE_DIR/db.dump" >/dev/null
 ```
 
-В tar должны быть ровно два члена: `db.dump` и `.env`. После распаковки в
-`$RESTORE_DIR` временно лежит и сам `remnawave-backup.tar`; это нормально, его
-удалит `trap` (или явный `rm` ниже). Плейнтекст tar/dump не кладётся в
-репозиторий; каталог создаётся через `mktemp` вне его.
+Helper не использует `tar -xf`: он проверяет точный набор членов и типы файлов,
+стримит только `db.dump`, `.env` и `compose/*` в приватный scratch, а результат
+кладёт в `$RESTORE_DIR` лишь после совпадения `compose/project-name` с ожидаемым
+project. При mismatch `$RESTORE_DIR` не получает ни данных, ни Compose-файлов.
+Для снапшота с Compose metadata `compose/files.list` задаёт авторитетный порядок,
+`compose/project-name` — project ID. В `$RESTORE_DIR` временно лежит и сам
+`remnawave-backup.tar`; это нормально, его удалит `trap` (или явный `rm` ниже).
+Плейнтекст tar/dump не кладётся в репозиторий; каталог создаётся через `mktemp`
+вне его. Просмотри входы и применяй их только явными `-p`/`-f`; не накатывай
+Compose поверх уже запущенного stack.
 
 ## 2. Зафиксировать фактическую БД и восстановить в свежую
 
@@ -221,7 +252,7 @@ app `.env`; затем ставим `.env`, поднимаем postgres/redis, �
 2. Собери/скачай образы `bot` и `backup`:
 
 ```bash
-DC="docker compose -f docker-compose.yml -f docker-compose.local.yml"
+DC="docker compose -p bot-asteria -f docker-compose.yml -f docker-compose.local.yml"
 # + -f docker-compose.asteria.yml, если он есть
 $DC --profile backup build bot backup
 ```
@@ -235,7 +266,7 @@ $DC --profile backup build bot backup
 set -eu
 umask 077
 
-DC="docker compose -f docker-compose.yml -f docker-compose.local.yml"
+DC="docker compose -p bot-asteria -f docker-compose.yml -f docker-compose.local.yml"
 # + -f docker-compose.asteria.yml, если он есть
 # export BACKUP_RESTIC_REPOSITORY='rclone:gdrive:remnawave-restic'
 # export BACKUP_RCLONE_CONFIG_DIR='/etc/remnawave-backup/rclone'
@@ -258,10 +289,44 @@ $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
 $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
   > "$RESTORE_DIR/remnawave-backup.tar"
-tar -C "$RESTORE_DIR" -xf "$RESTORE_DIR/remnawave-backup.tar"
-chmod 600 "$RESTORE_DIR/db.dump" "$RESTORE_DIR/.env"
-tar -tvf "$RESTORE_DIR/remnawave-backup.tar"
+
+if [ -z "${EXPECTED_COMPOSE_PROJECT:-}" ]; then
+    printf 'Expected Compose project: '
+    read -r EXPECTED_COMPOSE_PROJECT
+fi
+[ -n "$EXPECTED_COMPOSE_PROJECT" ] || {
+  echo 'EXPECTED_COMPOSE_PROJECT is required' >&2
+  exit 1
+}
+sh docker/backup/restore-compose.sh \
+  --archive "$RESTORE_DIR/remnawave-backup.tar" \
+  --project "$EXPECTED_COMPOSE_PROJECT" \
+  --output "$RESTORE_DIR"
+
+# Старый двухфайловый снапшот (например первый утверждённый 16e67daf) не
+# содержит Compose metadata. Только для него — явный data-only путь:
+# sh docker/backup/restore-compose.sh \
+#   --archive "$RESTORE_DIR/remnawave-backup.tar" \
+#   --legacy-data-only \
+#   --output "$RESTORE_DIR"
+
 file "$RESTORE_DIR/db.dump"
+
+# Для снапшота с Compose metadata передай project и порядок -f явно:
+if [ -d "$RESTORE_DIR/compose" ]; then
+    DC="docker compose --project-directory . -p bot-asteria"
+    DC="$DC -f $RESTORE_DIR/compose/docker-compose.yml"
+    DC="$DC -f $RESTORE_DIR/compose/docker-compose.local.yml"
+    if [ -f "$RESTORE_DIR/compose/docker-compose.asteria.yml" ]; then
+        DC="$DC -f $RESTORE_DIR/compose/docker-compose.asteria.yml"
+    fi
+else
+    # Legacy-снапшот без compose/: проверенные файлы репозитория, тот же -p.
+    DC="docker compose -p bot-asteria -f docker-compose.yml -f docker-compose.local.yml"
+    if [ -f docker-compose.asteria.yml ]; then
+        DC="$DC -f docker-compose.asteria.yml"
+    fi
+fi
 ```
 
 4. После проверки пары установи восстановленный `.env` как live-конфигурацию:
@@ -285,6 +350,16 @@ $DC exec -T redis redis-cli ping
 
 ## Важно
 
+- `BACKUP_COMPOSE_FILES` — явный allowlist. Production-пример:
+  `COMPOSE_PROJECT_NAME=bot-asteria` и
+  `BACKUP_COMPOSE_FILES=docker-compose.yml:docker-compose.local.yml:docker-compose.asteria.yml`.
+  Восстановленные Compose-файлы лежат только в приватном restore-каталоге; не
+  коммить private override и не применяй их поверх запущенного stack. Project
+  проверяется helper'ом до записи файлов.
+- Общая сеть `remnawave-network` — внешняя зависимость оператора панели. Проверь
+  `docker network inspect remnawave-network` перед attach; снапшот не содержит
+  Docker network state, не меняет сети и не требует Docker socket. Не меняй
+  network wiring в Compose ради восстановления.
 - Healthcheck проверяет свежесть маркера, а не возможность восстановления.
   Периодически делай restore drill.
 - Пароль Restic потерян — снапшоты не расшифровать. Храни его офлайн.

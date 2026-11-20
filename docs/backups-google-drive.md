@@ -31,18 +31,25 @@ Google Drive (аккаунт оператора)
 ```
 
 Внутри каждого снапшота лежит один файл `remnawave-backup.tar` (Restic может
-показывать путь как `/remnawave-backup.tar`). Внутри tar — ровно два файла:
+показывать путь как `/remnawave-backup.tar`). По умолчанию внутри tar — ровно
+два файла:
 
 ```text
 db.dump   — pg_dump -Fc --no-owner --no-privileges --no-password
 .env      — копия текущего .env на тот же цикл, режим 0600
 ```
 
+Если явно включён `BACKUP_COMPOSE_FILES`, в тот же tar добавляются
+`compose/project-name`, `compose/files.list` и выбранные Compose-файлы в порядке
+списка. Это единственное изменение формата; путь `remnawave-backup.tar` прежний.
+Старые двухфайловые снапшоты остаются читаемыми через data-only restore.
+
 Пара «дамп + `.env`» публикуется только целиком: Restic получает tar-поток через
 `--stdin-from-command`. Если `tar` не смог прочитать один из файлов, Restic
 завершается ошибкой и снапшот не публикуется. Отдельной очереди нет: неудачный
 цикл не копится, следующий цикл делает новый дамп. `uploads`, `locales`, код,
-Redis и логи в снапшот не входят.
+Redis и логи в снапшот не входят. Монтированные Docker credentials, secrets,
+локальные volumes и live Docker state не копируются.
 
 | Параметр | Значение по умолчанию |
 |---|---|
@@ -192,6 +199,61 @@ Compose и скрипт используют запись `${VAR:-default}`: **�
 `BACKUP_RESTIC_REPOSITORY` — `rclone:gdrive:remnawave-restic`. Чтобы отключить
 необязательный ping, используй отсутствующий файл или `/dev/null`, а не пустой
 путь; production staging не отключается пустой строкой.
+
+### Compose-конфигурация в снапшоте (опционально)
+
+Production Asteria использует project `bot-asteria` и три Compose-входа. Задай
+на production-хосте:
+
+```dotenv
+COMPOSE_PROJECT_NAME=bot-asteria
+BACKUP_COMPOSE_FILES=docker-compose.yml:docker-compose.local.yml:docker-compose.asteria.yml
+```
+
+`COMPOSE_PROJECT_NAME` попадает в backup как `BACKUP_COMPOSE_PROJECT` через
+`${COMPOSE_PROJECT_NAME:-}`. Project ID должен быть задан явно: через
+`COMPOSE_PROJECT_NAME=bot-asteria` или `docker compose -p bot-asteria`. В Compose
+v5.8.0 `-p` также попадает в интерполяцию; на старой версии, если
+`BACKUP_COMPOSE_PROJECT` оказался пустым, экспортируй `COMPOSE_PROJECT_NAME` для
+процесса, который запускает backup. Иначе backup откажется публиковать снапшот с
+выбранными файлами.
+
+Правила выбора:
+
+- только basenames, ровно `.yml`/`.yaml`, уникальные, в порядке списка;
+- файл должен быть читаемым непустым обычным файлом (не symlink) в том же
+  каталоге, что и app `.env` (в контейнере `/src`); glob, абсолютные пути, `..`
+  и подкаталоги запрещены;
+- список — allowlist: невыбранные override-файлы в архив не попадают;
+- при отсутствии, нечитаемости, symlink или изменении выбранного файла снапшот
+  не публикуется, а маркер свежести остаётся прежним.
+
+Тестовый стенд не должен делить с production ни Restic repository, ни project,
+ни подсеть:
+
+```dotenv
+COMPOSE_PROJECT_NAME=remnawave-bot-test
+BACKUP_COMPOSE_FILES=docker-compose.yml:docker-compose.local.yml:docker-compose.test.yml
+BACKUP_RESTIC_REPOSITORY=rclone:gdrive-test:remnawave-restic-test
+BOT_NETWORK_SUBNET=172.31.0.0/24
+BOT_NETWORK_GATEWAY=172.31.0.1
+```
+
+Production repository остаётся `rclone:gdrive:remnawave-restic`. Файл
+`docker-compose.asteria.yml` — private operator override: не коммить его в Git и
+не подменяй тестовым или чужим файлом.
+
+Общая сеть `remnawave-network` — внешняя зависимость, которой управляет оператор
+панели. Снапшот не содержит Docker network state и не меняет сети. Перед
+attach/восстановлением проверь, что сеть существует и ей управляет панель:
+
+```bash
+docker network inspect remnawave-network >/dev/null
+```
+
+Project-local сети (например `bot_network`) Compose создаёт сам. Не меняй
+network wiring в Compose ради восстановления, не добавляй `network inspect` в
+backup и не пытайся архивировать Docker socket.
 
 ## 4. Явная инициализация репозитория
 
@@ -396,17 +458,47 @@ $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
 $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
   > "$RESTORE_DIR/remnawave-backup.tar"
-tar -C "$RESTORE_DIR" -xf "$RESTORE_DIR/remnawave-backup.tar"
-chmod 600 "$RESTORE_DIR/db.dump" "$RESTORE_DIR/.env"
-tar -tvf "$RESTORE_DIR/remnawave-backup.tar"
+
+if [ -z "${EXPECTED_COMPOSE_PROJECT:-}" ]; then
+    printf 'Expected Compose project: '
+    read -r EXPECTED_COMPOSE_PROJECT
+fi
+[ -n "$EXPECTED_COMPOSE_PROJECT" ] || {
+  echo 'EXPECTED_COMPOSE_PROJECT is required' >&2
+  exit 1
+}
+sh docker/backup/restore-compose.sh \
+  --archive "$RESTORE_DIR/remnawave-backup.tar" \
+  --project "$EXPECTED_COMPOSE_PROJECT" \
+  --output "$RESTORE_DIR"
+
+# Старый двухфайловый снапшот (например первый утверждённый 16e67daf) не
+# содержит Compose metadata. Только для него — явный data-only путь:
+# sh docker/backup/restore-compose.sh \
+#   --archive "$RESTORE_DIR/remnawave-backup.tar" \
+#   --legacy-data-only \
+#   --output "$RESTORE_DIR"
+
+cat "$RESTORE_DIR/compose/project-name" 2>/dev/null || true
+cat "$RESTORE_DIR/compose/files.list" 2>/dev/null || true
 file "$RESTORE_DIR/db.dump"
 $DC exec -T postgres pg_restore --list < "$RESTORE_DIR/db.dump" >/dev/null
 ```
 
-В tar должны быть ровно два члена: `db.dump` и `.env`. После распаковки в
-`$RESTORE_DIR` временно лежит и сам `remnawave-backup.tar`; это нормально, его
-удалит `trap` (или явный `rm` ниже). Плейнтекст tar/dump не кладётся в
-репозиторий; каталог создаётся через `mktemp` вне его.
+Helper не распаковывает архив через `tar -xf` и не исполняет manifest: он
+проверяет точный набор членов и типы файлов, стримит только `db.dump`, `.env` и
+`compose/*` в приватный scratch, а в `$RESTORE_DIR` кладёт результат лишь после
+совпадения `compose/project-name` с ожидаемым project. При mismatch каталог
+`$RESTORE_DIR` не получает ни Compose-файлов, ни данных. Для снапшота с Compose
+metadata в `$RESTORE_DIR/compose/files.list` лежит авторитетный порядок; в
+`compose/project-name` — записанный project ID. В `$RESTORE_DIR` временно лежит
+и сам `remnawave-backup.tar`; это нормально, его удалит `trap` (или явный `rm`
+ниже). Плейнтекст tar/dump не кладётся в репозиторий; каталог создаётся через
+`mktemp` вне его.
+
+Проверь входы до применения: сравни `compose/files.list` с ожидаемым порядком,
+просмотри сами файлы и только потом используй явные `-p`/`-f`. Не применяй
+восстановленный Compose поверх уже запущенного stack.
 
 ### 8.2. Зафиксировать фактическую БД и восстановить в свежую
 
@@ -576,7 +668,7 @@ backup/prune.
 2. Собери/скачай образы `bot` и `backup`, чтобы `compose run` мог их использовать:
 
 ```bash
-DC="docker compose -f docker-compose.yml -f docker-compose.local.yml"
+DC="docker compose -p bot-asteria -f docker-compose.yml -f docker-compose.local.yml"
 # + -f docker-compose.asteria.yml, если он есть
 $DC --profile backup build bot backup
 ```
@@ -590,7 +682,7 @@ $DC --profile backup build bot backup
 set -eu
 umask 077
 
-DC="docker compose -f docker-compose.yml -f docker-compose.local.yml"
+DC="docker compose -p bot-asteria -f docker-compose.yml -f docker-compose.local.yml"
 # + -f docker-compose.asteria.yml, если он есть
 # export BACKUP_RESTIC_REPOSITORY='rclone:gdrive:remnawave-restic'
 # export BACKUP_RCLONE_CONFIG_DIR='/etc/remnawave-backup/rclone'
@@ -613,10 +705,45 @@ $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
 $DC --profile backup run --rm --no-deps -T --entrypoint restic backup \
   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
   > "$RESTORE_DIR/remnawave-backup.tar"
-tar -C "$RESTORE_DIR" -xf "$RESTORE_DIR/remnawave-backup.tar"
-chmod 600 "$RESTORE_DIR/db.dump" "$RESTORE_DIR/.env"
-tar -tvf "$RESTORE_DIR/remnawave-backup.tar"
+
+if [ -z "${EXPECTED_COMPOSE_PROJECT:-}" ]; then
+    printf 'Expected Compose project: '
+    read -r EXPECTED_COMPOSE_PROJECT
+fi
+[ -n "$EXPECTED_COMPOSE_PROJECT" ] || {
+  echo 'EXPECTED_COMPOSE_PROJECT is required' >&2
+  exit 1
+}
+sh docker/backup/restore-compose.sh \
+  --archive "$RESTORE_DIR/remnawave-backup.tar" \
+  --project "$EXPECTED_COMPOSE_PROJECT" \
+  --output "$RESTORE_DIR"
+
+# Старый двухфайловый снапшот (например первый утверждённый 16e67daf) не
+# содержит Compose metadata. Только для него — явный data-only путь:
+# sh docker/backup/restore-compose.sh \
+#   --archive "$RESTORE_DIR/remnawave-backup.tar" \
+#   --legacy-data-only \
+#   --output "$RESTORE_DIR"
+
 file "$RESTORE_DIR/db.dump"
+
+# Для снапшота с Compose metadata: project и порядок -f берутся из проверенного
+# restore-каталога, а не из рабочего дерева.
+if [ -d "$RESTORE_DIR/compose" ]; then
+    DC="docker compose --project-directory . -p bot-asteria"
+    DC="$DC -f $RESTORE_DIR/compose/docker-compose.yml"
+    DC="$DC -f $RESTORE_DIR/compose/docker-compose.local.yml"
+    if [ -f "$RESTORE_DIR/compose/docker-compose.asteria.yml" ]; then
+        DC="$DC -f $RESTORE_DIR/compose/docker-compose.asteria.yml"
+    fi
+else
+    # Legacy-снапшот без compose/: проверенные файлы репозитория, тот же -p.
+    DC="docker compose -p bot-asteria -f docker-compose.yml -f docker-compose.local.yml"
+    if [ -f docker-compose.asteria.yml ]; then
+        DC="$DC -f docker-compose.asteria.yml"
+    fi
+fi
 ```
 
 4. После проверки пары установи восстановленный `.env` как live-конфигурацию:
@@ -641,6 +768,13 @@ $DC exec -T redis redis-cli ping
 
 ## 9. Безопасность и ограничения
 
+- `BACKUP_COMPOSE_FILES` — явный allowlist; невыбранные файлы не попадают даже
+  в staging. Восстановленные Compose-файлы содержат пути/значения конкретного
+  хоста: держи их в приватном restore-каталоге, не коммить private override и не
+  применяй поверх запущенного stack. Helper проверяет project до записи.
+- `remnawave-network` — внешняя общая сеть оператора панели. Снапшот не содержит
+  Docker network state и не меняет сети; project-local сети Compose создаёт сам.
+  Не меняй network wiring ради восстановления.
 - Restic шифрует содержимое и метаданные репозитория. Но `.env` внутри снапшота
   содержит все секреты приложения, поэтому доступ к репозиторию и паролю должен
   быть ограничен.

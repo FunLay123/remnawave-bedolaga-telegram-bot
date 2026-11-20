@@ -29,6 +29,8 @@ HEALTHCHECK_MAX_AGE_SECONDS=${BACKUP_RESTIC_HEALTHCHECK_MAX_AGE_SECONDS:-900}
 TMPFS_SIZE=${BACKUP_RESTIC_TMPFS_SIZE:-256m}
 MIN_FREE_MB=${BACKUP_RESTIC_MIN_FREE_MB:-16}
 REQUIRE_TMPFS=${BACKUP_RESTIC_REQUIRE_TMPFS:-true}
+COMPOSE_FILES=${BACKUP_COMPOSE_FILES:-}
+COMPOSE_PROJECT=${BACKUP_COMPOSE_PROJECT:-}
 
 # Standard Restic overrides win.  The fallback is deliberately a dedicated
 # repository, never the legacy remnawave-bot/ GFS folder.
@@ -114,6 +116,27 @@ valid_host() {
     return 0
 }
 
+valid_compose_project() {
+    case "${1:-}" in
+        ''|*[!a-z0-9_-]*) return 1 ;;
+        [a-z0-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_compose_basename() {
+    case "${1:-}" in
+        ''|.|..|*/*|*[!A-Za-z0-9._-]*) return 1 ;;
+        [A-Za-z0-9]*.yml|*.yaml) ;;
+        *) return 1 ;;
+    esac
+    # The first character must not make the name look like a tar option.
+    case "${1:-}" in
+        [A-Za-z0-9]*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 check_uint() {
     if ! valid_uint "$2" "$3" "$4"; then
         error "invalid $1=$2; expected an integer from $3 to $4"
@@ -128,10 +151,76 @@ legacy_repository() {
     esac
 }
 
+check_compose_config() {
+    [ -n "$COMPOSE_FILES" ] || return 0
+
+    if ! valid_compose_project "$COMPOSE_PROJECT"; then
+        error "BACKUP_COMPOSE_FILES is set but BACKUP_COMPOSE_PROJECT='$COMPOSE_PROJECT' is not a valid lowercase Compose project name; set COMPOSE_PROJECT_NAME or pass -p explicitly"
+        return 1
+    fi
+
+    case "$COMPOSE_FILES" in
+        *[!A-Za-z0-9._:-]*)
+            error "invalid BACKUP_COMPOSE_FILES='$COMPOSE_FILES'; use colon-separated Compose YAML basenames"
+            return 1
+            ;;
+    esac
+    case "$COMPOSE_FILES" in
+        :*|*:|*::*)
+            error "invalid BACKUP_COMPOSE_FILES='$COMPOSE_FILES'; empty list entry"
+            return 1
+            ;;
+    esac
+
+    env_dir=$(dirname "$ENV_FILE")
+    seen=' '
+    old_ifs=$IFS
+    IFS=:
+    set -f
+    set -- $COMPOSE_FILES
+    set +f
+    IFS=$old_ifs
+
+    for name do
+        if ! valid_compose_basename "$name"; then
+            error "invalid Compose input '$name'; expected a unique .yml/.yaml basename in $env_dir"
+            return 1
+        fi
+        case "$seen" in
+            *" $name "*)
+                error "duplicate Compose input '$name' in BACKUP_COMPOSE_FILES"
+                return 1
+                ;;
+        esac
+        seen="$seen$name "
+
+        source_file="$env_dir/$name"
+        if [ -L "$source_file" ]; then
+            error "Compose input is a symlink, refusing to follow it: $source_file"
+            return 1
+        fi
+        if [ ! -f "$source_file" ]; then
+            error "Compose input is missing or not a regular file: $source_file"
+            return 1
+        fi
+        if [ ! -r "$source_file" ]; then
+            error "Compose input is unreadable: $source_file"
+            return 1
+        fi
+        if [ ! -s "$source_file" ]; then
+            error "Compose input is empty: $source_file"
+            return 1
+        fi
+    done
+}
+
 validate_config() {
     if [ -z "$ENV_FILE" ]; then
         error 'ENV_FILE is empty'
         return 1
+    fi
+    if [ "$MODE" != maintenance ]; then
+        check_compose_config || return 1
     fi
     if [ -z "$RESTIC_REPOSITORY" ]; then
         error 'RESTIC_REPOSITORY / BACKUP_RESTIC_REPOSITORY is empty'
@@ -413,6 +502,64 @@ backup_failed() {
     return "$code"
 }
 
+stage_compose_inputs() {
+    [ -n "$COMPOSE_FILES" ] || return 0
+
+    compose_dir="$WORK_DIR/compose"
+    if ! mkdir -m 700 "$compose_dir"; then
+        error "cannot create private Compose stage: $compose_dir"
+        return 1
+    fi
+    if ! printf '%s\n' "$COMPOSE_PROJECT" > "$compose_dir/project-name"; then
+        error 'cannot stage compose/project-name'
+        return 1
+    fi
+    if ! : > "$compose_dir/files.list"; then
+        error 'cannot stage compose/files.list'
+        return 1
+    fi
+    if ! printf 'compose/project-name\ncompose/files.list\n' >> "$WORK_DIR/snapshot.members"; then
+        error 'cannot append the Compose metadata members'
+        return 1
+    fi
+
+    env_dir=$(dirname "$ENV_FILE")
+    old_ifs=$IFS
+    IFS=:
+    set -f
+    set -- $COMPOSE_FILES
+    set +f
+    IFS=$old_ifs
+
+    for name do
+        source_file="$env_dir/$name"
+        # Repeat the allowlist checks immediately before the copy.  The
+        # snapshot is refused if the operator swaps in a link or removes a
+        # selected file after startup validation.
+        if [ -L "$source_file" ] || [ ! -f "$source_file" ] || [ ! -r "$source_file" ] || [ ! -s "$source_file" ]; then
+            error "selected Compose input changed or is unsafe: $source_file"
+            return 1
+        fi
+        if ! cp "$source_file" "$compose_dir/$name"; then
+            error "cannot copy selected Compose input: $source_file"
+            return 1
+        fi
+        chmod 600 "$compose_dir/$name" 2>/dev/null || true
+        if [ ! -s "$compose_dir/$name" ]; then
+            error "staged Compose input is empty: $name"
+            return 1
+        fi
+        if ! printf '%s\n' "$name" >> "$compose_dir/files.list"; then
+            error 'cannot record compose/files.list'
+            return 1
+        fi
+        if ! printf 'compose/%s\n' "$name" >> "$WORK_DIR/snapshot.members"; then
+            error 'cannot record the Compose tar member'
+            return 1
+        fi
+    done
+}
+
 run_backup() {
     WORK_DIR="$STAGE_DIR/work.$$"
     rm -rf "$WORK_DIR"
@@ -455,10 +602,22 @@ run_backup() {
         return 1
     fi
 
+    # A single ordered member list keeps GNU tar (dev/tests) and BusyBox tar
+    # (the Alpine backup image) in the same member order: BusyBox places -T
+    # entries before positional file operands, so all members come from here.
+    if ! printf 'db.dump\n.env\n' > "$WORK_DIR/snapshot.members"; then
+        backup_failed 1 'cannot stage the tar member list'
+        return 1
+    fi
+    if ! stage_compose_inputs; then
+        backup_failed 1 'cannot stage selected Compose inputs'
+        return 1
+    fi
+
     log "snapshot: restic backup --stdin-filename remnawave-backup.tar (dry-run=$DRY_RUN)"
     set -- backup
     [ "$DRY_RUN" -eq 1 ] && set -- backup --dry-run
-    restic "$@" --no-cache \
+    set -- "$@" --no-cache \
         --host "$RESTIC_HOST" \
         --group-by "$RESTIC_GROUP_BY" \
         --tag "$RESTIC_TAG" \
@@ -466,7 +625,8 @@ run_backup() {
         --tag env \
         --stdin-filename remnawave-backup.tar \
         --stdin-from-command \
-        -- tar -C "$WORK_DIR" -cf - db.dump .env
+        -- tar -C "$WORK_DIR" -cf - -T "$WORK_DIR/snapshot.members"
+    restic "$@"
     restic_rc=$?
 
     if [ "$restic_rc" -ne 0 ]; then
@@ -670,6 +830,34 @@ run_self_test() {
     fi
     if legacy_repository 'rclone:gdrive:remnawave-restic'; then
         echo 'self-test FAIL: dedicated repository treated as legacy' >&2
+        return 1
+    fi
+    if ! valid_compose_project bot-asteria; then
+        echo 'self-test FAIL: valid_compose_project rejected bot-asteria' >&2
+        return 1
+    fi
+    if valid_compose_project Bot-Asteria; then
+        echo 'self-test FAIL: valid_compose_project accepted uppercase' >&2
+        return 1
+    fi
+    if valid_compose_project -bot-asteria; then
+        echo 'self-test FAIL: valid_compose_project accepted a leading dash' >&2
+        return 1
+    fi
+    if ! valid_compose_basename docker-compose.asteria.yml; then
+        echo 'self-test FAIL: valid_compose_basename rejected docker-compose.asteria.yml' >&2
+        return 1
+    fi
+    if valid_compose_basename ../docker-compose.yml; then
+        echo 'self-test FAIL: valid_compose_basename accepted a path' >&2
+        return 1
+    fi
+    if valid_compose_basename docker-compose.json; then
+        echo 'self-test FAIL: valid_compose_basename accepted a non-YAML name' >&2
+        return 1
+    fi
+    if valid_compose_basename .env; then
+        echo 'self-test FAIL: valid_compose_basename accepted .env' >&2
         return 1
     fi
     echo 'self-test ok'

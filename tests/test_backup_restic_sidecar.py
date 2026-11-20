@@ -8,6 +8,7 @@ that is the artifact Restic stores and the operator restores.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import shlex
@@ -25,6 +26,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'docker' / 'backup' / 'backup.sh'
 HEALTHCHECK = ROOT / 'docker' / 'backup' / 'healthcheck.sh'
+RESTORE_HELPER = ROOT / 'docker' / 'backup' / 'restore-compose.sh'
 COMPOSE = ROOT / 'docker-compose.yml'
 DOCKERFILE = ROOT / 'docker' / 'backup' / 'Dockerfile'
 
@@ -147,6 +149,16 @@ class Harness:
             return []
         return sorted(self.stage.iterdir())
 
+    def run_helper(self, *args: str, timeout: float = 20) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603 - fixed repository script and test harness
+            [SH, str(RESTORE_HELPER), *args],
+            capture_output=True,
+            text=True,
+            env=self.env,
+            timeout=timeout,
+            check=False,
+        )
+
 
 def _safe_environment() -> dict[str, str]:
     # Never inherit a developer's real RESTIC_*/RCLONE_*/BACKUP_* secrets.
@@ -221,6 +233,80 @@ def harness(tmp_path: Path) -> Harness:
     )
 
 
+PROD_COMPOSE_INPUTS = {
+    'docker-compose.yml': b'services:\n  bot:\n    image: synthetic:base\n',
+    'docker-compose.local.yml': b'services:\n  bot:\n    environment:\n      SYNTHETIC_LOCAL: "1"\n',
+    'docker-compose.asteria.yml': b'services:\n  bot:\n    networks:\n      - synthetic-external\n',
+}
+
+
+def _write_compose_inputs(harness: Harness, inputs: dict[str, bytes] | None = None) -> dict[str, bytes]:
+    payload = dict(PROD_COMPOSE_INPUTS if inputs is None else inputs)
+    for name, content in payload.items():
+        (harness.app_env.parent / name).write_bytes(content)
+    return payload
+
+
+def _enable_compose_capture(
+    harness: Harness,
+    names: list[str] | None = None,
+    project: str = 'bot-asteria',
+) -> None:
+    selected = list(PROD_COMPOSE_INPUTS) if names is None else names
+    harness.env['BACKUP_COMPOSE_FILES'] = ':'.join(selected)
+    harness.env['BACKUP_COMPOSE_PROJECT'] = project
+
+
+def _add_tar_bytes(archive: tarfile.TarFile, name: str, data: bytes, mode: int = 0o600) -> None:
+    info = tarfile.TarInfo(name)
+    info.size = len(data)
+    info.mode = mode
+    info.mtime = 0
+    archive.addfile(info, io.BytesIO(data))
+
+
+def _add_tar_symlink(archive: tarfile.TarFile, name: str, target: str) -> None:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.SYMTYPE
+    info.linkname = target
+    info.mode = 0o777
+    info.mtime = 0
+    archive.addfile(info)
+
+
+def _write_legacy_archive(path: Path) -> None:
+    with tarfile.open(path, mode='w:') as archive:
+        _add_tar_bytes(archive, 'db.dump', b'legacy-db-dump\n')
+        _add_tar_bytes(archive, '.env', b'LEGACY_ENV=1\n')
+
+
+def _write_compose_archive(
+    path: Path,
+    *,
+    project: str = 'bot-asteria',
+    files: tuple[str, ...] = ('docker-compose.yml',),
+    manifest: str | None = None,
+    symlinks: dict[str, str] | None = None,
+    extra: tuple[tuple[str, bytes], ...] = (),
+) -> None:
+    links = {} if symlinks is None else symlinks
+    listed = '' if manifest is None else manifest
+    if manifest is None:
+        listed = ''.join(f'{name}\n' for name in files)
+    with tarfile.open(path, mode='w:') as archive:
+        _add_tar_bytes(archive, 'db.dump', b'synthetic-db-dump\n')
+        _add_tar_bytes(archive, '.env', b'POSTGRES_PASSWORD=synthetic\n')
+        _add_tar_bytes(archive, 'compose/project-name', f'{project}\n'.encode())
+        _add_tar_bytes(archive, 'compose/files.list', listed.encode())
+        for name in files:
+            if name in links:
+                _add_tar_symlink(archive, f'compose/{name}', links[name])
+            else:
+                _add_tar_bytes(archive, f'compose/{name}', f'content:{name}\n'.encode())
+        for name, content in extra:
+            _add_tar_bytes(archive, name, content)
+
+
 def test_missing_env_fails_without_snapshot_and_keeps_freshness(harness: Harness) -> None:
     harness.app_env.unlink()
     before = harness.marker.read_bytes()
@@ -289,6 +375,69 @@ def test_snapshot_tar_contains_exactly_dump_and_env(harness: Harness) -> None:
     assert harness.stage_entries() == []
 
 
+def test_empty_compose_file_list_keeps_legacy_two_member_snapshot(harness: Harness) -> None:
+    harness.env['BACKUP_COMPOSE_PROJECT'] = 'bot-asteria'
+    harness.env['BACKUP_COMPOSE_FILES'] = ''
+
+    result = harness.run('--once')
+
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(harness.capture, mode='r:') as archive:
+        assert [member.name for member in archive.getmembers()] == ['db.dump', '.env']
+
+
+def test_compose_capture_archives_exact_ordered_prod_inputs(harness: Harness) -> None:
+    inputs = _write_compose_inputs(harness)
+    names = list(inputs)
+    _enable_compose_capture(harness, names)
+    (harness.app_env.parent / 'docker-compose.test.yml').write_bytes(b'not selected\n')
+
+    result = harness.run('--once')
+
+    assert result.returncode == 0, result.stderr
+    expected_members = [
+        'db.dump',
+        '.env',
+        'compose/project-name',
+        'compose/files.list',
+        *(f'compose/{name}' for name in names),
+    ]
+    with tarfile.open(harness.capture, mode='r:') as archive:
+        members = archive.getmembers()
+        assert [member.name for member in members] == expected_members
+        assert all(member.isfile() for member in members)
+        assert archive.extractfile('compose/project-name').read() == b'bot-asteria\n'
+        assert archive.extractfile('compose/files.list').read() == (
+            b'docker-compose.yml\ndocker-compose.local.yml\ndocker-compose.asteria.yml\n'
+        )
+        for name, content in inputs.items():
+            assert archive.extractfile(f'compose/{name}').read() == content
+    assert 'docker-compose.test.yml' not in expected_members
+    assert harness.marker.read_text(encoding='utf-8').strip().isdigit()
+    assert harness.stage_entries() == []
+
+
+def test_compose_capture_preserves_selected_order(harness: Harness) -> None:
+    names = ['docker-compose.asteria.yml', 'docker-compose.yml', 'docker-compose.local.yml']
+    inputs = _write_compose_inputs(harness)
+    _enable_compose_capture(harness, names)
+
+    result = harness.run('--once')
+
+    assert result.returncode == 0, result.stderr
+    with tarfile.open(harness.capture, mode='r:') as archive:
+        assert [member.name for member in archive.getmembers()] == [
+            'db.dump',
+            '.env',
+            'compose/project-name',
+            'compose/files.list',
+            *(f'compose/{name}' for name in names),
+        ]
+        assert archive.extractfile('compose/files.list').read() == ''.join(f'{name}\n' for name in names).encode()
+        for name in names:
+            assert archive.extractfile(f'compose/{name}').read() == inputs[name]
+
+
 def test_backup_uses_required_pg_dump_and_restic_contract(harness: Harness) -> None:
     result = harness.run('--once')
 
@@ -307,7 +456,8 @@ def test_backup_uses_required_pg_dump_and_restic_contract(harness: Harness) -> N
     assert '--stdin-from-command' in backup_call
     assert '--no-cache' in backup_call
     assert 'tar -C' in backup_call
-    assert 'db.dump .env' in backup_call
+    assert '-T ' in backup_call
+    assert 'snapshot.members' in backup_call
 
 
 def test_once_never_runs_retention_and_maintenance_is_explicit(harness: Harness) -> None:
@@ -381,6 +531,298 @@ def test_invalid_configuration_is_refused_before_any_work(harness: Harness, name
     assert harness.pg_dump_calls() == []
     assert harness.restic_calls() == []
     assert harness.marker.read_text(encoding='utf-8') == '100\n'
+
+
+@pytest.mark.parametrize(
+    'project',
+    ['', 'Bot-Asteria', '-bot-asteria', '_bot-asteria', 'bot/asteria', 'bot asteria', 'bot.asteria'],
+)
+def test_invalid_compose_project_prevents_snapshot(harness: Harness, project: str) -> None:
+    _write_compose_inputs(harness)
+    _enable_compose_capture(harness, project=project)
+    before = harness.marker.read_bytes()
+
+    result = harness.run('--once')
+
+    assert result.returncode != 0
+    assert harness.pg_dump_calls() == []
+    assert harness.restic_calls() == []
+    assert harness.marker.read_bytes() == before
+    assert harness.stage_entries() == []
+
+
+@pytest.mark.parametrize(
+    'files_value',
+    [
+        'docker-compose.yml:',
+        ':docker-compose.yml',
+        'docker-compose.yml::docker-compose.local.yml',
+        'docker-compose.yml:docker-compose.yml',
+        '../docker-compose.yml',
+        'dir/docker-compose.yml',
+        'docker-compose.json',
+        '.env',
+        'docker-compose.yml:*',
+        'docker-compose.yml:.env',
+    ],
+)
+def test_invalid_compose_file_allowlist_prevents_snapshot(harness: Harness, files_value: str) -> None:
+    _write_compose_inputs(harness)
+    harness.env['BACKUP_COMPOSE_FILES'] = files_value
+    harness.env['BACKUP_COMPOSE_PROJECT'] = 'bot-asteria'
+    before = harness.marker.read_bytes()
+
+    result = harness.run('--once')
+
+    assert result.returncode != 0
+    assert harness.pg_dump_calls() == []
+    assert harness.restic_calls() == []
+    assert harness.marker.read_bytes() == before
+    assert harness.stage_entries() == []
+
+
+def test_missing_selected_compose_file_prevents_snapshot(harness: Harness) -> None:
+    _write_compose_inputs(harness)
+    missing = harness.app_env.parent / 'docker-compose.missing.yml'
+    missing.unlink(missing_ok=True)
+    _enable_compose_capture(
+        harness,
+        ['docker-compose.yml', 'docker-compose.missing.yml'],
+    )
+    before = harness.marker.read_bytes()
+
+    result = harness.run('--once')
+
+    assert result.returncode != 0
+    assert harness.pg_dump_calls() == []
+    assert harness.restic_calls() == []
+    assert harness.marker.read_bytes() == before
+    assert harness.stage_entries() == []
+    assert 'docker-compose.missing.yml' in (result.stdout + result.stderr)
+
+
+def test_symlinked_selected_compose_file_prevents_snapshot(harness: Harness) -> None:
+    target = harness.app_env.parent / 'docker-compose.real.yml'
+    target.write_bytes(b'services: {}\n')
+    link = harness.app_env.parent / 'docker-compose.yml'
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip('symlink creation is not available')
+    _enable_compose_capture(harness, ['docker-compose.yml'])
+    before = harness.marker.read_bytes()
+
+    result = harness.run('--once')
+
+    assert result.returncode != 0
+    assert harness.pg_dump_calls() == []
+    assert harness.restic_calls() == []
+    assert harness.marker.read_bytes() == before
+    assert harness.stage_entries() == []
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX permissions are not enforceable on Windows')
+def test_unreadable_selected_compose_file_prevents_snapshot(harness: Harness) -> None:
+    if hasattr(os, 'geteuid') and os.geteuid() == 0:
+        pytest.skip('root can read mode-zero files')
+    inputs = _write_compose_inputs(harness)
+    unreadable = harness.app_env.parent / 'docker-compose.local.yml'
+    unreadable.chmod(0o000)
+    _enable_compose_capture(harness)
+    before = harness.marker.read_bytes()
+    try:
+        result = harness.run('--once')
+    finally:
+        unreadable.chmod(0o600)
+
+    assert result.returncode != 0
+    assert harness.pg_dump_calls() == []
+    assert harness.restic_calls() == []
+    assert harness.marker.read_bytes() == before
+    assert harness.stage_entries() == []
+    assert inputs
+
+
+def test_restore_helper_extracts_project_checked_inputs(harness: Harness, tmp_path: Path) -> None:
+    inputs = _write_compose_inputs(harness)
+    _enable_compose_capture(harness)
+    assert harness.run('--once').returncode == 0
+    output = tmp_path / 'restore-ok'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(harness.capture), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode == 0, result.stderr
+    assert (output / 'compose' / 'project-name').read_bytes() == b'bot-asteria\n'
+    assert (output / 'compose' / 'files.list').read_bytes() == (
+        b'docker-compose.yml\ndocker-compose.local.yml\ndocker-compose.asteria.yml\n'
+    )
+    for name, content in inputs.items():
+        assert (output / 'compose' / name).read_bytes() == content
+    assert (output / 'db.dump').read_bytes() == b'synthetic-db-dump\n'
+    assert (output / '.env').read_bytes() == b'POSTGRES_PASSWORD=synthetic\n'
+
+
+def test_restore_helper_rejects_project_mismatch_without_side_effects(harness: Harness, tmp_path: Path) -> None:
+    _write_compose_inputs(harness)
+    _enable_compose_capture(harness)
+    assert harness.run('--once').returncode == 0
+    output = tmp_path / 'restore-mismatch'
+    output.mkdir()
+    sentinel = output / 'sentinel'
+    sentinel.write_text('keep\n', encoding='utf-8')
+
+    result = harness.run_helper('--archive', str(harness.capture), '--project', 'bot-other', '--output', str(output))
+
+    assert result.returncode != 0
+    assert 'project' in (result.stdout + result.stderr).lower()
+    assert sentinel.read_text(encoding='utf-8') == 'keep\n'
+    assert sorted(path.name for path in output.iterdir()) == ['sentinel']
+    assert not (output / 'compose').exists()
+    assert not (output / '.env').exists()
+    assert not (output / 'db.dump').exists()
+
+
+def test_restore_helper_legacy_path_extracts_data_only(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'legacy.tar'
+    _write_legacy_archive(archive)
+    output = tmp_path / 'legacy-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--legacy-data-only', '--output', str(output))
+
+    assert result.returncode == 0, result.stderr
+    assert 'legacy' in (result.stdout + result.stderr).lower()
+    assert (output / 'db.dump').read_bytes() == b'legacy-db-dump\n'
+    assert (output / '.env').read_bytes() == b'LEGACY_ENV=1\n'
+    assert sorted(path.name for path in output.iterdir()) == ['.env', 'db.dump']
+    assert not (output / 'compose').exists()
+
+
+def test_restore_helper_requires_explicit_legacy_mode(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'legacy.tar'
+    _write_legacy_archive(archive)
+    output = tmp_path / 'legacy-required'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode != 0
+    assert 'legacy' in (result.stdout + result.stderr).lower()
+    assert list(output.iterdir()) == []
+
+
+def test_restore_helper_rejects_legacy_flag_for_compose_archive(harness: Harness, tmp_path: Path) -> None:
+    _write_compose_inputs(harness)
+    _enable_compose_capture(harness)
+    assert harness.run('--once').returncode == 0
+    output = tmp_path / 'legacy-flag'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(harness.capture), '--legacy-data-only', '--output', str(output))
+
+    assert result.returncode != 0
+    assert list(output.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    'manifest',
+    [
+        'docker-compose.yml\ndocker-compose.yml\n',
+        '../docker-compose.yml\n',
+        'docker-compose.yml\n\n',
+        'docker-compose.yml\nextra.json\n',
+        'docker-compose.yml\r\n',
+        '',
+    ],
+)
+def test_restore_helper_rejects_invalid_files_list(harness: Harness, tmp_path: Path, manifest: str) -> None:
+    archive = tmp_path / 'invalid-list.tar'
+    _write_compose_archive(archive, manifest=manifest)
+    output = tmp_path / 'invalid-list-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode != 0
+    assert list(output.iterdir()) == []
+
+
+def test_restore_helper_rejects_unsafe_member_types(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'symlink-member.tar'
+    _write_compose_archive(
+        archive,
+        symlinks={'docker-compose.yml': '/etc/passwd'},
+    )
+    output = tmp_path / 'symlink-member-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode != 0
+    assert 'regular' in (result.stdout + result.stderr).lower()
+    assert list(output.iterdir()) == []
+
+
+def test_restore_helper_rejects_extra_members_without_writing(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'extra-member.tar'
+    _write_compose_archive(
+        archive,
+        extra=(('../escape', b'escape\n'),),
+    )
+    output = tmp_path / 'extra-member-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode != 0
+    assert list(output.iterdir()) == []
+    assert not (tmp_path / 'escape').exists()
+
+
+def test_restore_helper_rejects_archive_project_content_mismatch(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'project-content.tar'
+    _write_compose_archive(archive, project='bot-other')
+    output = tmp_path / 'project-content-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode != 0
+    assert list(output.iterdir()) == []
+
+
+def test_restore_helper_rejects_symlinked_archive(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'legacy.tar'
+    _write_legacy_archive(archive)
+    link = tmp_path / 'legacy-link.tar'
+    try:
+        link.symlink_to(archive)
+    except (OSError, NotImplementedError):
+        pytest.skip('symlink creation is not available')
+    output = tmp_path / 'symlink-archive-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(link), '--legacy-data-only', '--output', str(output))
+
+    assert result.returncode != 0
+    assert list(output.iterdir()) == []
+
+
+def test_restore_helper_inspects_ordered_inputs(harness: Harness, tmp_path: Path) -> None:
+    _write_compose_inputs(harness)
+    _enable_compose_capture(harness)
+    assert harness.run('--once').returncode == 0
+
+    result = harness.run_helper('--archive', str(harness.capture), '--inspect')
+
+    assert result.returncode == 0, result.stderr
+    assert 'project: bot-asteria' in result.stdout
+    positions = [
+        result.stdout.index(name)
+        for name in ('docker-compose.yml', 'docker-compose.local.yml', 'docker-compose.asteria.yml')
+    ]
+    assert positions == sorted(positions)
 
 
 def test_healthcheck_rejects_missing_corrupt_future_and_stale_markers(harness: Harness) -> None:
@@ -552,6 +994,8 @@ def test_compose_keeps_backup_optional_and_secrets_out_of_env() -> None:
     assert environment['RCLONE_CONTIMEOUT'] == '${RCLONE_CONTIMEOUT:-10s}'
     assert environment['RCLONE_RETRIES'] == '${RCLONE_RETRIES:-3}'
     assert environment['BACKUP_RESTIC_REQUIRE_TMPFS'] == '${BACKUP_RESTIC_REQUIRE_TMPFS:-true}'
+    assert environment['BACKUP_COMPOSE_FILES'] == '${BACKUP_COMPOSE_FILES:-}'
+    assert environment['BACKUP_COMPOSE_PROJECT'] == '${COMPOSE_PROJECT_NAME:-}'
     assert 'RCLONE_CONFIG_GDRIVE_TOKEN' not in environment
     assert 'RCLONE_CONFIG_GCRYPT_PASSWORD' not in environment
     assert 'RESTIC_PASSWORD' not in environment
@@ -716,6 +1160,40 @@ def test_restore_runbooks_avoid_hardcoded_rename_and_use_private_tmpdir() -> Non
         assert 'mktemp -d' in text
         assert 'umask 077' in text
         assert '< "$RESTORE_DIR/db.dump"' in text
+
+
+def test_docs_document_compose_capture_contract_and_legacy_path() -> None:
+    backup_doc = (ROOT / 'docs' / 'backups-google-drive.md').read_text(encoding='utf-8')
+    restore_doc = (ROOT / 'docker' / 'backup' / 'RESTORE.md').read_text(encoding='utf-8')
+
+    for text in (backup_doc, restore_doc):
+        assert 'BACKUP_COMPOSE_FILES' in text
+        assert 'BACKUP_COMPOSE_PROJECT' in text
+        assert 'restore-compose.sh' in text
+        assert '--legacy-data-only' in text
+        assert 'compose/project-name' in text
+        assert 'compose/files.list' in text
+        assert '16e67daf' in text
+        assert ('BACKUP_COMPOSE_FILES=docker-compose.yml:docker-compose.local.yml:docker-compose.asteria.yml') in text
+        assert '-p bot-asteria' in text
+
+    assert '-p bot-asteria' in backup_doc
+    assert 'BACKUP_RESTIC_REPOSITORY=rclone:gdrive:remnawave-restic' in backup_doc
+    assert 'remnawave-restic-test' in backup_doc
+    assert 'remnawave-bot-test' in backup_doc
+    assert 'BOT_NETWORK_SUBNET=172.31.0.0/24' in backup_doc
+    assert 'remnawave-network' in backup_doc
+
+
+def test_checked_in_config_keeps_compose_capture_opt_in() -> None:
+    env_example = (ROOT / '.env.example').read_text(encoding='utf-8')
+    compose_text = COMPOSE.read_text(encoding='utf-8')
+
+    assert '\nBACKUP_COMPOSE_FILES=' not in env_example
+    assert '\nCOMPOSE_PROJECT_NAME=bot-asteria' not in env_example
+    assert 'docker-compose.asteria.yml' not in env_example
+    assert 'bot-asteria' not in compose_text
+    assert 'docker-compose.asteria.yml' not in compose_text
 
 
 def test_image_installs_and_verifies_restic_stdin_command_support() -> None:
