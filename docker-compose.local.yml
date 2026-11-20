@@ -118,4 +118,6 @@ networks:
   remnawave-network:
     name: remnawave-network
     driver: bridge
-#    external: true # Используем существующую сеть панели
+    # Этот checked-in override создаёт Compose-managed сеть, а не shared panel
+    # network. Для panel deployment нужен отдельный operator-maintained override
+    # с external: true; provenance проверяется preflight'ом в runbook.

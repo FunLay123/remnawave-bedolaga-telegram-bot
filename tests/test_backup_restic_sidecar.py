@@ -274,6 +274,15 @@ def _add_tar_symlink(archive: tarfile.TarFile, name: str, target: str) -> None:
     archive.addfile(info)
 
 
+def _add_tar_hardlink(archive: tarfile.TarFile, name: str, target: str) -> None:
+    info = tarfile.TarInfo(name)
+    info.type = tarfile.LNKTYPE
+    info.linkname = target
+    info.mode = 0o600
+    info.mtime = 0
+    archive.addfile(info)
+
+
 def _write_legacy_archive(path: Path) -> None:
     with tarfile.open(path, mode='w:') as archive:
         _add_tar_bytes(archive, 'db.dump', b'legacy-db-dump\n')
@@ -287,9 +296,13 @@ def _write_compose_archive(
     files: tuple[str, ...] = ('docker-compose.yml',),
     manifest: str | None = None,
     symlinks: dict[str, str] | None = None,
+    hardlinks: dict[str, str] | None = None,
+    contents: dict[str, bytes] | None = None,
     extra: tuple[tuple[str, bytes], ...] = (),
 ) -> None:
     links = {} if symlinks is None else symlinks
+    hard = {} if hardlinks is None else hardlinks
+    payload = {} if contents is None else contents
     listed = '' if manifest is None else manifest
     if manifest is None:
         listed = ''.join(f'{name}\n' for name in files)
@@ -301,8 +314,14 @@ def _write_compose_archive(
         for name in files:
             if name in links:
                 _add_tar_symlink(archive, f'compose/{name}', links[name])
+            elif name in hard:
+                _add_tar_hardlink(archive, f'compose/{name}', hard[name])
             else:
-                _add_tar_bytes(archive, f'compose/{name}', f'content:{name}\n'.encode())
+                _add_tar_bytes(
+                    archive,
+                    f'compose/{name}',
+                    payload.get(name, f'content:{name}\n'.encode()),
+                )
         for name, content in extra:
             _add_tar_bytes(archive, name, content)
 
@@ -436,6 +455,13 @@ def test_compose_capture_preserves_selected_order(harness: Harness) -> None:
         assert archive.extractfile('compose/files.list').read() == ''.join(f'{name}\n' for name in names).encode()
         for name in names:
             assert archive.extractfile(f'compose/{name}').read() == inputs[name]
+
+
+def test_backup_self_test_checks_tar_member_list_capability(harness: Harness) -> None:
+    result = harness.run('--self-test')
+
+    assert result.returncode == 0, result.stderr
+    assert 'self-test ok' in result.stdout
 
 
 def test_backup_uses_required_pg_dump_and_restic_contract(harness: Harness) -> None:
@@ -764,6 +790,69 @@ def test_restore_helper_rejects_unsafe_member_types(harness: Harness, tmp_path: 
     assert list(output.iterdir()) == []
 
 
+def test_restore_helper_rejects_hardlink_members(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'hardlink-member.tar'
+    _write_compose_archive(
+        archive,
+        files=('docker-compose.yml', 'docker-compose.local.yml'),
+        hardlinks={'docker-compose.yml': 'compose/docker-compose.local.yml'},
+    )
+    output = tmp_path / 'hardlink-member-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode != 0
+    assert 'hardlink' in (result.stdout + result.stderr).lower()
+    assert list(output.iterdir()) == []
+
+
+def test_restore_helper_rejects_zero_length_compose_file(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'empty-compose.tar'
+    _write_compose_archive(
+        archive,
+        files=('docker-compose.yml',),
+        contents={'docker-compose.yml': b''},
+    )
+    output = tmp_path / 'empty-compose-out'
+    output.mkdir()
+
+    result = harness.run_helper('--archive', str(archive), '--project', 'bot-asteria', '--output', str(output))
+
+    assert result.returncode != 0
+    assert 'empty' in (result.stdout + result.stderr).lower()
+    assert list(output.iterdir()) == []
+
+
+def test_restore_helper_supports_one_file_and_custom_project(harness: Harness, tmp_path: Path) -> None:
+    archive = tmp_path / 'one-file.tar'
+    _write_compose_archive(
+        archive,
+        project='remnawave-bot-test',
+        files=('docker-compose.custom.yml',),
+    )
+    output = tmp_path / 'one-file-out'
+    output.mkdir()
+
+    result = harness.run_helper(
+        '--archive',
+        str(archive),
+        '--project',
+        'remnawave-bot-test',
+        '--output',
+        str(output),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (output / 'compose' / 'project-name').read_bytes() == b'remnawave-bot-test\n'
+    assert (output / 'compose' / 'files.list').read_bytes() == b'docker-compose.custom.yml\n'
+    assert sorted(path.name for path in (output / 'compose').iterdir()) == [
+        'docker-compose.custom.yml',
+        'files.list',
+        'project-name',
+    ]
+
+
 def test_restore_helper_rejects_extra_members_without_writing(harness: Harness, tmp_path: Path) -> None:
     archive = tmp_path / 'extra-member.tar'
     _write_compose_archive(
@@ -1086,7 +1175,7 @@ def test_cutover_ordering_and_rollback_file_restore(tmp_path: Path) -> None:
         edit_index = text.index('Set exactly in .env: POSTGRES_DB=')
         pause_index = text.index('read -r _')
         preflight_index = text.index('PRE_BOT_DB=')
-        start_index = text.index('$DC up -d --no-deps --force-recreate bot backup')
+        start_index = text.index('"${DC[@]}" up -d --no-deps --force-recreate bot backup')
         rollback_index = text.index('install -m 600 "$ENV_BACKUP" .env')
 
         assert copy_index < edit_index < pause_index < preflight_index < start_index
@@ -1152,14 +1241,17 @@ def test_restore_runbooks_clarify_tar_members_and_check_lock() -> None:
         assert 'одноразовый бот' not in text
 
 
-def test_restore_runbooks_avoid_hardcoded_rename_and_use_private_tmpdir() -> None:
+def test_restore_runbooks_keep_a_stable_private_restore_directory() -> None:
     for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
         text = path.read_text(encoding='utf-8')
         assert 'ALTER DATABASE' not in text
         assert 'POSTGRES_DB' in text
-        assert 'mktemp -d' in text
+        assert '/var/lib/remnawave-recovery' in text
+        assert 'install -d -m 700 "$RESTORE_DIR"' in text
         assert 'umask 077' in text
         assert '< "$RESTORE_DIR/db.dump"' in text
+        assert 'trap \'rm -rf "$RESTORE_DIR"\' EXIT' not in text
+        assert 'mktemp -d /tmp/remnawave-restore' not in text
 
 
 def test_docs_document_compose_capture_contract_and_legacy_path() -> None:
@@ -1175,14 +1267,92 @@ def test_docs_document_compose_capture_contract_and_legacy_path() -> None:
         assert 'compose/files.list' in text
         assert '16e67daf' in text
         assert ('BACKUP_COMPOSE_FILES=docker-compose.yml:docker-compose.local.yml:docker-compose.asteria.yml') in text
-        assert '-p bot-asteria' in text
+        assert 'EXPECTED_COMPOSE_PROJECT' in text
+        assert '-p "$project_name"' in text
 
-    assert '-p bot-asteria' in backup_doc
+    assert 'EXPECTED_COMPOSE_PROJECT=bot-asteria' in backup_doc
     assert 'BACKUP_RESTIC_REPOSITORY=rclone:gdrive:remnawave-restic' in backup_doc
     assert 'remnawave-restic-test' in backup_doc
     assert 'remnawave-bot-test' in backup_doc
     assert 'BOT_NETWORK_SUBNET=172.31.0.0/24' in backup_doc
     assert 'remnawave-network' in backup_doc
+
+
+def test_recovery_runbooks_build_compose_from_the_verified_ordered_list() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        assert 'compose_from_restore()' in text
+        assert 'compose_from_repo()' in text
+        assert 'DC+=(-f "$restore_dir/compose/$name")' in text
+        assert 'DC+=(-f "$project_dir/$name")' in text
+        assert '--project-directory "$project_dir"' in text
+        assert 'while IFS= read -r name || [ -n "$name" ]' in text
+        assert '"${DC[@]}"' in text
+        assert 'EXPECTED_COMPOSE_PROJECT' in text
+        assert 'TRUSTED_COMPOSE_FILES' in text
+        assert 'eval "$(' not in text
+        assert 'eval $(cat' not in text
+        assert 'source "$restore_dir' not in text
+        assert 'docker-compose.asteria.yml' in text
+        assert 'REPO_COMPOSE_FILES' in text
+        assert 'files.list' in text
+        assert 'recovered Compose input differs from live' in text
+
+
+def test_recovery_sections_do_not_hardcode_project_or_compose_files() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        if path.name == 'backups-google-drive.md':
+            recovery = _section(text, '### 8.1.', '## 9.')
+        else:
+            recovery = _section(text, '## 1.', '## Важно')
+        assert 'DC="docker compose' not in recovery
+        assert '-p bot-asteria' not in recovery
+        assert 'docker-compose.asteria.yml"' not in recovery
+        assert '"${DC[@]}"' in recovery
+
+
+def test_recovery_runbooks_preflight_operator_managed_panel_network() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        assert 'preflight_panel_network()' in text
+        assert 'external: true' in text
+        assert 'docker network inspect remnawave-network' in text
+        assert 'com.docker.compose.project' in text
+        assert 'PANEL_NETWORK_CONFIRM' in text
+        assert 'docker network create' not in text
+        assert 'docker-compose.local.yml' in text
+        assert 'TRUSTED_COMPOSE_FILES=(' in text
+        assert 'compose_from_repo "$PROJECT_DIR" "$EXPECTED_COMPOSE_PROJECT" "${TRUSTED_COMPOSE_FILES[@]}"' in text
+
+
+def test_recovery_runbooks_document_next_backup_and_test_isolation() -> None:
+    backup_doc = (ROOT / 'docs' / 'backups-google-drive.md').read_text(encoding='utf-8')
+    restore_doc = (ROOT / 'docker' / 'backup' / 'RESTORE.md').read_text(encoding='utf-8')
+
+    for text in (backup_doc, restore_doc):
+        assert 'запускается из checkout репозитория' in text
+        assert 'не копируется в backup-образ' in text
+        assert 'stale' in text.lower()
+        assert 'BACKUP_COMPOSE_FILES=' in text
+
+    assert 'container_name' in backup_doc
+    assert 'WEB_API_PORT=18080' in backup_doc
+    assert '172.31.0.0/24' in backup_doc
+    assert '172.31.0.1' in backup_doc
+    assert 'не переименовывай live project' in backup_doc.lower()
+    assert 'local override' in backup_doc.lower()
+    assert 'external: true' in backup_doc
+    assert 'docker-compose.local.yml' in backup_doc
+
+
+def test_local_override_network_is_managed_not_external() -> None:
+    local_compose = yaml.safe_load((ROOT / 'docker-compose.local.yml').read_text(encoding='utf-8'))
+    network = local_compose['networks']['remnawave-network']
+
+    assert network['name'] == 'remnawave-network'
+    assert network.get('external') is not True
+    assert network.get('driver') == 'bridge'
 
 
 def test_checked_in_config_keeps_compose_capture_opt_in() -> None:

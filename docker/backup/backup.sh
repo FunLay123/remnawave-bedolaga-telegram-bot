@@ -783,7 +783,34 @@ run_loop() {
     log 'loop stopped'
 }
 
+tar_member_list_self_test() {
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/remnawave-tar-selftest.XXXXXX") || return 1
+    mkdir -p "$tmp/compose" || {
+        rm -rf "$tmp"
+        return 1
+    }
+    printf 'dump\n' > "$tmp/db.dump"
+    printf 'env\n' > "$tmp/.env"
+    printf 'bot\n' > "$tmp/compose/project-name"
+    printf '%s\n' db.dump .env compose/project-name > "$tmp/members"
+    printf '%s\n' db.dump .env compose/project-name > "$tmp/expected"
+    if ! tar -C "$tmp" -cf - -T "$tmp/members" | tar -tf - > "$tmp/actual"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    if ! cmp -s "$tmp/expected" "$tmp/actual"; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    rm -rf "$tmp"
+    return 0
+}
+
 run_self_test() {
+    if ! tar_member_list_self_test; then
+        echo 'self-test FAIL: tar -T member list or order is unsupported' >&2
+        return 1
+    fi
     if ! valid_uint 12 1 9999; then
         echo 'self-test FAIL: valid_uint rejected 12' >&2
         return 1

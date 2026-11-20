@@ -144,8 +144,24 @@ member_count() {
 
 require_regular_member() {
     entry=$1
-    mode=$(tar -tvf - "$entry" < "$ARCHIVE" 2>/dev/null | awk 'NR == 1 { print substr($1, 1, 1) }')
-    [ "$mode" = '-' ] || die "archive member '$entry' is not a regular file"
+    verbose_file="$SCRATCH/verbose.member"
+    if ! tar -tvf - "$entry" < "$ARCHIVE" > "$verbose_file" 2>/dev/null; then
+        die "cannot inspect archive member '$entry'"
+    fi
+    [ -s "$verbose_file" ] || die "archive member '$entry' is missing"
+    [ "$(wc -l < "$verbose_file")" -eq 1 ] || die "archive member '$entry' matched multiple entries"
+    mode=$(awk 'NR == 1 { print substr($1, 1, 1) }' "$verbose_file")
+    case "$mode" in
+        -) ;;
+        h) die "archive member '$entry' is a hardlink" ;;
+        *) die "archive member '$entry' is not a regular file" ;;
+    esac
+    # BusyBox tar prints a hardlink with a regular-looking mode and ' -> target';
+    # GNU tar prints ' link to target'.  Reject both before tar -xO, which would
+    # otherwise produce an empty file for the link member.
+    if grep -Eq ' -> | link to ' "$verbose_file"; then
+        die "archive member '$entry' is a hardlink"
+    fi
 }
 
 check_exact_members() {
@@ -268,6 +284,9 @@ done < "$SCRATCH/expected.members"
 [ -s "$SCRATCH/extract/.env" ] || die '.env is empty'
 [ -s "$SCRATCH/extract/compose/project-name" ] || die 'compose/project-name is empty'
 [ -s "$SCRATCH/extract/compose/files.list" ] || die 'compose/files.list is empty'
+while IFS= read -r name; do
+    [ -s "$SCRATCH/extract/compose/$name" ] || die "compose/$name is empty"
+done < "$SCRATCH/validated.list"
 
 check_output_is_fresh
 install -m 600 "$SCRATCH/extract/db.dump" "$OUTPUT/db.dump" || die 'cannot install db.dump'
