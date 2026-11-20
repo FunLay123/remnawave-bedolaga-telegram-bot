@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / 'docker' / 'backup' / 'backup.sh'
 HEALTHCHECK = ROOT / 'docker' / 'backup' / 'healthcheck.sh'
 RESTORE_HELPER = ROOT / 'docker' / 'backup' / 'restore-compose.sh'
+COMPOSE_RECOVERY = ROOT / 'docker' / 'backup' / 'compose-recovery.sh'
 COMPOSE = ROOT / 'docker-compose.yml'
 DOCKERFILE = ROOT / 'docker' / 'backup' / 'Dockerfile'
 
@@ -34,6 +35,7 @@ SH = shutil.which('sh')
 BASH = shutil.which('bash')
 
 pytestmark = pytest.mark.skipif(SH is None, reason='POSIX shell is not available')
+needs_bash = pytest.mark.skipif(BASH is None, reason='bash is not available')
 
 
 FAKE_PG_DUMP = """#!/bin/sh
@@ -103,6 +105,45 @@ exit 0
 """
 
 
+FAKE_DOCKER = """#!/bin/bash
+set -u
+printf '%s\\n' "$*" >> "${FAKE_DOCKER_LOG:?}"
+case "${1:-}" in
+    ps)
+        [ "${FAKE_DOCKER_PROJECT_PRESENT:-1}" = 1 ] && printf 'cid1\\n'
+        exit 0
+        ;;
+    inspect)
+        case "$*" in
+            *config_files*) printf '%s\\n' "${FAKE_DOCKER_CONFIG_FILES:-}" ;;
+            *com.docker.compose.project*) printf '%s\\n' "${FAKE_DOCKER_PROJECT_LABEL:-}" ;;
+            *) printf '{}\\n' ;;
+        esac
+        exit 0
+        ;;
+    network)
+        [ "${FAKE_NETWORK_MISSING:-0}" = 1 ] && exit 1
+        case "$*" in
+            *'{{json .Labels}}'*) printf '%s\\n' "${FAKE_NETWORK_LABELS:-{}}" ;;
+            *com.docker.compose.project*) printf '%s\\n' "${FAKE_PANEL_PROJECT_LABEL:-}" ;;
+            *) printf '{}\\n' ;;
+        esac
+        exit 0
+        ;;
+    compose)
+        case " $* " in
+            *' config '*)
+                [ "${FAKE_COMPOSE_CONFIG_FAIL:-0}" = 1 ] && exit 1
+                printf '%s\\n' "${FAKE_COMPOSE_CONFIG:-}"
+                ;;
+        esac
+        exit 0
+        ;;
+esac
+exit 0
+"""
+
+
 @dataclass
 class Harness:
     env: dict[str, str]
@@ -164,6 +205,44 @@ def _safe_environment() -> dict[str, str]:
     # Never inherit a developer's real RESTIC_*/RCLONE_*/BACKUP_* secrets.
     blocked = ('RESTIC_', 'RCLONE_', 'BACKUP_', 'PGPASSWORD')
     return {key: value for key, value in os.environ.items() if not key.upper().startswith(blocked)}
+
+
+def _compose_recovery_env(tmp_path: Path, **overrides: str) -> dict[str, str]:
+    bin_dir = tmp_path / 'recovery-bin'
+    bin_dir.mkdir(exist_ok=True)
+    fake_docker = bin_dir / 'docker'
+    fake_docker.write_text(FAKE_DOCKER, encoding='utf-8', newline='\n')
+    fake_docker.chmod(0o755)
+
+    env = _safe_environment()
+    env.update(
+        {
+            'PATH': str(bin_dir) + os.pathsep + env.get('PATH', ''),
+            'FAKE_DOCKER_LOG': str(tmp_path / 'docker.log'),
+            'FAKE_COMPOSE_CONFIG': '',
+        }
+    )
+    env.update(overrides)
+    return env
+
+
+def _run_compose_recovery(env: dict[str, str], *args: str, timeout: float = 20) -> subprocess.CompletedProcess[str]:
+    assert BASH is not None
+    return subprocess.run(  # noqa: S603 - fixed repository script and test harness
+        [BASH, str(COMPOSE_RECOVERY), *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _fake_docker_calls(env: dict[str, str]) -> list[str]:
+    log = Path(env['FAKE_DOCKER_LOG'])
+    if not log.exists():
+        return []
+    return [line for line in log.read_text(encoding='utf-8').splitlines() if line]
 
 
 @pytest.fixture
@@ -324,6 +403,284 @@ def _write_compose_archive(
                 )
         for name, content in extra:
             _add_tar_bytes(archive, name, content)
+
+
+def _write_restore_dir(path: Path, project: str, files: dict[str, bytes]) -> Path:
+    compose = path / 'compose'
+    compose.mkdir(parents=True)
+    (compose / 'project-name').write_bytes(f'{project}\n'.encode())
+    (compose / 'files.list').write_bytes(''.join(f'{name}\n' for name in files).encode())
+    for name, content in files.items():
+        (compose / name).write_bytes(content)
+    (path / '.env').write_bytes(b'POSTGRES_PASSWORD=synthetic\n')
+    return path
+
+
+@needs_bash
+def test_compose_recovery_accepts_trusted_single_and_multi_files_without_metadata(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'docker-compose.custom.yml').write_bytes(b'services: {}\n')
+    (project / 'docker-compose.extra.yaml').write_bytes(b'services: {}\n')
+    env = _compose_recovery_env(tmp_path)
+
+    single = _run_compose_recovery(
+        env,
+        '--project',
+        'custom-project',
+        '--project-dir',
+        str(project),
+        '--file',
+        'docker-compose.custom.yml',
+        '--print-files',
+    )
+    multi = _run_compose_recovery(
+        env,
+        '--project',
+        'custom-project',
+        '--project-dir',
+        str(project),
+        '--file',
+        'docker-compose.custom.yml',
+        '--file',
+        'docker-compose.extra.yaml',
+        '--print-files',
+    )
+
+    assert single.returncode == 0, single.stderr
+    assert single.stdout.splitlines() == ['docker-compose.custom.yml']
+    assert multi.returncode == 0, multi.stderr
+    assert multi.stdout.splitlines() == [
+        'docker-compose.custom.yml',
+        'docker-compose.extra.yaml',
+    ]
+    assert _fake_docker_calls(env) == []
+
+
+@needs_bash
+@pytest.mark.parametrize(
+    ('content', 'expected'),
+    [
+        (None, 'missing'),
+        (b'POSTGRES_PASSWORD=synthetic\n', 'disabled'),
+        (b'BACKUP_COMPOSE_FILES=\n', 'disabled'),
+        (b'BACKUP_COMPOSE_FILES=secret-value\n', 'enabled'),
+    ],
+)
+def test_compose_recovery_capture_status_accepts_absent_and_empty(
+    tmp_path: Path, content: bytes | None, expected: str
+) -> None:
+    env_file = tmp_path / '.env'
+    if content is not None:
+        env_file.write_bytes(content)
+    env = _compose_recovery_env(tmp_path)
+
+    result = _run_compose_recovery(env, '--capture-status', str(env_file))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+    assert 'secret-value' not in (result.stdout + result.stderr)
+
+
+@needs_bash
+def test_compose_recovery_live_requires_project_containers(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'a.yml').write_bytes(b'services: {}\n')
+    env = _compose_recovery_env(tmp_path, FAKE_DOCKER_PROJECT_PRESENT='0')
+
+    result = _run_compose_recovery(
+        env,
+        '--project',
+        'custom-project',
+        '--project-dir',
+        str(project),
+        '--live',
+        '--print-files',
+    )
+
+    assert result.returncode != 0
+    assert 'no containers' in result.stderr.lower()
+    assert not any(call.startswith('compose ') for call in _fake_docker_calls(env))
+
+
+@needs_bash
+def test_compose_recovery_live_match_requires_exact_order_and_bytes(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'a.yml').write_bytes(b'a-live\n')
+    (project / 'b.yml').write_bytes(b'b-live\n')
+    (project / 'extra.yml').write_bytes(b'extra-live\n')
+    restore = _write_restore_dir(
+        tmp_path / 'restore',
+        'custom-project',
+        {'a.yml': b'a-live\n', 'b.yml': b'b-live\n'},
+    )
+    env = _compose_recovery_env(
+        tmp_path,
+        FAKE_DOCKER_CONFIG_FILES=f'{project.as_posix()}/a.yml,{project.as_posix()}/b.yml',
+    )
+    base = (
+        '--project',
+        'custom-project',
+        '--project-dir',
+        str(project),
+        '--restore-dir',
+        str(restore),
+        '--verify-live-match',
+    )
+
+    ok = _run_compose_recovery(env, *base)
+    assert ok.returncode == 0, ok.stderr
+
+    env['FAKE_DOCKER_CONFIG_FILES'] = f'{project.as_posix()}/b.yml,{project.as_posix()}/a.yml'
+    wrong_order = _run_compose_recovery(env, *base)
+    assert wrong_order.returncode != 0
+    assert 'a.yml' in wrong_order.stderr and 'b.yml' in wrong_order.stderr
+    assert not any(' up ' in f' {call} ' for call in _fake_docker_calls(env))
+
+    env['FAKE_DOCKER_CONFIG_FILES'] = (
+        f'{project.as_posix()}/a.yml,{project.as_posix()}/b.yml,{project.as_posix()}/extra.yml'
+    )
+    extra = _run_compose_recovery(env, *base)
+    assert extra.returncode != 0
+    assert 'extra.yml' in extra.stderr
+    assert not any(' up ' in f' {call} ' for call in _fake_docker_calls(env))
+
+
+@needs_bash
+def test_compose_recovery_live_match_rejects_byte_drift_without_secret_output(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'a.yml').write_bytes(b'SECRET_LIVE_BYTES\n')
+    restore = _write_restore_dir(
+        tmp_path / 'restore',
+        'custom-project',
+        {'a.yml': b'SECRET_RESTORED_BYTES\n'},
+    )
+    env = _compose_recovery_env(
+        tmp_path,
+        FAKE_DOCKER_CONFIG_FILES=f'{project.as_posix()}/a.yml',
+    )
+
+    result = _run_compose_recovery(
+        env,
+        '--project',
+        'custom-project',
+        '--project-dir',
+        str(project),
+        '--restore-dir',
+        str(restore),
+        '--verify-live-match',
+    )
+
+    assert result.returncode != 0
+    assert 'a.yml' in result.stderr
+    assert 'SECRET_' not in (result.stdout + result.stderr)
+    assert not any(' up ' in f' {call} ' for call in _fake_docker_calls(env))
+
+
+PANEL_CONFIG_LOCAL = """networks:
+  remnawave-network:
+    name: remnawave-network
+    driver: bridge
+"""
+PANEL_CONFIG_NONE = """networks:
+  bot_network:
+    driver: bridge
+"""
+PANEL_CONFIG_EXTERNAL = """networks:
+  remnawave-network:
+    name: remnawave-network
+    external: true
+"""
+
+
+@needs_bash
+def test_compose_recovery_panel_preflight_blocks_up_until_valid(tmp_path: Path) -> None:
+    project = tmp_path / 'project'
+    project.mkdir()
+    (project / 'base.yml').write_bytes(b'services: {}\n')
+    env = _compose_recovery_env(tmp_path, FAKE_COMPOSE_CONFIG=PANEL_CONFIG_LOCAL)
+    common = (
+        '--project',
+        'custom-project',
+        '--project-dir',
+        str(project),
+        '--file',
+        'base.yml',
+        '--preflight-network',
+    )
+
+    local = _run_compose_recovery(env, *common, '--require-panel-network', '--', 'up', '-d')
+    assert local.returncode != 0
+    assert 'external: true' in local.stderr
+    assert not any(' up ' in f' {call} ' for call in _fake_docker_calls(env))
+
+    managed_test_project = _run_compose_recovery(env, *common, '--', 'up', '-d')
+    assert managed_test_project.returncode == 0, managed_test_project.stderr
+
+    env['FAKE_COMPOSE_CONFIG'] = PANEL_CONFIG_NONE
+    no_network_without_requirement = _run_compose_recovery(env, *common, '--', 'up', '-d')
+    assert no_network_without_requirement.returncode == 0, no_network_without_requirement.stderr
+    assert any(' up ' in f' {call} ' for call in _fake_docker_calls(env))
+
+    missing_required = _run_compose_recovery(env, *common, '--require-panel-network', '--', 'up', '-d')
+    assert missing_required.returncode != 0
+    assert 'required' in missing_required.stderr.lower()
+
+    env['FAKE_COMPOSE_CONFIG_FAIL'] = '1'
+    render_failure = _run_compose_recovery(env, *common, '--', 'up', '-d')
+    assert render_failure.returncode != 0
+    assert 'render' in render_failure.stderr.lower()
+
+    env.pop('FAKE_COMPOSE_CONFIG_FAIL')
+    env['FAKE_COMPOSE_CONFIG'] = PANEL_CONFIG_EXTERNAL
+    env['FAKE_PANEL_PROJECT_LABEL'] = 'panel'
+    valid = _run_compose_recovery(
+        env,
+        *common,
+        '--require-panel-network',
+        '--panel-project',
+        'panel',
+        '--',
+        'up',
+        '-d',
+    )
+    assert valid.returncode == 0, valid.stderr
+
+    env['FAKE_PANEL_PROJECT_LABEL'] = 'other'
+    wrong_label = _run_compose_recovery(
+        env,
+        *common,
+        '--require-panel-network',
+        '--panel-project',
+        'panel',
+        '--',
+        'up',
+        '-d',
+    )
+    assert wrong_label.returncode != 0
+    assert 'label' in wrong_label.stderr.lower()
+
+    env['FAKE_PANEL_PROJECT_LABEL'] = 'panel'
+    env['FAKE_NETWORK_MISSING'] = '1'
+    missing_network = _run_compose_recovery(
+        env,
+        *common,
+        '--require-panel-network',
+        '--panel-project',
+        'panel',
+        '--',
+        'up',
+        '-d',
+    )
+    assert missing_network.returncode != 0
+    assert 'missing' in missing_network.stderr.lower()
 
 
 def test_missing_env_fails_without_snapshot_and_keeps_freshness(harness: Harness) -> None:
@@ -1175,7 +1532,7 @@ def test_cutover_ordering_and_rollback_file_restore(tmp_path: Path) -> None:
         edit_index = text.index('Set exactly in .env: POSTGRES_DB=')
         pause_index = text.index('read -r _')
         preflight_index = text.index('PRE_BOT_DB=')
-        start_index = text.index('"${DC[@]}" up -d --no-deps --force-recreate bot backup')
+        start_index = text.index('dc_recover up -d --no-deps --force-recreate bot backup')
         rollback_index = text.index('install -m 600 "$ENV_BACKUP" .env')
 
         assert copy_index < edit_index < pause_index < preflight_index < start_index
@@ -1227,7 +1584,8 @@ def test_cutover_and_rollback_unset_host_db_and_verify_effective_config() -> Non
         assert '$RESTORE_DB' in text
         assert '$ORIGINAL_DB' in text
         assert 'ROLLBACK_DIR=' in text
-        assert '/tmp/remnawave-env-rollback' in text  # noqa: S108 - documented path
+        assert 'rollback-$(date -u +%Y%m%dT%H%M%SZ)-$$' in text
+        assert '/tmp/remnawave-env-rollback' not in text  # noqa: S108 - forbidden old path
         assert '${TMPDIR' not in text
 
 
@@ -1268,7 +1626,7 @@ def test_docs_document_compose_capture_contract_and_legacy_path() -> None:
         assert '16e67daf' in text
         assert ('BACKUP_COMPOSE_FILES=docker-compose.yml:docker-compose.local.yml:docker-compose.asteria.yml') in text
         assert 'EXPECTED_COMPOSE_PROJECT' in text
-        assert '-p "$project_name"' in text
+        assert 'compose-recovery.sh' in text
 
     assert 'EXPECTED_COMPOSE_PROJECT=bot-asteria' in backup_doc
     assert 'BACKUP_RESTIC_REPOSITORY=rclone:gdrive:remnawave-restic' in backup_doc
@@ -1278,25 +1636,29 @@ def test_docs_document_compose_capture_contract_and_legacy_path() -> None:
     assert 'remnawave-network' in backup_doc
 
 
-def test_recovery_runbooks_build_compose_from_the_verified_ordered_list() -> None:
+def test_recovery_runbooks_use_the_central_bash_helper() -> None:
     for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
         text = path.read_text(encoding='utf-8')
-        assert 'compose_from_restore()' in text
-        assert 'compose_from_repo()' in text
-        assert 'DC+=(-f "$restore_dir/compose/$name")' in text
-        assert 'DC+=(-f "$project_dir/$name")' in text
-        assert '--project-directory "$project_dir"' in text
-        assert 'while IFS= read -r name || [ -n "$name" ]' in text
-        assert '"${DC[@]}"' in text
+        assert 'Bash' in text
+        assert 'одном Bash shell' in text
+        assert 'compose-recovery.sh' in text
+        assert 'dc_live()' in text
+        assert 'dc_restored()' in text
+        assert 'dc_trusted()' in text
+        assert 'dc_recover()' in text
+        assert '--verify-live-match' in text
+        assert '--capture-status' in text
+        assert '--preflight-network' in text
         assert 'EXPECTED_COMPOSE_PROJECT' in text
-        assert 'TRUSTED_COMPOSE_FILES' in text
+        assert 'read -r -a TRUSTED_COMPOSE_FILES' in text
         assert 'eval "$(' not in text
         assert 'eval $(cat' not in text
         assert 'source "$restore_dir' not in text
-        assert 'docker-compose.asteria.yml' in text
-        assert 'REPO_COMPOSE_FILES' in text
-        assert 'files.list' in text
-        assert 'recovered Compose input differs from live' in text
+        assert 'DC+=(' not in text
+        assert 'REPO_COMPOSE_FILES=(' not in text
+        assert 'TRUSTED_COMPOSE_FILES=(docker-compose' not in text
+        assert 'diff -u' not in text
+        assert "grep -q '^BACKUP_COMPOSE_FILES=$'" not in text
 
 
 def test_recovery_sections_do_not_hardcode_project_or_compose_files() -> None:
@@ -1307,23 +1669,24 @@ def test_recovery_sections_do_not_hardcode_project_or_compose_files() -> None:
         else:
             recovery = _section(text, '## 1.', '## Важно')
         assert 'DC="docker compose' not in recovery
+        assert '$DC ' not in recovery
         assert '-p bot-asteria' not in recovery
-        assert 'docker-compose.asteria.yml"' not in recovery
-        assert '"${DC[@]}"' in recovery
+        assert 'dc_recover' in recovery
+        assert 'dc_live' in recovery
 
 
 def test_recovery_runbooks_preflight_operator_managed_panel_network() -> None:
     for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
         text = path.read_text(encoding='utf-8')
-        assert 'preflight_panel_network()' in text
+        assert '--preflight-network' in text
+        assert '--require-panel-network' in text
+        assert '--panel-project' in text
+        assert 'PANEL_NETWORK_REQUIRED' in text
         assert 'external: true' in text
         assert 'docker network inspect remnawave-network' in text
-        assert 'com.docker.compose.project' in text
-        assert 'PANEL_NETWORK_CONFIRM' in text
         assert 'docker network create' not in text
         assert 'docker-compose.local.yml' in text
-        assert 'TRUSTED_COMPOSE_FILES=(' in text
-        assert 'compose_from_repo "$PROJECT_DIR" "$EXPECTED_COMPOSE_PROJECT" "${TRUSTED_COMPOSE_FILES[@]}"' in text
+        assert 'legacy' in text.lower()
 
 
 def test_recovery_runbooks_document_next_backup_and_test_isolation() -> None:
@@ -1335,6 +1698,8 @@ def test_recovery_runbooks_document_next_backup_and_test_isolation() -> None:
         assert 'не копируется в backup-образ' in text
         assert 'stale' in text.lower()
         assert 'BACKUP_COMPOSE_FILES=' in text
+        assert '--capture-status' in text
+        assert 'cmp -s' in text
 
     assert 'container_name' in backup_doc
     assert 'WEB_API_PORT=18080' in backup_doc
@@ -1344,6 +1709,41 @@ def test_recovery_runbooks_document_next_backup_and_test_isolation() -> None:
     assert 'local override' in backup_doc.lower()
     assert 'external: true' in backup_doc
     assert 'docker-compose.local.yml' in backup_doc
+
+
+def test_existing_host_verifies_snapshot_before_stop() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        if path.name == 'backups-google-drive.md':
+            section = _section(text, '### 8.1.', '### 8.2.')
+        else:
+            section = _section(text, '## 1.', '## 2.')
+        verify = section.index('--verify-live-match')
+        stop = section.index('dc_recover stop bot backup')
+        assert verify < stop
+        assert 'Install exact recovered Compose files' not in section
+        assert 'files.list' in section
+
+
+def test_fresh_host_install_prompt_is_metadata_only() -> None:
+    for path in (ROOT / 'docs' / 'backups-google-drive.md', ROOT / 'docker' / 'backup' / 'RESTORE.md'):
+        text = path.read_text(encoding='utf-8')
+        if path.name == 'backups-google-drive.md':
+            section = _section(text, '### 8.4.', '## 9.')
+        else:
+            section = _section(text, '## 4.', '## Важно')
+        install_prompt = section.index('Install exact recovered Compose files')
+        metadata_guard = section.rfind(
+            'if [ -f "$RESTORE_DIR/compose/files.list" ]',
+            0,
+            install_prompt,
+        )
+        capture_check = section.index('--capture-status')
+        assert metadata_guard != -1
+        assert install_prompt < capture_check
+        assert section.index('dc_recover() { dc_trusted "$@"; }') < install_prompt
+        assert 'INSTALL_COMPOSE=legacy' not in section
+        assert "grep -q '^BACKUP_COMPOSE_FILES=$'" not in section
 
 
 def test_local_override_network_is_managed_not_external() -> None:

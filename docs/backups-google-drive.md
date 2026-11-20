@@ -468,160 +468,21 @@ Git и не `/tmp`; не удаляй его, пока проверка не з�
 сначала проверка, потом явное решение оператора, и только затем установка
 выбранных файлов в project root.
 
-### 8.0. Общие функции восстановления
+### 8.0. Bash helper и общий setup
 
-Функции ниже читают проверенный `compose/files.list` построчно в Bash-массив.
-Никакого `eval`, `source` manifest'а, `$(cat ...)` и неявного word splitting:
-только `read -r` и явные элементы `DC`. Это работает для одного файла и для
-любого корректного project name.
+`docker/backup/compose-recovery.sh` — единственное место, где строится Compose
+command. Он читает existing live array из Docker label
+`com.docker.compose.project.config_files`, snapshot list — построчно из
+`compose/files.list`, для `--verify-live-match` сначала сравнивает arrays
+exactly including order, затем bytes через `cmp -s`. Наружу выводятся только
+basenames/status, не содержимое файлов. Helper не eval/source-ит manifest или
+env, не печатает секреты и не создаёт сети.
 
-```bash
-validate_compose_project() {
-    [[ ${1:-} =~ ^[a-z0-9][a-z0-9_-]*$ ]]
-}
-
-valid_compose_name() {
-    [[ ${1:-} =~ ^[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$ ]]
-}
-
-compose_from_repo() {
-    local project_dir=$1 project_name=$2
-    local name seen=' ' count=0
-    shift 2
-    validate_compose_project "$project_name" || {
-        echo "invalid project: $project_name" >&2
-        return 1
-    }
-    DC=(docker compose --project-directory "$project_dir" -p "$project_name")
-    for name in "$@"; do
-        valid_compose_name "$name" || {
-            echo "invalid Compose input: $name" >&2
-            return 1
-        }
-        case "$seen" in
-            *" $name "*)
-                echo "duplicate Compose input: $name" >&2
-                return 1
-                ;;
-        esac
-        seen="$seen$name "
-        if [ ! -f "$project_dir/$name" ] || [ -L "$project_dir/$name" ] || [ ! -s "$project_dir/$name" ]; then
-            echo "missing, empty or symlinked Compose input: $name" >&2
-            return 1
-        fi
-        DC+=(-f "$project_dir/$name")
-        count=$((count + 1))
-    done
-    [ "$count" -gt 0 ] || {
-        echo 'no Compose inputs selected' >&2
-        return 1
-    }
-}
-
-compose_from_restore() {
-    local restore_dir=$1 project_name=$2 project_dir=$3
-    local recorded name seen=' ' count=0
-    validate_compose_project "$project_name" || {
-        echo "invalid project: $project_name" >&2
-        return 1
-    }
-    IFS= read -r recorded < "$restore_dir/compose/project-name" || {
-        echo 'missing compose/project-name' >&2
-        return 1
-    }
-    if [ "$recorded" != "$project_name" ]; then
-        echo "project mismatch: archive '$recorded', expected '$project_name'" >&2
-        return 1
-    fi
-    DC=(docker compose --project-directory "$project_dir" -p "$project_name")
-    while IFS= read -r name || [ -n "$name" ]; do
-        valid_compose_name "$name" || {
-            echo "invalid Compose input: $name" >&2
-            return 1
-        }
-        case "$seen" in
-            *" $name "*)
-                echo "duplicate Compose input: $name" >&2
-                return 1
-                ;;
-        esac
-        seen="$seen$name "
-        if [ ! -f "$restore_dir/compose/$name" ] || [ -L "$restore_dir/compose/$name" ] || [ ! -s "$restore_dir/compose/$name" ]; then
-            echo "missing, empty or symlinked restored Compose input: $name" >&2
-            return 1
-        fi
-        DC+=(-f "$restore_dir/compose/$name")
-        count=$((count + 1))
-    done < "$restore_dir/compose/files.list"
-    [ "$count" -gt 0 ] || {
-        echo 'restored Compose file list is empty' >&2
-        return 1
-    }
-}
-
-preflight_panel_network() {
-    local config network_labels project_label PANEL_NETWORK_CONFIRM
-    config=$("${DC[@]}" config) || {
-        echo 'cannot render effective Compose config' >&2
-        return 1
-    }
-    if ! printf '%s\n' "$config" | awk '
-        BEGIN { in_networks = 0; in_target = 0; external = 0; found = 0; bad_name = 0 }
-        /^networks:[[:space:]]*$/ { in_networks = 1; next }
-        in_networks && /^[^[:space:]]/ { in_networks = 0; in_target = 0 }
-        in_networks && /^  remnawave-network:[[:space:]]*$/ { in_target = 1; found = 1; next }
-        in_target && /^  [^[:space:]]/ { in_target = 0 }
-        in_target && /^    external:[[:space:]]*true[[:space:]]*$/ { external = 1 }
-        in_target && /^    name:/ {
-            name = $0
-            sub(/^    name:[[:space:]]*/, "", name)
-            gsub(/["[:space:]]/, "", name)
-            if (name != "remnawave-network") bad_name = 1
-        }
-        END { exit !(found && external && !bad_name) }
-    '; then
-        echo 'remnawave-network must be external: true via an operator-maintained override' >&2
-        return 1
-    fi
-    network_labels=$(docker network inspect remnawave-network --format '{{json .Labels}}' 2>/dev/null) || {
-        echo 'shared remnawave-network is missing; verify it with the panel operator; do not create it here' >&2
-        return 1
-    }
-    project_label=$(docker network inspect remnawave-network \
-        --format '{{index .Labels "com.docker.compose.project"}}' 2>/dev/null || true)
-    if [ -n "${EXPECTED_PANEL_PROJECT:-}" ]; then
-        if [ "$project_label" != "$EXPECTED_PANEL_PROJECT" ]; then
-            echo "network project label '$project_label' != '$EXPECTED_PANEL_PROJECT'; stop" >&2
-            return 1
-        fi
-    else
-        printf 'network labels: %s\n' "$network_labels"
-        printf 'Type YES to confirm this is the panel-managed remnawave-network: '
-        read -r PANEL_NETWORK_CONFIRM
-        if [ "$PANEL_NETWORK_CONFIRM" != YES ]; then
-            return 1
-        fi
-    fi
-}
-```
-
-Проверенный `compose/files.list` — единственный источник порядка `-f` после
-restore. `--project-directory "$PROJECT_DIR"` задаёт нужный base path для
-`.env`, bind mounts и `build: .`, а `-p "$EXPECTED_COMPOSE_PROJECT"` не даёт
-Compose создать второй project или переконфигурировать live site.
-
-### 8.1. Остановить writers и прочитать снапшот
-
-Сначала останавливаем bot и backup loop: так `restic check` не конкурирует с
-активным backup, а cutover не пишет в БД. Чтение делается одноразовым
-контейнером с entrypoint `restic`, поэтому backup loop/prune не запускаются.
-Это работает и когда контейнера `backup` ещё нет (новый хост): Compose `run`
-создаёт его только на время команды.
+Helper написан на Bash, запускается из checkout репозитория и не копируется в
+backup-образ. Все команды runbook — Bash; выполняй их в одном Bash shell.
 
 ```bash
 set -euo pipefail
-umask 077
-
 PROJECT_DIR=$(pwd -P)
 if [ -z "${EXPECTED_COMPOSE_PROJECT:-}" ]; then
     printf 'Expected Compose project: '
@@ -629,98 +490,130 @@ if [ -z "${EXPECTED_COMPOSE_PROJECT:-}" ]; then
 fi
 export EXPECTED_COMPOSE_PROJECT
 
-# Set exactly the ordered inputs of the existing live project. Do not add a
-# file merely because it exists; do not rename the live project.
-REPO_COMPOSE_FILES=(docker-compose.yml docker-compose.local.yml docker-compose.asteria.yml)
+# Operator decision: 1 only when this project intentionally uses the shared
+# panel network; leave 0 for a local/test project with no panel network.
+PANEL_NETWORK_REQUIRED=${PANEL_NETWORK_REQUIRED:-0}
+case "$PANEL_NETWORK_REQUIRED" in
+    0|1) ;;
+    *) echo 'PANEL_NETWORK_REQUIRED must be 0 or 1' >&2; exit 1 ;;
+esac
+# EXPECTED_PANEL_PROJECT='<panel-compose-project>'
 
+PREFLIGHT_ARGS=(--preflight-network)
+if [ "$PANEL_NETWORK_REQUIRED" = 1 ]; then
+    PREFLIGHT_ARGS+=(--require-panel-network)
+fi
+if [ -n "${EXPECTED_PANEL_PROJECT:-}" ]; then
+    PREFLIGHT_ARGS+=(--panel-project "$EXPECTED_PANEL_PROJECT")
+fi
+
+dc_live() {
+    bash docker/backup/compose-recovery.sh       --project "$EXPECTED_COMPOSE_PROJECT"       --project-dir "$PROJECT_DIR"       --live "${PREFLIGHT_ARGS[@]}" -- "$@"
+}
+
+dc_restored() {
+    bash docker/backup/compose-recovery.sh       --project "$EXPECTED_COMPOSE_PROJECT"       --project-dir "$PROJECT_DIR"       --restore-dir "$RESTORE_DIR"       "${PREFLIGHT_ARGS[@]}" -- "$@"
+}
+
+dc_trusted() {
+    local args=(
+      --project "$EXPECTED_COMPOSE_PROJECT"
+      --project-dir "$PROJECT_DIR"
+      "${PREFLIGHT_ARGS[@]}"
+    )
+    local name
+    [ "${#TRUSTED_COMPOSE_FILES[@]}" -gt 0 ] || {
+        echo 'TRUSTED_COMPOSE_FILES is empty' >&2
+        return 1
+    }
+    for name in "${TRUSTED_COMPOSE_FILES[@]}"; do
+        args+=(--file "$name")
+    done
+    bash docker/backup/compose-recovery.sh "${args[@]}" -- "$@"
+}
+
+dc_recover() {
+    if [ -f "$RESTORE_DIR/compose/files.list" ]; then
+        dc_restored "$@"
+    else
+        dc_live "$@"
+    fi
+}
+```
+
+Пример operator-owned legacy input (не выполнять вслепую): `docker-compose.yml`
+и `docker-compose.local.yml`; для panel deployment — отдельный проверенный
+override. Actual input вводится prompt'ом в legacy branch ниже. Если `--live`
+не может прочитать `config_files` label, не угадывай: задай один
+operator-owned `TRUSTED_COMPOSE_FILES` prompt и используй `dc_trusted`.
+Для Asteria panel deployment оператор задаёт `PANEL_NETWORK_REQUIRED=1` и, если
+сеть имеет label, `EXPECTED_PANEL_PROJECT`.
+
+### 8.1. Прочитать снапшот и проверить live order до остановки
+
+Сначала читаем `snapshots` и `dump` одноразовым Restic, **не останавливая**
+bot/backup: dump read-only, а выбранный snapshot атомарен. `dc_live` перед
+каждой командой проверяет project/containers и делает network preflight, поэтому
+известная проблема конфигурации не приводит к остановке. После проверки
+`files.list`/bytes можно останавливать writers.
+
+```bash
 RECOVERY_ROOT=${RECOVERY_ROOT:-/var/lib/remnawave-recovery}
 install -d -m 700 "$RECOVERY_ROOT"
 RESTORE_DIR="$RECOVERY_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
 install -d -m 700 "$RESTORE_DIR"
+# Если нет root: RECOVERY_ROOT="$HOME/.local/state/remnawave-recovery".
 
-# Never create or target a second project by accident.
-if [ -z "$(docker ps -aq --filter "label=com.docker.compose.project=$EXPECTED_COMPOSE_PROJECT")" ]; then
-    echo "no containers for project '$EXPECTED_COMPOSE_PROJECT'; verify the live project name" >&2
-    exit 1
-fi
-
-compose_from_repo "$PROJECT_DIR" "$EXPECTED_COMPOSE_PROJECT" "${REPO_COMPOSE_FILES[@]}"
-"${DC[@]}" stop bot backup
-
-"${DC[@]}" --profile backup run --rm --no-deps -T --entrypoint restic backup \
-  --no-cache snapshots
-# check запускай, когда нет активного backup-writer. Если repository locked,
-# сначала убедись, что writer действительно не работает; unlock вручную.
-"${DC[@]}" --profile backup run --rm --no-deps -T --entrypoint restic backup \
-  --no-cache check
+dc_live --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache snapshots
 if [ -z "${SNAPSHOT_ID:-}" ]; then
     printf 'Snapshot ID: '
     read -r SNAPSHOT_ID
 fi
 [ -n "$SNAPSHOT_ID" ] || { echo 'SNAPSHOT_ID is required' >&2; exit 1; }
 
-"${DC[@]}" --profile backup run --rm --no-deps -T --entrypoint restic backup \
-  --no-cache ls "$SNAPSHOT_ID"
-"${DC[@]}" --profile backup run --rm --no-deps -T --entrypoint restic backup \
-  --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
-  > "$RESTORE_DIR/remnawave-backup.tar"
+dc_live --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache ls "$SNAPSHOT_ID"
+dc_live --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar   > "$RESTORE_DIR/remnawave-backup.tar"
 
-# Read-only: покажет project/order или явный legacy notice.
-sh docker/backup/restore-compose.sh \
-  --archive "$RESTORE_DIR/remnawave-backup.tar" \
-  --inspect
-
-# Выбери по выводу inspect. Legacy 16e67daf не содержит Compose metadata и
-# допускается только через явный data-only путь.
+sh docker/backup/restore-compose.sh   --archive "$RESTORE_DIR/remnawave-backup.tar"   --inspect
 printf 'Snapshot kind [compose/legacy]: '
 read -r SNAPSHOT_KIND
 if [ "$SNAPSHOT_KIND" = compose ]; then
-    sh docker/backup/restore-compose.sh \
-      --archive "$RESTORE_DIR/remnawave-backup.tar" \
-      --project "$EXPECTED_COMPOSE_PROJECT" \
-      --output "$RESTORE_DIR"
+    sh docker/backup/restore-compose.sh       --archive "$RESTORE_DIR/remnawave-backup.tar"       --project "$EXPECTED_COMPOSE_PROJECT"       --output "$RESTORE_DIR"
 elif [ "$SNAPSHOT_KIND" = legacy ]; then
-    sh docker/backup/restore-compose.sh \
-      --archive "$RESTORE_DIR/remnawave-backup.tar" \
-      --legacy-data-only \
-      --output "$RESTORE_DIR"
+    sh docker/backup/restore-compose.sh       --archive "$RESTORE_DIR/remnawave-backup.tar"       --legacy-data-only       --output "$RESTORE_DIR"
 else
     echo 'SNAPSHOT_KIND must be compose or legacy' >&2
     exit 1
 fi
-# Для legacy оставь DC из compose_from_repo: проверенные live-файлы. Не
-# подставляй override "на глаз"; automatic fallback отсутствует.
+
 if [ -f "$RESTORE_DIR/compose/files.list" ]; then
-    compose_from_restore "$RESTORE_DIR" "$EXPECTED_COMPOSE_PROJECT" "$PROJECT_DIR"
-    # Existing host: recovered inputs must match the reviewed live files. Stop
-    # instead of silently reconfiguring the running site.
-    while IFS= read -r name; do
-        cmp -s "$PROJECT_DIR/$name" "$RESTORE_DIR/compose/$name" || {
-            echo "recovered Compose input differs from live: $name; stop" >&2
-            exit 1
-        }
-    done < "$RESTORE_DIR/compose/files.list"
+    # Exact live order first, then bytes; names only, no file content.
+    bash docker/backup/compose-recovery.sh       --project "$EXPECTED_COMPOSE_PROJECT"       --project-dir "$PROJECT_DIR"       --restore-dir "$RESTORE_DIR"       --verify-live-match
+else
+    # Legacy 16e67daf: no archived Compose list. Keep the live array; do not
+    # switch the existing host to a stale archived list.
+    :
 fi
 
-cat "$RESTORE_DIR/compose/project-name" 2>/dev/null || true
-cat "$RESTORE_DIR/compose/files.list" 2>/dev/null || true
+# Only after validation. dc_recover uses dc_restored for compose and dc_live
+# for legacy; both preflight the network again.
+dc_recover stop bot backup
+dc_recover --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache check
+
+if [ -f "$RESTORE_DIR/compose/files.list" ]; then
+    cat "$RESTORE_DIR/compose/project-name"
+    cat "$RESTORE_DIR/compose/files.list"
+fi
 file "$RESTORE_DIR/db.dump"
-"${DC[@]}" exec -T postgres pg_restore --list < "$RESTORE_DIR/db.dump" >/dev/null
+dc_recover exec -T postgres pg_restore --list < "$RESTORE_DIR/db.dump" >/dev/null
 ```
 
-Helper не распаковывает архив через `tar -xf` и не исполняет manifest: он
-проверяет точный набор членов и типы файлов, стримит только `db.dump`, `.env` и
-`compose/*` в приватный scratch, а в `$RESTORE_DIR` кладёт результат лишь после
-совпадения `compose/project-name` с ожидаемым project. При mismatch каталог
-`$RESTORE_DIR` не получает ни Compose-файлов, ни данных. Для снапшота с Compose
-metadata в `$RESTORE_DIR/compose/files.list` лежит авторитетный порядок; в
-`compose/project-name` — записанный project ID. В стабильном `$RESTORE_DIR`
-лежит и сам `remnawave-backup.tar`; каталог не удаляется автоматически и не
-должен попадать в Git. Плейнтекст tar/dump не кладётся в репозиторий.
-
-Проверь входы до применения: сравни `compose/files.list` с ожидаемым порядком,
-просмотри сами файлы и только потом используй явные `-p`/`-f`. Не применяй
-восстановленный Compose поверх уже запущенного stack.
+`restore-compose.sh` не распаковывает архив через `tar -xf` и не исполняет
+manifest: он проверяет точный набор членов и типы файлов, стримит только
+`db.dump`, `.env` и `compose/*` в приватный scratch, а в `$RESTORE_DIR` кладёт
+результат лишь после проверки project. `compose/files.list` — авторитетный
+порядок; `compose/project-name` — project ID. Каталог стабильный, вне Git; не
+удаляй его до окончания проверки.
 
 ### 8.2. Зафиксировать фактическую БД и восстановить в свежую
 
@@ -735,9 +628,9 @@ cutover.
 # Убираем host-override, чтобы Compose прочитал .env.
 unset POSTGRES_DB
 
-ORIGINAL_BOT_DB=$("${DC[@]}" --profile backup run --rm --no-deps -T \
+ORIGINAL_BOT_DB=$(dc_recover --profile backup run --rm --no-deps -T \
   --entrypoint sh bot -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
-ORIGINAL_BACKUP_DB=$("${DC[@]}" --profile backup run --rm --no-deps -T \
+ORIGINAL_BACKUP_DB=$(dc_recover --profile backup run --rm --no-deps -T \
   --entrypoint sh backup -c 'printf "%s" "$PGDATABASE"' | tr -d '\r')
 printf 'preflight bot=%s backup=%s\n' "$ORIGINAL_BOT_DB" "$ORIGINAL_BACKUP_DB"
 [ -n "$ORIGINAL_BOT_DB" ] && [ "$ORIGINAL_BOT_DB" = "$ORIGINAL_BACKUP_DB" ] || {
@@ -754,11 +647,11 @@ echo "original=$ORIGINAL_DB restore=$RESTORE_DB"
 # psql :"restore_db" безопасно квотирует идентификатор. POSTGRES_USER должен
 # раскрыться внутри контейнера, а не в host shell под set -u.
 printf 'CREATE DATABASE :"restore_db";\n' |
-  "${DC[@]}" exec -T postgres sh -c \
+  dc_recover exec -T postgres sh -c \
     'psql -v ON_ERROR_STOP=1 -v restore_db="$1" -U "$POSTGRES_USER" -d postgres' \
     sh "$RESTORE_DB"
 
-"${DC[@]}" exec -T postgres sh -c \
+dc_recover exec -T postgres sh -c \
   'pg_restore --single-transaction --exit-on-error --no-owner --no-privileges \
      -U "$POSTGRES_USER" -d "$1"' sh "$RESTORE_DB" \
   < "$RESTORE_DIR/db.dump"
@@ -771,7 +664,7 @@ printf 'CREATE DATABASE :"restore_db";\n' |
 Проверь:
 
 ```bash
-"${DC[@]}" exec -T postgres sh -c \
+dc_recover exec -T postgres sh -c \
   'psql -U "$POSTGRES_USER" -d "$1" -v ON_ERROR_STOP=1 \
      -c "SELECT count(*) FROM users;" \
      -c "SELECT count(*) FROM subscriptions;"' sh "$RESTORE_DB"
@@ -788,11 +681,11 @@ printf 'CREATE DATABASE :"restore_db";\n' |
 #### A. Остановить и сохранить исходный live `.env` — до любых правок
 
 ```bash
-"${DC[@]}" stop bot backup
+dc_recover stop bot backup
 
-# Идентифицируемая приватная копия .env вне репозитория, только для rollback.
-ROLLBACK_DIR=$(mktemp -d /tmp/remnawave-env-rollback.XXXXXX)
-chmod 700 "$ROLLBACK_DIR"
+# Идентифицируемая приватная копия .env в том же stable recovery root.
+ROLLBACK_DIR="$RECOVERY_ROOT/rollback-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+install -d -m 700 "$ROLLBACK_DIR"
 ENV_BACKUP="$ROLLBACK_DIR/.env.before-restore"
 install -m 600 .env "$ENV_BACKUP"
 [ -s "$ENV_BACKUP" ] || { echo 'rollback .env copy is empty' >&2; exit 1; }
@@ -816,9 +709,9 @@ read -r _
 
 # Host export has precedence over .env in Compose interpolation.
 unset POSTGRES_DB
-PRE_BOT_DB=$("${DC[@]}" --profile backup run --rm --no-deps -T \
+PRE_BOT_DB=$(dc_recover --profile backup run --rm --no-deps -T \
   --entrypoint sh bot -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
-PRE_BACKUP_DB=$("${DC[@]}" --profile backup run --rm --no-deps -T \
+PRE_BACKUP_DB=$(dc_recover --profile backup run --rm --no-deps -T \
   --entrypoint sh backup -c 'printf "%s" "$PGDATABASE"' | tr -d '\r')
 printf 'preflight cutover bot=%s backup=%s\n' "$PRE_BOT_DB" "$PRE_BACKUP_DB"
 [ "$PRE_BOT_DB" = "$RESTORE_DB" ] && [ "$PRE_BACKUP_DB" = "$RESTORE_DB" ] || {
@@ -826,10 +719,10 @@ printf 'preflight cutover bot=%s backup=%s\n' "$PRE_BOT_DB" "$PRE_BACKUP_DB"
   exit 1
 }
 
-"${DC[@]}" up -d --no-deps --force-recreate bot backup
+dc_recover up -d --no-deps --force-recreate bot backup
 
-BOT_DB=$("${DC[@]}" exec -T bot sh -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
-BACKUP_DB=$("${DC[@]}" exec -T backup sh -c 'printf "%s" "$PGDATABASE"' | tr -d '\r')
+BOT_DB=$(dc_recover exec -T bot sh -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
+BACKUP_DB=$(dc_recover exec -T backup sh -c 'printf "%s" "$PGDATABASE"' | tr -d '\r')
 printf 'effective bot=%s backup=%s\n' "$BOT_DB" "$BACKUP_DB"
 [ "$BOT_DB" = "$RESTORE_DB" ] && [ "$BACKUP_DB" = "$RESTORE_DB" ] || {
   echo 'effective DB mismatch; stop and fix config before continuing' >&2
@@ -840,14 +733,14 @@ printf 'effective bot=%s backup=%s\n' "$BOT_DB" "$BACKUP_DB"
 #### C. Rollback: вернуть исходный `.env` из A и проверить
 
 ```bash
-"${DC[@]}" stop bot backup
+dc_recover stop bot backup
 [ -f "$ENV_BACKUP" ] || { echo 'missing rollback .env; run block A first' >&2; exit 1; }
 unset POSTGRES_DB
 install -m 600 "$ENV_BACKUP" .env
 
-PRE_BOT_DB=$("${DC[@]}" --profile backup run --rm --no-deps -T \
+PRE_BOT_DB=$(dc_recover --profile backup run --rm --no-deps -T \
   --entrypoint sh bot -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
-PRE_BACKUP_DB=$("${DC[@]}" --profile backup run --rm --no-deps -T \
+PRE_BACKUP_DB=$(dc_recover --profile backup run --rm --no-deps -T \
   --entrypoint sh backup -c 'printf "%s" "$PGDATABASE"' | tr -d '\r')
 printf 'preflight rollback bot=%s backup=%s\n' "$PRE_BOT_DB" "$PRE_BACKUP_DB"
 [ "$PRE_BOT_DB" = "$ORIGINAL_DB" ] && [ "$PRE_BACKUP_DB" = "$ORIGINAL_DB" ] || {
@@ -855,10 +748,10 @@ printf 'preflight rollback bot=%s backup=%s\n' "$PRE_BOT_DB" "$PRE_BACKUP_DB"
   exit 1
 }
 
-"${DC[@]}" up -d --no-deps --force-recreate bot backup
+dc_recover up -d --no-deps --force-recreate bot backup
 
-BOT_DB=$("${DC[@]}" exec -T bot sh -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
-BACKUP_DB=$("${DC[@]}" exec -T backup sh -c 'printf "%s" "$PGDATABASE"' | tr -d '\r')
+BOT_DB=$(dc_recover exec -T bot sh -c 'printf "%s" "$POSTGRES_DB"' | tr -d '\r')
+BACKUP_DB=$(dc_recover exec -T backup sh -c 'printf "%s" "$PGDATABASE"' | tr -d '\r')
 printf 'rollback effective bot=%s backup=%s\n' "$BOT_DB" "$BACKUP_DB"
 [ "$BOT_DB" = "$ORIGINAL_DB" ] && [ "$BACKUP_DB" = "$ORIGINAL_DB" ] || {
   echo 'rollback effective DB mismatch; stop and fix config' >&2
@@ -885,37 +778,30 @@ rm -rf "$ROLLBACK_DIR"
 поднимаем сервисы. `compose run` с entrypoint `restic` не запускает автоматический
 backup/prune.
 
+Все шаги — Bash в одном shell. Сначала выполни setup из 8.0. На новом хосте
+live-контейнеров ещё нет, поэтому initial Restic read идёт с operator-owned
+trusted inputs. Пример (не выполнять вслепую): `docker-compose.yml` и
+`docker-compose.local.yml`; для panel deployment добавь проверенный override.
+Actual input вводится prompt'ом ниже.
+
 1. Поставь Docker/Compose, восстанови из офлайн-копии `rclone.conf` и файл пароля
    Restic. Не выполняй `restic init`.
-2. Собери/скачай образы `bot` и `backup`, чтобы `compose run` мог их использовать.
-   `EXPECTED_COMPOSE_PROJECT` — операторское значение, не догадка; `REPO_COMPOSE_FILES`
-   — ровно те файлы, которые уже лежат в project root и будут использованы только
-   для чтения Restic. На новом хосте live-контейнеров ещё нет.
+2. Собери образы и прочитай снапшот. Один prompt задаёт trusted basenames; никаких
+   hardcoded массивов в executable block нет.
 
 ```bash
 set -euo pipefail
 umask 077
 
-PROJECT_DIR=$(pwd -P)
-if [ -z "${EXPECTED_COMPOSE_PROJECT:-}" ]; then
-    printf 'Expected Compose project: '
-    read -r EXPECTED_COMPOSE_PROJECT
-fi
-export EXPECTED_COMPOSE_PROJECT
-REPO_COMPOSE_FILES=(docker-compose.yml docker-compose.local.yml)
-# Если operator-maintained panel override уже установлен и проверен:
-# REPO_COMPOSE_FILES+=(docker-compose.panel-network.yml)
+printf 'Trusted Compose basenames (space-separated): '
+read -r -a TRUSTED_COMPOSE_FILES
+[ "${#TRUSTED_COMPOSE_FILES[@]}" -gt 0 ] || {
+    echo 'at least one trusted Compose basename is required' >&2
+    exit 1
+}
 
-compose_from_repo "$PROJECT_DIR" "$EXPECTED_COMPOSE_PROJECT" "${REPO_COMPOSE_FILES[@]}"
-"${DC[@]}" --profile backup build bot backup
-```
+dc_trusted --profile backup build bot backup
 
-3. Пока app `.env` ещё не установлен, прочитай снапшот. Выполняй шаги 3–6 в
-   одном shell: `RESTORE_DIR`, `RESTORE_DB` и `ORIGINAL_DB` должны сохраниться.
-   Если твои repo/пути были кастомными, экспортируй их для этого shell (это не
-   секреты); иначе действуют defaults из compose:
-
-```bash
 RECOVERY_ROOT=${RECOVERY_ROOT:-/var/lib/remnawave-recovery}
 install -d -m 700 "$RECOVERY_ROOT"
 RESTORE_DIR="$RECOVERY_ROOT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -924,117 +810,97 @@ install -d -m 700 "$RESTORE_DIR"
 # export BACKUP_RCLONE_CONFIG_DIR='/etc/remnawave-backup/rclone'
 # export BACKUP_RESTIC_PASSWORD_FILE='/etc/remnawave-backup/restic-password'
 
-"${DC[@]}" --profile backup run --rm --no-deps -T --entrypoint restic backup \
-  --no-cache snapshots
+dc_trusted --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache snapshots
 if [ -z "${SNAPSHOT_ID:-}" ]; then
     printf 'Snapshot ID: '
     read -r SNAPSHOT_ID
 fi
 [ -n "$SNAPSHOT_ID" ] || { echo 'SNAPSHOT_ID is required' >&2; exit 1; }
+dc_trusted --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache check
+dc_trusted --profile backup run --rm --no-deps -T --entrypoint restic backup   --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar   > "$RESTORE_DIR/remnawave-backup.tar"
 
-"${DC[@]}" --profile backup run --rm --no-deps -T --entrypoint restic backup \
-  --no-cache check
-"${DC[@]}" --profile backup run --rm --no-deps -T --entrypoint restic backup \
-  --no-cache dump "$SNAPSHOT_ID" remnawave-backup.tar \
-  > "$RESTORE_DIR/remnawave-backup.tar"
-
-# Read-only: покажет project/order или явный legacy notice.
-sh docker/backup/restore-compose.sh \
-  --archive "$RESTORE_DIR/remnawave-backup.tar" \
-  --inspect
-
-# Выбери по выводу inspect. Legacy 16e67daf не содержит Compose metadata и
-# допускается только через явный data-only путь.
+sh docker/backup/restore-compose.sh   --archive "$RESTORE_DIR/remnawave-backup.tar"   --inspect
 printf 'Snapshot kind [compose/legacy]: '
 read -r SNAPSHOT_KIND
 if [ "$SNAPSHOT_KIND" = compose ]; then
-    sh docker/backup/restore-compose.sh \
-      --archive "$RESTORE_DIR/remnawave-backup.tar" \
-      --project "$EXPECTED_COMPOSE_PROJECT" \
-      --output "$RESTORE_DIR"
+    sh docker/backup/restore-compose.sh       --archive "$RESTORE_DIR/remnawave-backup.tar"       --project "$EXPECTED_COMPOSE_PROJECT"       --output "$RESTORE_DIR"
 elif [ "$SNAPSHOT_KIND" = legacy ]; then
-    sh docker/backup/restore-compose.sh \
-      --archive "$RESTORE_DIR/remnawave-backup.tar" \
-      --legacy-data-only \
-      --output "$RESTORE_DIR"
+    sh docker/backup/restore-compose.sh       --archive "$RESTORE_DIR/remnawave-backup.tar"       --legacy-data-only       --output "$RESTORE_DIR"
 else
     echo 'SNAPSHOT_KIND must be compose or legacy' >&2
     exit 1
 fi
 
-file "$RESTORE_DIR/db.dump"
-
+# Branch on validated metadata presence, not on a guessed override set.
 if [ -f "$RESTORE_DIR/compose/files.list" ]; then
-    # Проверенный files.list — единственный источник project и порядка -f.
-    compose_from_restore "$RESTORE_DIR" "$EXPECTED_COMPOSE_PROJECT" "$PROJECT_DIR"
+    dc_recover() { dc_restored "$@"; }
 else
-    # Legacy 16e67daf: оператор явно выбирает доверенные файлы. Не подставляй
-    # override "на глаз" и не считай наличие файла разрешением его использовать.
-    TRUSTED_COMPOSE_FILES=(docker-compose.yml docker-compose.local.yml)
-    # TRUSTED_COMPOSE_FILES+=(docker-compose.panel-network.yml)
-    compose_from_repo "$PROJECT_DIR" "$EXPECTED_COMPOSE_PROJECT" "${TRUSTED_COMPOSE_FILES[@]}"
+    # Legacy: keep the operator-selected trusted files. No install prompt and
+    # no missing files.list path.
+    dc_recover() { dc_trusted "$@"; }
 fi
 ```
 
-4. До установки `.env` проверь recovered Compose inputs. Не перезаписывай
-   существующие файлы project root слепо: сначала diff, затем явное решение.
-   Если не устанавливаешь exact-файлы, оставь capture выключенным
-   (`BACKUP_COMPOSE_FILES=`) до ручного восстановления root inputs. Иначе следующий
-   backup молча снимет stale root Compose files.
+3. Если snapshot содержит Compose metadata, проверь имена и реши, устанавливать
+   ли exact recovered inputs в project root. Выводятся только basenames/status;
+   содержимое файлов не печатается. Legacy этой ветки не касается.
 
 ```bash
-if [ -d "$RESTORE_DIR/compose" ]; then
+if [ -f "$RESTORE_DIR/compose/files.list" ]; then
     while IFS= read -r name; do
-        diff -u "$PROJECT_DIR/$name" "$RESTORE_DIR/compose/$name" || true
+        if cmp -s "$PROJECT_DIR/$name" "$RESTORE_DIR/compose/$name"; then
+            printf 'unchanged: %s\n' "$name"
+        else
+            printf 'changed: %s\n' "$name"
+        fi
     done < "$RESTORE_DIR/compose/files.list"
-fi
-printf 'Install exact recovered Compose files into %s? Type YES: ' "$PROJECT_DIR"
-read -r INSTALL_COMPOSE
-if [ "$INSTALL_COMPOSE" = YES ]; then
-    while IFS= read -r name; do
-        install -m 600 "$RESTORE_DIR/compose/$name" "$PROJECT_DIR/$name"
-    done < "$RESTORE_DIR/compose/files.list"
-    while IFS= read -r name; do
-        cmp -s "$PROJECT_DIR/$name" "$RESTORE_DIR/compose/$name" || {
-            echo "root Compose input diverged: $name" >&2
-            exit 1
-        }
-    done < "$RESTORE_DIR/compose/files.list"
-else
-    echo 'Compose files were not installed; keep BACKUP_COMPOSE_FILES= empty in the recovered .env.' >&2
+    printf 'Install exact recovered Compose files into %s? Type YES: ' "$PROJECT_DIR"
+    read -r INSTALL_COMPOSE
+    if [ "$INSTALL_COMPOSE" = YES ]; then
+        while IFS= read -r name; do
+            install -m 600 "$RESTORE_DIR/compose/$name" "$PROJECT_DIR/$name"
+        done < "$RESTORE_DIR/compose/files.list"
+        while IFS= read -r name; do
+            cmp -s "$PROJECT_DIR/$name" "$RESTORE_DIR/compose/$name" || {
+                echo "root Compose input diverged: $name" >&2
+                exit 1
+            }
+        done < "$RESTORE_DIR/compose/files.list"
+    else
+        capture=$(bash docker/backup/compose-recovery.sh --capture-status "$RESTORE_DIR/.env")
+        case "$capture" in
+            disabled)
+                ;;
+            enabled)
+                echo 'BACKUP_COMPOSE_FILES would capture stale root files; set it empty in the recovered .env before continuing' >&2
+                exit 1
+                ;;
+            *)
+                echo 'cannot determine BACKUP_COMPOSE_FILES capture status' >&2
+                exit 1
+                ;;
+        esac
+    fi
 fi
 ```
 
-Проверь и установи восстановленный `.env` как live-конфигурацию только после
-этого решения:
+4. Установи восстановленный `.env` только после решения по Compose inputs:
 
 ```bash
-if [ "$INSTALL_COMPOSE" != YES ]; then
-    grep -q '^BACKUP_COMPOSE_FILES=$' "$RESTORE_DIR/.env" || {
-        echo 'Set BACKUP_COMPOSE_FILES= in the recovered .env before installing it' >&2
-        exit 1
-    }
-fi
 install -m 600 "$RESTORE_DIR/.env" .env
 ```
 
 5. Preflight effective Compose config и existing shared network **до** любого
-   `up`. Функция не создаёт и не меняет сети; при ошибке остановись и согласуй
-   panel network с его оператором. Проверенный `external: true` должен приходить
-   из operator-maintained override, а не из checked-in
-   `docker-compose.local.yml`: локальный override создаёт Compose-managed сеть с
-   тем же именем, а не присоединяется к panel network. Частое предупреждение на
-   текущем deployment не даёт разрешения менять сеть.
+   `up`. `dc_recover` already includes `PREFLIGHT_ARGS`: for a test project with
+   no panel network it is a no-op; for panel deployment set
+   `PANEL_NETWORK_REQUIRED=1`. The helper never creates networks and fails before
+   `up` on a known config/provenance problem.
 
 ```bash
-# Если у panel network есть Compose project label, задай его явно:
-# EXPECTED_PANEL_PROJECT='<panel-compose-project>'
-preflight_panel_network
-
-# Только после успешного preflight:
-"${DC[@]}" up -d --no-deps postgres redis
-"${DC[@]}" exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d postgres'
-"${DC[@]}" exec -T redis redis-cli ping
+# PANEL_NETWORK_REQUIRED=1 and EXPECTED_PANEL_PROJECT=... belong in the 8.0 setup.
+dc_recover up -d --no-deps postgres redis
+dc_recover exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d postgres'
+dc_recover exec -T redis redis-cli ping
 ```
 
 6. Дальше выполни 8.2 (preflight фактической БД, создание свежей БД и
@@ -1053,9 +919,10 @@ preflight_panel_network
   operator-maintained override. Checked-in `docker-compose.local.yml` объявляет
   Compose-managed сеть с тем же именем и не является panel network; common
   warning на текущем deployment не разрешает менять её. Preflight проверяет
-  effective config, существующую сеть и Compose project label/ручное
-  подтверждение. Снапшот не содержит Docker network state; project-local сети
-  Compose создаёт сам, не меняй network wiring ради восстановления.
+  effective config, `docker network inspect remnawave-network`, существующую
+  сеть и Compose project label/ручное подтверждение. Снапшот не содержит Docker
+  network state; project-local сети Compose создаёт сам, не меняй network wiring
+  ради восстановления.
 - Restic шифрует содержимое и метаданные репозитория. Но `.env` внутри снапшота
   содержит все секреты приложения, поэтому доступ к репозиторию и паролю должен
   быть ограничен.
