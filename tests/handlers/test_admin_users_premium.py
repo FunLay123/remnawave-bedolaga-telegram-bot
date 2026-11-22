@@ -189,6 +189,12 @@ def test_closed_beats_unlimited():
     assert users_mod._classify_premium_traffic_state(_config(limit_gb=5), state) is users_mod.PremiumSquadCardState.CLOSED
 
 
+def test_no_limit_beats_limited_history_after_unlimited():
+    state = _bare_state(is_limited=True, used_bytes=5 * BYTES_IN_GB)
+
+    assert users_mod._classify_premium_traffic_state(_config(limit_gb=0), state) is users_mod.PremiumSquadCardState.NO_LIMIT
+
+
 def test_row_rendering_unlimited_shows_infinity_and_grant_date():
     state = _bare_state(unlimited_at=NOW, used_bytes=BYTES_IN_GB)
     row = {'squad_uuid': SQUAD, 'config': _config(limit_gb=5), 'state': state, 'connected': True, 'name': 'DE-1'}
@@ -225,6 +231,7 @@ class TestUnlimitedCardKeyboard:
             callbacks = [button.callback_data for row in callback.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard for button in row]
             assert any(cb.startswith('admin_user_premium_unlimited_revoke_') for cb in callbacks)
             assert not any(cb.startswith('admin_user_premium_grant_') for cb in callbacks)
+            assert any(cb.startswith('admin_user_premium_close_') for cb in callbacks)
 
     async def test_keyboard_offers_grant_when_not_unlimited(self, monkeypatch):
         monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
@@ -507,6 +514,8 @@ def test_callback_data_stays_within_telegram_limit_for_worst_case_ids():
     gb = 100_000
     candidates = [
         f'admin_user_premium_grant_set_{user_id}_s{subscription_id}_{idx}_{gb}',
+        f'admin_user_premium_unlimited_confirm_{user_id}_s{subscription_id}_{idx}',
+        f'admin_user_premium_unlimited_revoke_c_{user_id}_s{subscription_id}_{idx}',
         f'admin_user_premium_close_confirm_{user_id}_s{subscription_id}_{idx}',
         f'admin_user_premium_reopen_{user_id}_s{subscription_id}_{idx}',
         f'admin_user_premium_sq_{user_id}_s{subscription_id}_{idx}',
@@ -587,7 +596,7 @@ class TestUnlimitedGrantRevoke:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             state.unlimited_at = NOW
             await db.commit()
-            callback = _callback('admin_user_premium_unlimited_revoke_confirm_1_0')
+            callback = _callback('admin_user_premium_unlimited_revoke_c_1_0')
 
             await _unwrap(users_mod.confirm_revoke_premium_unlimited)(callback, _db_user(), db)
 
@@ -600,7 +609,7 @@ class TestUnlimitedGrantRevoke:
         async with memory_session(monkeypatch, TABLES) as db:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             await db.commit()
-            callback = _callback('admin_user_premium_unlimited_revoke_confirm_1_0')
+            callback = _callback('admin_user_premium_unlimited_revoke_c_1_0')
 
             await _unwrap(users_mod.confirm_revoke_premium_unlimited)(callback, _db_user(), db)
 
@@ -622,4 +631,4 @@ class TestUnlimitedGrantRevoke:
 
 def test_extract_unlimited_callbacks():
     assert users_mod._extract_premium_squad_context('admin_user_premium_unlimited_confirm_123_s456_0') == (123, 456, 0)
-    assert users_mod._extract_premium_squad_context('admin_user_premium_unlimited_revoke_confirm_123_s456_0') == (123, 456, 0)
+    assert users_mod._extract_premium_squad_context('admin_user_premium_unlimited_revoke_c_123_s456_0') == (123, 456, 0)

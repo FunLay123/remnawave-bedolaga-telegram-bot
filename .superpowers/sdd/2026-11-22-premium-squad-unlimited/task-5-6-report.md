@@ -51,3 +51,54 @@ timezone database described above.
    setup). No claim of passing pytest is made here.
 2. The two pre-existing modified test files were intentionally not staged or
    changed by this package.
+
+## Round 1 reviewer fixes
+
+Addressed the three requested findings without changing the unrelated modified
+tests:
+
+- Unlimited, open squads now retain both controls in the detail keyboard:
+  `♾️ Снять безлимит` and `🔒 Закрыть доступ`. Closed/open semantics are
+  unchanged; the close control remains suppressed only for the closed state.
+- Classification now follows the binding precedence
+  `CLOSED -> UNLIMITED -> NO_LIMIT -> EXHAUSTED/REOPENED_PENDING -> ACTIVE`.
+  A regression test covers a no-limit squad with stale limited history.
+- Revoke confirmation now uses the compact
+  `admin_user_premium_unlimited_revoke_c_...` callback format. The handler,
+  dispatcher registration, parser tests, and confirmation tests all use this
+  format. Worst-case callback byte-length assertions cover grant and revoke
+  confirmation (and the existing premium callbacks).
+
+## Round 1 verification
+
+The required test-first focused command was attempted immediately after adding
+the regression tests:
+
+```text
+uv run pytest tests/handlers/test_admin_users_premium.py -q
+```
+
+It was initially blocked during pytest startup because the Windows virtual
+environment had no usable IANA timezone database (`TIMEZONE=UTC` was rejected).
+After installing timezone data with `uv pip install tzdata`, the focused suite
+passed:
+
+```text
+uv run pytest tests/handlers/test_admin_users_premium.py -q
+42 passed, 35 warnings in 5.04s
+```
+
+Relevant premium traffic verification also passed:
+
+```text
+uv run pytest tests/handlers/test_admin_users_premium.py tests/services/test_premium_traffic_service.py tests/crud/test_drop_orphan_premium_states.py -q
+141 passed, 35 warnings in 6.54s
+```
+
+Additional check:
+
+```text
+python -m compileall -q app/handlers/admin/users.py tests/handlers/test_admin_users_premium.py
+```
+
+The test output contains only existing SQLAlchemy/Pydantic deprecation warnings.

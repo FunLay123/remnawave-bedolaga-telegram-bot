@@ -4309,10 +4309,10 @@ def _classify_premium_traffic_state(
         return PremiumSquadCardState.CLOSED
     if state is not None and state.unlimited_at is not None:
         return PremiumSquadCardState.UNLIMITED
-    if state is not None and state.is_limited:
-        return PremiumSquadCardState.REOPENED_PENDING if not state.is_exhausted else PremiumSquadCardState.EXHAUSTED
     if config.limit_gb <= 0:
         return PremiumSquadCardState.NO_LIMIT
+    if state is not None and state.is_limited:
+        return PremiumSquadCardState.REOPENED_PENDING if not state.is_exhausted else PremiumSquadCardState.EXHAUSTED
     return PremiumSquadCardState.ACTIVE
 
 
@@ -4672,6 +4672,7 @@ async def _render_premium_squad_detail(
                 )
             ]
         )
+    if state_kind is not PremiumSquadCardState.CLOSED and row['config'].limit_gb > 0:
         keyboard.append(
             [
                 types.InlineKeyboardButton(
@@ -4889,7 +4890,7 @@ async def ask_revoke_premium_unlimited(callback: types.CallbackQuery, db_user: U
         'После снятия вернётся лимит тарифа; если расход выше лимита, воркер снимет сквад. '
         'Чтобы отобрать доступ сразу — закройте доступ.\n\nПродолжить?',
         reply_markup=get_confirmation_keyboard(
-            f'admin_user_premium_unlimited_revoke_confirm_{user_id}{_sid}_{idx}',
+            f'admin_user_premium_unlimited_revoke_c_{user_id}{_sid}_{idx}',
             f'admin_user_premium_sq_{user_id}{_sid}_{idx}', db_user.language,
         ),
     )
@@ -7392,7 +7393,7 @@ def register_handlers(dp: Dispatcher):
     # регистрируем раньше общего входа на экран.
     dp.callback_query.register(show_premium_squad_detail, F.data.startswith('admin_user_premium_sq_'))
     dp.callback_query.register(confirm_grant_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_confirm_'))
-    dp.callback_query.register(confirm_revoke_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_revoke_confirm_'))
+    dp.callback_query.register(confirm_revoke_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_revoke_c_'))
     dp.callback_query.register(
         ask_revoke_premium_unlimited,
         F.data.startswith('admin_user_premium_unlimited_revoke_') & ~F.data.contains('confirm'),
