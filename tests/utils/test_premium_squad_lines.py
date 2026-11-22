@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -11,6 +12,28 @@ from app.config import settings
 from app.localization.texts import get_texts
 from app.utils import rich_menu
 from app.utils.rich_menu import general_traffic_exhausted_line, is_general_traffic_exhausted
+
+
+@pytest.mark.anyio('asyncio')
+async def test_unlimited_squad_line_shows_infinity(monkeypatch):
+    subscription = SimpleNamespace(id=1, connected_squads=['wl'])
+    tariff = SimpleNamespace(
+        server_traffic_limits={'wl': {'traffic_limit_gb': 5}},
+    )
+    state = SimpleNamespace(
+        squad_uuid='wl',
+        used_bytes=2 * 1024**3,
+        total_limit_bytes=5 * 1024**3,
+        unlimited_at=datetime(2026, 9, 17, tzinfo=UTC),
+    )
+    monkeypatch.setattr('app.database.crud.premium_traffic.get_states_for_subscription', AsyncMock(return_value=[state]))
+    monkeypatch.setattr('app.database.crud.server_squad.get_squad_display_names', AsyncMock(return_value={'wl': 'WL'}))
+
+    lines = await rich_menu.premium_squad_lines(subscription, tariff, get_texts('ru'), AsyncMock())
+
+    assert len(lines) == 1
+    assert 'WL' in lines[0]
+    assert '♾️' in lines[0]
 
 
 def test_general_limit_is_exhausted_by_numbers():

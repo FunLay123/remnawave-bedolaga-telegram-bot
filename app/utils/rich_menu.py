@@ -386,7 +386,7 @@ async def premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> 
         used_gb = ((state.used_bytes or 0) / BYTES_IN_GB) if state else 0.0
         usage = (
             f'{texts.format_traffic(round(used_gb, 2), is_limit=False)} / '
-            f'{texts.format_traffic(round(total_gb, 2), is_limit=True)}'
+            f'{"♾️" if state is not None and state.unlimited_at is not None else texts.format_traffic(round(total_gb, 2), is_limit=True)}'
         )
         name = config.name or names.get(squad_uuid) or squad_uuid
         lines.append(_rich_text(template).replace('{name}', html.escape(name)).replace('{traffic}', html.escape(usage)))
@@ -419,7 +419,13 @@ async def live_menu_premium_state(db: AsyncSession, user: User) -> tuple:
     return tuple(
         sorted(
             # С точностью до гигабайта — как общий трафик в live_menu_fingerprint.
-            (row.subscription_id, row.squad_uuid, (row.used_bytes or 0) // BYTES_IN_GB, row.total_limit_bytes)
+            (
+                row.subscription_id,
+                row.squad_uuid,
+                (row.used_bytes or 0) // BYTES_IN_GB,
+                row.total_limit_bytes,
+                bool(row.unlimited_at),
+            )
             for row in rows
         )
     )

@@ -117,6 +117,7 @@ async def premium_usage(db: AsyncSession, short_uuids: list[str]) -> tuple[int, 
 
     states = {state.squad_uuid: state for state in await get_states_for_subscription(db, subscription.id)}
     used = total = 0
+    unlimited = False
     for squad_uuid in uuids:
         state = states.get(squad_uuid)
         if state is None:
@@ -124,8 +125,11 @@ async def premium_usage(db: AsyncSession, short_uuids: list[str]) -> tuple[int, 
             total += configs[squad_uuid].limit_bytes
             continue
         used += state.used_bytes or 0
-        total += state.total_limit_bytes
-    return used, total
+        if state.unlimited_at is not None:
+            unlimited = True
+        else:
+            total += state.total_limit_bytes
+    return used, 0 if unlimited else total
 
 
 async def lookup_premium_usage(short_uuids: list[str]) -> tuple[int, int] | None:

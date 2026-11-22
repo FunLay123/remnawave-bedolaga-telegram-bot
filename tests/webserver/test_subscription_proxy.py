@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gzip
 import json
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import httpx
@@ -502,11 +503,12 @@ class _FakeDb:
         return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: rows))
 
 
-def _state(squad_uuid, used_gb, limit_gb, extra_gb=0):
+def _state(squad_uuid, used_gb, limit_gb, extra_gb=0, unlimited_at=None):
     return SimpleNamespace(
         squad_uuid=squad_uuid,
         used_bytes=used_gb * BYTES_IN_GB,
         total_limit_bytes=(limit_gb + extra_gb) * BYTES_IN_GB,
+        unlimited_at=unlimited_at,
     )
 
 
@@ -548,6 +550,15 @@ async def test_premium_usage_sums_connected_premium_squads(premium_env):
     # wl-1: замерен, с докупкой; wl-2: ещё не замерен — лимит тарифа.
     assert used == 3 * BYTES_IN_GB
     assert total == (12 + 5) * BYTES_IN_GB
+
+
+async def test_premium_usage_unlimited_squad_reports_zero_total(premium_env):
+    premium_env.extend([_state('wl-1', 3, 10, unlimited_at=datetime(2026, 9, 6, tzinfo=UTC))])
+
+    used, total = await premium_usage(_FakeDb([_subscription()]), ['Ab3dEf9hJk'])
+
+    assert used == 3 * BYTES_IN_GB
+    assert total == 0
 
 
 async def test_premium_usage_none_without_connected_premium_squads(premium_env):

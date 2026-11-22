@@ -248,15 +248,24 @@ def test_live_menu_fingerprint_tracks_premium_squads_by_whole_gigabytes():
 
 async def test_live_menu_premium_state_rounds_usage_to_whole_gigabytes():
     rows = [
-        SimpleNamespace(subscription_id=7, squad_uuid='wl-b', used_bytes=int(3.9 * GIB), total_limit_bytes=10 * GIB),
-        SimpleNamespace(subscription_id=7, squad_uuid='wl-a', used_bytes=None, total_limit_bytes=5 * GIB),
+        SimpleNamespace(subscription_id=7, squad_uuid='wl-b', used_bytes=int(3.9 * GIB), total_limit_bytes=10 * GIB, unlimited_at=None),
+        SimpleNamespace(subscription_id=7, squad_uuid='wl-a', used_bytes=None, total_limit_bytes=5 * GIB, unlimited_at=datetime(2026, 9, 17, tzinfo=UTC)),
     ]
     db = AsyncMock()
     db.execute.return_value = MagicMock(scalars=MagicMock(return_value=rows))
     user = SimpleNamespace(subscriptions=[SimpleNamespace(id=7)])
 
-    assert await rich_menu.live_menu_premium_state(db, user) == ((7, 'wl-a', 0, 5 * GIB), (7, 'wl-b', 3, 10 * GIB))
+    assert await rich_menu.live_menu_premium_state(db, user) == ((7, 'wl-a', 0, 5 * GIB, True), (7, 'wl-b', 3, 10 * GIB, False))
     assert await rich_menu.live_menu_premium_state(db, SimpleNamespace(subscriptions=[])) == ()
+
+
+def test_live_menu_fingerprint_tracks_unlimited_flag():
+    texts = SimpleNamespace(format_traffic=Texts.format_traffic)
+    user = _make_user(_make_subscription(datetime.now(UTC), days_left=12))
+
+    assert rich_menu.live_menu_fingerprint(user, texts, ((1, 'wl', 3, 10 * GIB, False),)) != rich_menu.live_menu_fingerprint(
+        user, texts, ((1, 'wl', 3, 10 * GIB, True),)
+    )
 
 
 async def test_premium_only_change_redraws_menu(env):
