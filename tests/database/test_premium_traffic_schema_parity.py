@@ -25,6 +25,7 @@ VERSIONS = pathlib.Path(__file__).resolve().parents[2] / 'migrations/alembic/ver
 MIGRATIONS = (
     '0132_create_subscription_premium_traffic.py',
     '0133_premium_traffic_notified_90.py',
+    '0139_subscription_premium_traffic_unlimited.py',
 )
 TABLE = 'subscription_premium_traffic'
 

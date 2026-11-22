@@ -311,6 +311,23 @@ def add_extra_bytes(state: SubscriptionPremiumTraffic, extra_bytes: int) -> Subs
     return state
 
 
+def set_unlimited(
+    state: SubscriptionPremiumTraffic,
+    granted: bool,
+    *,
+    now: datetime | None = None,
+) -> SubscriptionPremiumTraffic:
+    """Выдать или снять безлимит на сквад.
+
+    `is_limited` и `closed_at` намеренно не трогаем: безлимит не открывает
+    закрытый сквад, а воркер должен увидеть ранее снятый сквад.
+    """
+    state.unlimited_at = (now or datetime.now(UTC)) if granted else None
+    state.notified_80 = False
+    state.notified_90 = False
+    return state
+
+
 async def delete_states_for_subscription(db: AsyncSession, subscription_id: int) -> int:
     """Убрать все состояния подписки — например, при переходе на тариф без премиума."""
     result = await db.execute(

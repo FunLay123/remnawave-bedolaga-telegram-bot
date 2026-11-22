@@ -3087,6 +3087,9 @@ class SubscriptionPremiumTraffic(Base):
     # (`start_new_period`), и доначисление трафика (`add_extra_bytes`) обязаны
     # знать, что снимать флаг нельзя, пока админ не откроет доступ явно.
     closed_at = Column(AwareDateTime(), nullable=True)
+    # Выданный вручную безлимит на этот сквад. NULL — безлимита нет; значение —
+    # когда выдан. Это отдельная причина, переживающая смену периода.
+    unlimited_at = Column(AwareDateTime(), nullable=True)
 
     period_start_at = Column(AwareDateTime(), nullable=False)
     # Последнее учтённое `lastTrafficResetAt` панели. Нужен, чтобы отличить
@@ -3117,7 +3120,11 @@ class SubscriptionPremiumTraffic(Base):
 
     @property
     def is_exhausted(self) -> bool:
-        """Исчерпан ли лимит. Нулевой лимит трактуем как безлимит."""
+        """Исчерпан ли лимит. Закрытие сильнее безлимита, безлимит — чисел."""
+        if self.closed_at is not None:
+            return True
+        if self.unlimited_at is not None:
+            return False
         if self.total_limit_bytes <= 0:
             return False
         return (self.used_bytes or 0) >= self.total_limit_bytes

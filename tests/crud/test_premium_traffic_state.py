@@ -17,6 +17,7 @@ from app.database.crud.premium_traffic import (
     get_states_for_subscription,
     record_usage,
     start_new_period,
+    set_unlimited,
     sync_premium_state_limits,
 )
 from app.database.models import SubscriptionPremiumTraffic
@@ -149,6 +150,58 @@ async def test_exhaustion_and_topup_return_the_squad(monkeypatch):
         # Порог 80 % теперь считается от 7 ГБ — предупредить нужно заново.
         assert state.notified_80 is False
         assert state.notified_90 is False
+
+
+async def test_unlimited_is_never_exhausted_even_above_the_limit(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)
+        state.used_bytes = 10 * FIVE_GB
+        set_unlimited(state, True, now=NOW)
+        await db.commit()
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.unlimited_at == NOW
+        assert reread.is_exhausted is False
+
+
+async def test_closed_wins_over_unlimited(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)
+        state.closed_at = NOW
+        set_unlimited(state, True, now=NOW)
+        assert state.is_exhausted is True
+
+
+async def test_new_period_keeps_unlimited_and_zeroes_usage(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)
+        set_unlimited(state, True, now=NOW)
+        start_new_period(state, period_start_at=NOW + timedelta(days=30), limit_bytes=FIVE_GB)
+        assert state.unlimited_at == NOW
+        assert state.used_bytes == 0
+        assert state.is_limited is False
+
+
+async def test_revoke_clears_unlimited_and_resets_warning_marks(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)
+        set_unlimited(state, True, now=NOW)
+        state.notified_80 = True
+        state.notified_90 = True
+        set_unlimited(state, False)
+        assert state.unlimited_at is None
+        assert state.notified_80 is False
+        assert state.notified_90 is False
+
+
+async def test_tariff_limit_sync_keeps_unlimited(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await _new_state(db)
+        set_unlimited(state, True, now=NOW)
+        await db.commit()
+        await sync_premium_state_limits(db, 1, SimpleNamespace(server_traffic_limits={SQUAD: {'traffic_limit_gb': 10}}))
+        await db.commit()
+        reread = await get_state(db, 1, SQUAD)
+        assert reread.unlimited_at == NOW
 
 
 async def test_topup_smaller_than_overspend_keeps_the_squad_limited(monkeypatch):
