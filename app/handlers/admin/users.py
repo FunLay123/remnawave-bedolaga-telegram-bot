@@ -21,6 +21,7 @@ from app.database.crud.premium_traffic import (
     add_extra_bytes,
     get_or_create_state,
     get_states_for_subscription,
+    set_unlimited,
 )
 from app.database.crud.promo_group import get_promo_groups_with_counts
 from app.database.crud.server_squad import (
@@ -57,6 +58,7 @@ from app.keyboards.admin import (
 from app.localization.texts import Texts, get_texts
 from app.services.remnawave_service import RemnaWaveService
 from app.services.subscription_service import SubscriptionService
+from app.services.premium_traffic_service import premium_traffic_service
 from app.services.user_service import UserService
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler
@@ -4280,12 +4282,13 @@ async def process_traffic_edit_text(message: types.Message, db_user: User, state
 
 
 class PremiumSquadCardState(Enum):
-    """Четыре состояния премиум-сквада, которые нельзя путать в интерфейсе."""
+    """Пять состояний премиум-сквада, которые нельзя путать в интерфейсе."""
 
     NO_LIMIT = 'no_limit'
     ACTIVE = 'active'
     EXHAUSTED = 'exhausted'
     CLOSED = 'closed'
+    UNLIMITED = 'unlimited'
     REOPENED_PENDING = 'reopened_pending'
 
 
@@ -4304,6 +4307,8 @@ def _classify_premium_traffic_state(
     """
     if state is not None and state.closed_at is not None:
         return PremiumSquadCardState.CLOSED
+    if state is not None and state.unlimited_at is not None:
+        return PremiumSquadCardState.UNLIMITED
     if state is not None and state.is_limited:
         return PremiumSquadCardState.REOPENED_PENDING if not state.is_exhausted else PremiumSquadCardState.EXHAUSTED
     if config.limit_gb <= 0:
@@ -4390,7 +4395,7 @@ def _format_premium_traffic_summary(rows: list[dict[str, Any]]) -> str | None:
     if not rows:
         return None
 
-    closed = exhausted = pending = 0
+    closed = exhausted = pending = unlimited = 0
     for row in rows:
         state_kind = _classify_premium_traffic_state(row['config'], row['state'])
         if state_kind is PremiumSquadCardState.CLOSED:
@@ -4399,6 +4404,8 @@ def _format_premium_traffic_summary(rows: list[dict[str, Any]]) -> str | None:
             exhausted += 1
         elif state_kind is PremiumSquadCardState.REOPENED_PENDING:
             pending += 1
+        elif state_kind is PremiumSquadCardState.UNLIMITED:
+            unlimited += 1
 
     badges = []
     if closed:
@@ -4407,6 +4414,8 @@ def _format_premium_traffic_summary(rows: list[dict[str, Any]]) -> str | None:
         badges.append(f'⛔ исчерпано: {exhausted}')
     if pending:
         badges.append(f'🔓 ожидает возврата: {pending}')
+    if unlimited:
+        badges.append(f'♾️ безлимит: {unlimited}')
 
     line = f'<b>Премиум-трафик:</b> {len(rows)} сквад(ов)'
     if badges:
@@ -4443,7 +4452,13 @@ def _format_premium_traffic_row(row: dict[str, Any], state_kind: PremiumSquadCar
     is_removed_from_panel = bool(state.is_limited) if state is not None else False
     lines.append(f'  Снят из панели: {"да" if is_removed_from_panel else "нет"}')
 
-    if state_kind is PremiumSquadCardState.EXHAUSTED:
+    if state_kind is PremiumSquadCardState.UNLIMITED:
+        granted_at = format_datetime(state.unlimited_at) if state is not None and state.unlimited_at else '—'
+        lines.append(f'  ♾️ Безлимит выдан: {granted_at}')
+        lines.append(f'  Израсходовано: {used_gb} ГБ')
+        if is_removed_from_panel:
+            lines.append('  ⚠️ Сквад ограничен в панели — воркер вернёт сквад; общий лимит тарифа продолжает действовать.')
+    elif state_kind is PremiumSquadCardState.EXHAUSTED:
         lines.append('  ⛔ Снят автоматически: лимит исчерпан. Вернётся сам с началом нового периода.')
     elif state_kind is PremiumSquadCardState.CLOSED:
         closed_at = format_datetime(state.closed_at) if state is not None and state.closed_at else '—'
@@ -4517,7 +4532,10 @@ async def _grant_premium_traffic(
         squad_uuid,
         limit_bytes=config.limit_bytes,
         period_start_at=datetime.now(UTC),
+        for_update=True,
     )
+    if state.unlimited_at is not None:
+        return False, '❌ На этом сервере уже действует безлимит — докупка не нужна'
     add_extra_bytes(state, gb * BYTES_IN_GB)
     await db.commit()
 
@@ -4622,7 +4640,7 @@ async def _render_premium_squad_detail(
     # в кабинете: докупать или закрывать период, которого сейчас не существует,
     # нельзя. Открыть ранее закрытый доступ можно и без этого условия — у
     # `_reopen_access` для этого достаточно самой строки состояния.
-    if row['config'].limit_gb > 0:
+    if row['config'].limit_gb > 0 and state_kind is not PremiumSquadCardState.UNLIMITED:
         keyboard.append(
             [
                 types.InlineKeyboardButton(
@@ -4638,7 +4656,22 @@ async def _render_premium_squad_detail(
                 )
             ]
         )
+    elif state_kind is PremiumSquadCardState.UNLIMITED:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text='♾️ Снять безлимит', callback_data=f'admin_user_premium_unlimited_revoke_{user_id}{_sid}_{idx}'
+                )
+            ]
+        )
     elif row['config'].limit_gb > 0:
+        keyboard.append(
+            [
+                types.InlineKeyboardButton(
+                    text='♾️ Выдать безлимит', callback_data=f'admin_user_premium_unlimited_{user_id}{_sid}_{idx}'
+                )
+            ]
+        )
         keyboard.append(
             [
                 types.InlineKeyboardButton(
@@ -4793,6 +4826,103 @@ async def apply_premium_traffic_grant_text(message: types.Message, db_user: User
             inline_keyboard=[[types.InlineKeyboardButton(text='⬅️ К премиум-трафику', callback_data=back_cb)]]
         ),
     )
+
+
+@admin_required
+@error_handler
+async def ask_grant_premium_unlimited(callback: types.CallbackQuery, db_user: User):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    detail_cb = f'admin_user_premium_sq_{user_id}{_sid}_{idx}'
+    confirm_cb = f'admin_user_premium_unlimited_confirm_{user_id}{_sid}_{idx}'
+    await callback.message.edit_text(
+        '♾️ <b>Выдача безлимита</b>\n\n'
+        'Безлимит отменяет ограничение отдельного сквада, но общий лимит тарифа продолжает действовать.\n\n'
+        'Продолжить?',
+        reply_markup=get_confirmation_keyboard(confirm_cb, detail_cb, db_user.language),
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def confirm_grant_premium_unlimited(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    if idx < 0 or idx >= len(rows):
+        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
+        return
+    row = rows[idx]
+    if row['config'].limit_gb <= 0:
+        await callback.answer('❌ Сквад недоступен для безлимита', show_alert=True)
+        return
+    state = await get_or_create_state(
+        db, subscription.id, row['squad_uuid'], limit_bytes=row['config'].limit_bytes,
+        period_start_at=datetime.now(UTC), for_update=True,
+    )
+    if state.closed_at is not None:
+        await callback.answer('❌ Сквад закрыт администратором — сначала откройте доступ', show_alert=True)
+        return
+    if state.unlimited_at is not None:
+        await callback.answer('♾️ Безлимит уже действует', show_alert=True)
+        return
+    set_unlimited(state, True, now=datetime.now(UTC))
+    await db.commit()
+    premium_traffic_service.request_pass()
+    logger.info('Админ выдал безлимит премиум-скваду', admin_id=db_user.id, user_id=user_id, subscription_id=subscription.id, squad_uuid=row['squad_uuid'])
+    callback.data = f'admin_user_premium_sq_{user_id}{f"_s{subscription_id}" if subscription_id else ""}_{idx}'
+    await _render_premium_squad_detail(callback, db, user_id, subscription_id, idx)
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def ask_revoke_premium_unlimited(callback: types.CallbackQuery, db_user: User):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+    _sid = f'_s{subscription_id}' if subscription_id else ''
+    await callback.message.edit_text(
+        '♾️ <b>Снятие безлимита</b>\n\n'
+        'После снятия вернётся лимит тарифа; если расход выше лимита, воркер снимет сквад. '
+        'Чтобы отобрать доступ сразу — закройте доступ.\n\nПродолжить?',
+        reply_markup=get_confirmation_keyboard(
+            f'admin_user_premium_unlimited_revoke_confirm_{user_id}{_sid}_{idx}',
+            f'admin_user_premium_sq_{user_id}{_sid}_{idx}', db_user.language,
+        ),
+    )
+    await callback.answer()
+
+
+@admin_required
+@error_handler
+async def confirm_revoke_premium_unlimited(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
+    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if not subscription:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    if idx < 0 or idx >= len(rows):
+        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
+        return
+    row = rows[idx]
+    state = await get_or_create_state(
+        db, subscription.id, row['squad_uuid'], limit_bytes=row['config'].limit_bytes,
+        period_start_at=datetime.now(UTC), for_update=True,
+    )
+    if state.unlimited_at is None:
+        await callback.answer('♾️ Безлимит уже снят', show_alert=True)
+        return
+    set_unlimited(state, False)
+    await db.commit()
+    premium_traffic_service.request_pass()
+    logger.info('Админ снял безлимит премиум-сквада', admin_id=db_user.id, user_id=user_id, subscription_id=subscription.id, squad_uuid=row['squad_uuid'])
+    callback.data = f'admin_user_premium_sq_{user_id}{f"_s{subscription_id}" if subscription_id else ""}_{idx}'
+    await _render_premium_squad_detail(callback, db, user_id, subscription_id, idx)
+    await callback.answer()
 
 
 @admin_required
@@ -7261,6 +7391,16 @@ def register_handlers(dp: Dispatcher):
     # варианты (детали сквада, установка пресета, подтверждение закрытия)
     # регистрируем раньше общего входа на экран.
     dp.callback_query.register(show_premium_squad_detail, F.data.startswith('admin_user_premium_sq_'))
+    dp.callback_query.register(confirm_grant_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_confirm_'))
+    dp.callback_query.register(confirm_revoke_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_revoke_confirm_'))
+    dp.callback_query.register(
+        ask_revoke_premium_unlimited,
+        F.data.startswith('admin_user_premium_unlimited_revoke_') & ~F.data.contains('confirm'),
+    )
+    dp.callback_query.register(
+        ask_grant_premium_unlimited,
+        F.data.startswith('admin_user_premium_unlimited_') & ~F.data.contains('confirm') & ~F.data.contains('revoke'),
+    )
     dp.callback_query.register(apply_premium_traffic_grant_preset, F.data.startswith('admin_user_premium_grant_set_'))
     dp.callback_query.register(
         start_premium_traffic_grant,
@@ -7276,7 +7416,8 @@ def register_handlers(dp: Dispatcher):
         show_premium_traffic_screen,
         F.data.startswith('admin_user_premium_')
         & ~F.data.contains('_sq_')
-        & ~F.data.contains('_grant_')
+         & ~F.data.contains('_grant_')
+         & ~F.data.contains('_unlimited_')
         & ~F.data.contains('_close_')
         & ~F.data.contains('_reopen_'),
     )

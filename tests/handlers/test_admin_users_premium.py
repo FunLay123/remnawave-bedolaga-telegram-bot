@@ -7,7 +7,8 @@
    лимит исчерпан) — сам вернётся с новым периодом;
 3) закрыт администратором (`closed_at` стоит) — переживает смену периода,
    докупку и уход сквада из тарифа;
-4) открыт администратором, но ещё не возвращён в панель воркером
+4) безлимит — отдельное админское право поверх лимита;
+5) открыт администратором, но ещё не возвращён в панель воркером
    (`closed_at is None`, `is_limited=True`, лимит уже не исчерпан) — то самое
    переходное состояние, которое кабинет верно показывает как «ещё
    ограничено»; здесь его нельзя называть «закрыто администратором».
@@ -54,7 +55,9 @@ def _config(limit_gb=5, squad_uuid=SQUAD, name=None):
     return PremiumSquadConfig(squad_uuid=squad_uuid, limit_gb=limit_gb, name=name)
 
 
-def _bare_state(*, closed_at=None, is_limited=False, limit_bytes=5 * BYTES_IN_GB, extra_bytes=0, used_bytes=0):
+def _bare_state(
+    *, closed_at=None, unlimited_at=None, is_limited=False, limit_bytes=5 * BYTES_IN_GB, extra_bytes=0, used_bytes=0
+):
     """Несохранённый ORM-объект — для тестов классификации без БД."""
     return SubscriptionPremiumTraffic(
         subscription_id=1,
@@ -64,6 +67,7 @@ def _bare_state(*, closed_at=None, is_limited=False, limit_bytes=5 * BYTES_IN_GB
         used_bytes=used_bytes,
         is_limited=is_limited,
         closed_at=closed_at,
+        unlimited_at=unlimited_at,
         period_start_at=NOW,
     )
 
@@ -171,6 +175,68 @@ def test_row_rendering_no_limit_never_says_closed():
     # обратное или упоминать закрытие администратором.
     assert 'закрыт администратором' not in rendered.lower()
     assert 'без отдельного лимита' in rendered.lower()
+
+
+def test_unlimited_is_classified_before_exhausted():
+    state = _bare_state(is_limited=True, used_bytes=5 * BYTES_IN_GB, unlimited_at=NOW)
+
+    assert users_mod._classify_premium_traffic_state(_config(limit_gb=5), state) is users_mod.PremiumSquadCardState.UNLIMITED
+
+
+def test_closed_beats_unlimited():
+    state = _bare_state(closed_at=NOW, unlimited_at=NOW)
+
+    assert users_mod._classify_premium_traffic_state(_config(limit_gb=5), state) is users_mod.PremiumSquadCardState.CLOSED
+
+
+def test_row_rendering_unlimited_shows_infinity_and_grant_date():
+    state = _bare_state(unlimited_at=NOW, used_bytes=BYTES_IN_GB)
+    row = {'squad_uuid': SQUAD, 'config': _config(limit_gb=5), 'state': state, 'connected': True, 'name': 'DE-1'}
+
+    rendered = users_mod._format_premium_traffic_row(row, users_mod.PremiumSquadCardState.UNLIMITED)
+
+    assert '♾️' in rendered
+    assert 'безлимит' in rendered.lower()
+    assert 'DE-1' in rendered
+
+
+def test_summary_counts_unlimited():
+    state = _bare_state(unlimited_at=NOW)
+    row = {'squad_uuid': SQUAD, 'config': _config(limit_gb=5), 'state': state, 'connected': True, 'name': 'DE-1'}
+
+    assert '♾️' in users_mod._format_premium_traffic_summary([row])
+
+
+class TestUnlimitedCardKeyboard:
+    async def test_keyboard_offers_revoke_when_unlimited(self, monkeypatch):
+        state = _bare_state(unlimited_at=NOW)
+        subscription = _subscription()
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=subscription))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        async with memory_session(monkeypatch, TABLES) as db:
+            await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            stored = await get_state(db, 1, SQUAD)
+            stored.unlimited_at = NOW
+            await db.commit()
+            callback = _callback('admin_user_premium_sq_1_0')
+
+            await users_mod._render_premium_squad_detail(callback, db, 1, None, 0)
+
+            callbacks = [button.callback_data for row in callback.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard for button in row]
+            assert any(cb.startswith('admin_user_premium_unlimited_revoke_') for cb in callbacks)
+            assert not any(cb.startswith('admin_user_premium_grant_') for cb in callbacks)
+
+    async def test_keyboard_offers_grant_when_not_unlimited(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        async with memory_session(monkeypatch, TABLES) as db:
+            callback = _callback('admin_user_premium_sq_1_0')
+
+            await users_mod._render_premium_squad_detail(callback, db, 1, None, 0)
+
+            callbacks = [button.callback_data for row in callback.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard for button in row]
+            assert any(cb.startswith('admin_user_premium_unlimited_') for cb in callbacks)
+            assert not any(cb.startswith('admin_user_premium_unlimited_revoke_') for cb in callbacks)
 
 
 # ============================= Сбор "относящихся" сквадов =============================
@@ -447,3 +513,113 @@ def test_callback_data_stays_within_telegram_limit_for_worst_case_ids():
     ]
     for callback_data in candidates:
         assert len(callback_data.encode('utf-8')) <= 64, callback_data
+
+
+class TestUnlimitedGrantRevoke:
+    async def test_confirm_grant_sets_unlimited_and_wakes_worker(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        wake = MagicMock()
+        monkeypatch.setattr(users_mod.premium_traffic_service, 'request_pass', wake)
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            await db.commit()
+            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+
+            await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
+
+            assert state.unlimited_at is not None
+            wake.assert_called_once()
+
+    async def test_confirm_grant_creates_missing_state_and_wakes_worker(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        wake = MagicMock()
+        monkeypatch.setattr(users_mod.premium_traffic_service, 'request_pass', wake)
+        async with memory_session(monkeypatch, TABLES) as db:
+            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+
+            await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
+
+            state = await get_state(db, 1, SQUAD)
+            assert state is not None and state.unlimited_at is not None
+            wake.assert_called_once()
+
+    async def test_confirm_grant_refuses_closed_squad(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        wake = MagicMock()
+        monkeypatch.setattr(users_mod.premium_traffic_service, 'request_pass', wake)
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.closed_at = NOW
+            await db.commit()
+            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+
+            await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
+
+            callback.answer.assert_awaited_once_with('❌ Сквад закрыт администратором — сначала откройте доступ', show_alert=True)
+            assert state.unlimited_at is None
+            wake.assert_not_called()
+
+    async def test_confirm_grant_is_idempotent(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        wake = MagicMock()
+        monkeypatch.setattr(users_mod.premium_traffic_service, 'request_pass', wake)
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.unlimited_at = NOW
+            await db.commit()
+            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+
+            await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
+
+            assert state.unlimited_at == NOW
+            wake.assert_not_called()
+
+    async def test_confirm_revoke_clears_unlimited_and_wakes_worker(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        wake = MagicMock()
+        monkeypatch.setattr(users_mod.premium_traffic_service, 'request_pass', wake)
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.unlimited_at = NOW
+            await db.commit()
+            callback = _callback('admin_user_premium_unlimited_revoke_confirm_1_0')
+
+            await _unwrap(users_mod.confirm_revoke_premium_unlimited)(callback, _db_user(), db)
+
+            assert state.unlimited_at is None
+            wake.assert_called_once()
+
+    async def test_confirm_revoke_when_not_unlimited_does_not_change_state(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            await db.commit()
+            callback = _callback('admin_user_premium_unlimited_revoke_confirm_1_0')
+
+            await _unwrap(users_mod.confirm_revoke_premium_unlimited)(callback, _db_user(), db)
+
+            callback.answer.assert_awaited_once_with('♾️ Безлимит уже снят', show_alert=True)
+            assert state.unlimited_at is None
+
+    async def test_grant_gb_refuses_when_unlimited(self, monkeypatch):
+        monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.unlimited_at = NOW
+            await db.commit()
+
+            ok, message = await users_mod._grant_premium_traffic(db, 1, None, SQUAD, 10, admin_id=999)
+
+            assert ok is False
+            assert 'безлимит' in message.lower()
+
+
+def test_extract_unlimited_callbacks():
+    assert users_mod._extract_premium_squad_context('admin_user_premium_unlimited_confirm_123_s456_0') == (123, 456, 0)
+    assert users_mod._extract_premium_squad_context('admin_user_premium_unlimited_revoke_confirm_123_s456_0') == (123, 456, 0)
