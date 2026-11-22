@@ -259,6 +259,15 @@ async def test_live_menu_premium_state_rounds_usage_to_whole_gigabytes():
     assert await rich_menu.live_menu_premium_state(db, SimpleNamespace(subscriptions=[])) == ()
 
 
+async def test_live_menu_legacy_row_without_unlimited_at_has_false_flag():
+    row = SimpleNamespace(subscription_id=7, squad_uuid='wl', used_bytes=3 * GIB, total_limit_bytes=10 * GIB)
+    db = AsyncMock()
+    db.execute.return_value = MagicMock(scalars=MagicMock(return_value=[row]))
+    user = SimpleNamespace(subscriptions=[SimpleNamespace(id=7)])
+
+    assert await rich_menu.live_menu_premium_state(db, user) == ((7, 'wl', 3, 10 * GIB, False),)
+
+
 def test_live_menu_fingerprint_tracks_unlimited_flag():
     texts = SimpleNamespace(format_traffic=Texts.format_traffic)
     user = _make_user(_make_subscription(datetime.now(UTC), days_left=12))

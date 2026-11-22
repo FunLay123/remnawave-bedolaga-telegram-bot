@@ -36,6 +36,26 @@ async def test_unlimited_squad_line_shows_infinity(monkeypatch):
     assert '♾️' in lines[0]
 
 
+@pytest.mark.anyio('asyncio')
+async def test_legacy_squad_without_unlimited_at_shows_numeric_total(monkeypatch):
+    subscription = SimpleNamespace(id=1, connected_squads=['wl'])
+    tariff = SimpleNamespace(server_traffic_limits={'wl': {'traffic_limit_gb': 5}})
+    state = SimpleNamespace(
+        squad_uuid='wl',
+        used_bytes=2 * 1024**3,
+        total_limit_bytes=5 * 1024**3,
+    )
+    monkeypatch.setattr('app.database.crud.premium_traffic.get_states_for_subscription', AsyncMock(return_value=[state]))
+    monkeypatch.setattr('app.database.crud.server_squad.get_squad_display_names', AsyncMock(return_value={'wl': 'WL'}))
+
+    lines = await rich_menu.premium_squad_lines(subscription, tariff, get_texts('ru'), AsyncMock())
+
+    assert len(lines) == 1
+    assert 'WL' in lines[0]
+    assert '♾️' not in lines[0]
+    assert '5 ГБ' in lines[0]
+
+
 def test_general_limit_is_exhausted_by_numbers():
     assert is_general_traffic_exhausted(SimpleNamespace(traffic_limit_gb=12, traffic_used_gb=12))
     assert is_general_traffic_exhausted(SimpleNamespace(traffic_limit_gb=12, traffic_used_gb=32.7))

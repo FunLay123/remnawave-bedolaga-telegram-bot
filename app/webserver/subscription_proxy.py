@@ -125,7 +125,7 @@ async def premium_usage(db: AsyncSession, short_uuids: list[str]) -> tuple[int, 
             total += configs[squad_uuid].limit_bytes
             continue
         used += state.used_bytes or 0
-        if state.unlimited_at is not None:
+        if getattr(state, 'unlimited_at', None) is not None:
             unlimited = True
         else:
             total += state.total_limit_bytes
