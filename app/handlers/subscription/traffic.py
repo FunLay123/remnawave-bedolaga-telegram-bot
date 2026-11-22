@@ -1153,7 +1153,13 @@ async def _get_purchasable_premium_squads(db: AsyncSession, subscription) -> lis
     purchasable_uuids = [
         squad_uuid
         for squad_uuid in options
-        if not (states.get(squad_uuid) and states[squad_uuid].closed_at is not None)
+        if not (
+            states.get(squad_uuid)
+            and (
+                states[squad_uuid].closed_at is not None
+                or states[squad_uuid].unlimited_at is not None
+            )
+        )
     ]
     if not purchasable_uuids:
         return []

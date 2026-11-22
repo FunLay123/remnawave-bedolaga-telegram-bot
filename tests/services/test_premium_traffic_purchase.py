@@ -151,6 +151,17 @@ class TestQuote:
 
             assert error.value.code == 'squad_closed'
 
+    async def test_quote_refuses_unlimited_squad(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.unlimited_at = NOW
+            await db.commit()
+
+            with pytest.raises(PremiumTopupError) as error:
+                await quote_premium_topup(db, _subscription(), SQUAD, 5)
+
+            assert error.value.code == 'squad_unlimited'
+
     async def test_reopened_pending_squad_is_still_purchasable(self, monkeypatch):
         """Гейт строго на ``closed_at``, а не на ``is_limited``.
 
@@ -254,6 +265,24 @@ class TestApply:
                 await apply_premium_topup(db, subscription, quote, period_start_at=NOW)
 
             assert error.value.code == 'squad_closed'
+            state = await get_state(db, 1, SQUAD)
+            assert state.extra_bytes == 0
+
+    async def test_apply_refuses_unlimited_set_after_the_quote(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription()
+            await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            await db.commit()
+            quote = await quote_premium_topup(db, subscription, SQUAD, 5)
+
+            state = await get_state(db, 1, SQUAD)
+            state.unlimited_at = NOW
+            await db.commit()
+
+            with pytest.raises(PremiumTopupError) as error:
+                await apply_premium_topup(db, subscription, quote, period_start_at=NOW)
+
+            assert error.value.code == 'squad_unlimited'
             state = await get_state(db, 1, SQUAD)
             assert state.extra_bytes == 0
 

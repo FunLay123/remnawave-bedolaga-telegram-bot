@@ -124,6 +124,15 @@ def _ensure_squad_is_not_closed(state) -> None:
         )
 
 
+def _ensure_squad_is_not_unlimited(state) -> None:
+    """Отказать в докупке, если для сквада уже включён безлимит."""
+    if state is not None and state.unlimited_at is not None:
+        raise PremiumTopupError(
+            'squad_unlimited',
+            'На этом сервере уже действует безлимит, докупка не нужна',
+        )
+
+
 async def quote_premium_topup(
     db: AsyncSession,
     subscription,
@@ -155,6 +164,7 @@ async def quote_premium_topup(
     # каждого вызывающего по отдельности (см. Task 13).
     state = await get_state(db, subscription.id, squad_uuid)
     _ensure_squad_is_not_closed(state)
+    _ensure_squad_is_not_unlimited(state)
 
     if config.max_topup_gb > 0:
         # Быстрый отказ до списания: читаем без блокировки, потому что решение
@@ -210,6 +220,7 @@ async def apply_premium_topup(
     # балансом ещё не значит, что начисление уже случилось). Перечитанное здесь
     # состояние — то же самое, под FOR UPDATE, так что вторая проверка не лишняя.
     _ensure_squad_is_not_closed(state)
+    _ensure_squad_is_not_unlimited(state)
 
     was_limited = bool(state.is_limited)
     add_extra_bytes(state, quote.bytes)

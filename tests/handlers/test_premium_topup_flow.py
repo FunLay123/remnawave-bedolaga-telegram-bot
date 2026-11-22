@@ -115,6 +115,16 @@ class TestPurchasableSquads:
 
             assert rows == []
 
+    async def test_unlimited_squad_is_not_offered(self, monkeypatch):
+        async with memory_session(monkeypatch, TABLES) as db:
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            state.unlimited_at = NOW
+            await db.commit()
+
+            rows = await traffic_mod._get_purchasable_premium_squads(db, _subscription())
+
+            assert rows == []
+
     async def test_reopened_pending_squad_is_still_offered(self, monkeypatch):
         """closed_at снят явным открытием — это НЕ «закрыто», докупка должна остаться доступной.
 
