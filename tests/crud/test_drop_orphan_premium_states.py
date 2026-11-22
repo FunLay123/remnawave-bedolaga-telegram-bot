@@ -69,6 +69,22 @@ async def test_ordinary_orphan_cleanup_on_tariff_switch_still_works(monkeypatch)
         assert await get_state(db, 1, SQUAD) is None
 
 
+async def test_unlimited_state_survives_tariff_switch_that_drops_the_squad(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+        state.is_limited = True
+        state.unlimited_at = NOW
+        await db.commit()
+
+        await _drop_orphan_premium_states(db, _subscription(), _tariff({}))
+        await db.commit()
+
+        reread = await get_state(db, 1, SQUAD)
+        assert reread is not None
+        assert reread.unlimited_at == NOW
+        assert reread.is_limited is False
+
+
 async def test_squad_still_in_new_tariff_is_left_alone(monkeypatch):
     """Сквад, оставшийся премиальным и в новом тарифе, уборку не затрагивает."""
     async with memory_session(monkeypatch, TABLES) as db:

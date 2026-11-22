@@ -126,6 +126,7 @@ class _Orphan:
     # (``/close``), это не «сквад больше не премиальный», а прежнее решение
     # оператора отобрать доступ. Осиротение не должно его снимать.
     closed_at: datetime | None
+    unlimited_at: datetime | None
 
 
 class _PanelWriteNotApplied(Exception):
@@ -431,6 +432,7 @@ class PremiumTrafficService:
                     subscription=subscription,
                     panel_user_id=self._panel_user_id(subscription) if subscription is not None else None,
                     closed_at=state.closed_at,
+                    unlimited_at=state.unlimited_at,
                 )
             )
         return orphans
@@ -534,6 +536,39 @@ class PremiumTrafficService:
                 'Осиротевшее состояние премиум-лимита не снято: нет аккаунта в панели',
                 subscription_id=orphan.subscription_id,
                 squad_uuid=orphan.squad_uuid,
+            )
+            return False
+
+        if orphan.unlimited_at is not None:
+            from app.database.crud.premium_traffic import get_state
+
+            async def _keep_unlimited() -> None:
+                async with db.begin_nested():
+                    state = await get_state(db, orphan.subscription_id, orphan.squad_uuid)
+                    if state is None:
+                        return
+                    if needs_restore:
+                        state.is_limited = False
+                        await db.flush()
+                        self._raise_if_deferred(
+                            await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
+                        )
+
+            applied = await self._log_panel_failure(
+                _keep_unlimited,
+                fail_event='Не удалось сохранить безлимитное состояние премиум-лимита',
+                defer_event='Возврат безлимитного сквада отложен: открыт grace-оверлей',
+                subscription_id=orphan.subscription_id,
+                squad_uuid=orphan.squad_uuid,
+            )
+            if not applied:
+                return False
+            await db.commit()
+            logger.info(
+                'Безлимитное состояние премиум-лимита сохранено',
+                subscription_id=orphan.subscription_id,
+                squad_uuid=orphan.squad_uuid,
+                restored=needs_restore,
             )
             return False
 
@@ -783,7 +818,7 @@ class PremiumTrafficService:
             # узнать, что белые списки перестали работать. Флаг для триала не
             # поднимаем: после покупки платной подписки предупреждение должно
             # прийти по текущему расходу, а не потеряться в уже отмеченном периоде.
-            if not getattr(target.subscription, 'is_trial', False):
+            if state.unlimited_at is None and not getattr(target.subscription, 'is_trial', False):
                 # Одно предупреждение на 90 %. Порог проверяем один раз: если
                 # расход за проход перескочил сразу за него, сообщение всё равно
                 # одно, а `notified_90` не даёт повторить его на следующем проходе.

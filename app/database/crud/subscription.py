@@ -1340,12 +1340,23 @@ async def _drop_orphan_premium_states(
         if not not_in_new_tariff:
             return
         closed = {uuid for uuid, state in not_in_new_tariff.items() if state.closed_at is not None}
-        orphaned = set(not_in_new_tariff) - closed
+        unlimited = {
+            uuid for uuid, state in not_in_new_tariff.items() if state.closed_at is None and state.unlimited_at is not None
+        }
+        for uuid in unlimited:
+            not_in_new_tariff[uuid].is_limited = False
+        orphaned = set(not_in_new_tariff) - closed - unlimited
         if closed:
             logger.info(
                 '🔒 Смена тарифа: премиум-лимиты, закрытые администратором, сохранены',
                 subscription_id=subscription.id,
                 squads=sorted(closed),
+            )
+        if unlimited:
+            logger.info(
+                '♾️ Смена тарифа: безлимитные премиум-лимиты сохранены и разблокированы',
+                subscription_id=subscription.id,
+                squads=sorted(unlimited),
             )
         if not orphaned:
             return

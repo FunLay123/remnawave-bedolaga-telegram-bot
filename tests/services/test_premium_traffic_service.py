@@ -83,6 +83,7 @@ def _state(
     notified_90=False,
     baseline_bytes=0,
     closed_at=None,
+    unlimited_at=None,
 ):
     """Лёгкий двойник состояния: воркер обращается только к этим полям."""
     limit_bytes = limit_gb * BYTES_IN_GB
@@ -104,6 +105,7 @@ def _state(
             # Закрыто администратором намеренно, а не за перерасход — по
             # умолчанию нет, у него своя ветка тестов (`TestLimitedSquadEntitlement`).
             self.closed_at = closed_at
+            self.unlimited_at = unlimited_at
 
         @property
         def total_limit_bytes(self):
@@ -111,6 +113,10 @@ def _state(
 
         @property
         def is_exhausted(self):
+            if self.closed_at is not None:
+                return True
+            if self.unlimited_at is not None:
+                return False
             return self.total_limit_bytes > 0 and self.used_bytes >= self.total_limit_bytes
 
     return _State()
@@ -335,6 +341,47 @@ class TestDecisions:
 
         assert outcome == 'limited'
         exhausted.assert_awaited_once()
+
+    async def test_unlimited_squad_is_not_limited_above_the_limit(self, monkeypatch):
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=100 * BYTES_IN_GB, unlimited_at=NOW)
+
+        outcome, pushed = await self._apply(service, _target(), state, 100 * BYTES_IN_GB, monkeypatch)
+
+        assert outcome is None
+        assert state.is_limited is False
+        assert pushed == []
+
+    async def test_unlimited_squad_gets_no_ninety_percent_warning(self, monkeypatch):
+        service = PremiumTrafficService()
+        warnings = AsyncMock()
+        monkeypatch.setattr(service, '_notify_warning', warnings)
+        state = _state(limit_gb=5, unlimited_at=NOW)
+
+        outcome, _ = await self._apply(service, _target(), state, 5 * BYTES_IN_GB, monkeypatch)
+
+        assert outcome is None
+        warnings.assert_not_awaited()
+
+    async def test_granting_unlimited_restores_a_limited_squad(self, monkeypatch):
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, used_bytes=5 * BYTES_IN_GB, is_limited=True, unlimited_at=NOW)
+
+        outcome, pushed = await self._apply(service, _target(), state, 5 * BYTES_IN_GB, monkeypatch)
+
+        assert outcome == 'restored'
+        assert state.is_limited is False
+        assert pushed == [1]
+
+    async def test_closed_unlimited_squad_is_not_restored(self, monkeypatch):
+        service = PremiumTrafficService()
+        state = _state(limit_gb=5, is_limited=True, closed_at=NOW, unlimited_at=NOW)
+
+        outcome, pushed = await self._apply(service, _target(), state, 0, monkeypatch)
+
+        assert outcome is None
+        assert state.is_limited is True
+        assert pushed == []
 
     async def test_topup_restores_a_limited_squad(self, monkeypatch):
         service = PremiumTrafficService()
@@ -1704,6 +1751,39 @@ class TestOrphanStates:
             assert stats['cleaned'] == 0
             # Возврата в панель быть не должно — закрытие ещё в силе.
             assert pushed == []
+
+    async def test_unlimited_state_survives_leaving_the_premium_config(self, monkeypatch):
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={})
+            state = await _seed_state(db)
+            state.unlimited_at = NOW
+            await db.commit()
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            reread = await get_state(db, 1, SQUAD)
+            assert reread is not None
+            assert reread.unlimited_at == NOW
+            assert stats['cleaned'] == 0
+            assert pushed == []
+
+    async def test_unlimited_orphan_with_removed_squad_is_restored_but_row_kept(self, monkeypatch):
+        async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+            await _seed_subscription(db, premium_limits={OTHER_SQUAD: {'traffic_limit_gb': 5}})
+            state = await _seed_state(db, is_limited=True)
+            state.unlimited_at = NOW
+            await db.commit()
+            pushed = _run_worker_against(monkeypatch, db)
+
+            stats = await PremiumTrafficService().process_once()
+
+            reread = await get_state(db, 1, SQUAD)
+            assert reread is not None
+            assert reread.unlimited_at == NOW
+            assert reread.is_limited is False
+            assert stats['cleaned'] == 0
+            assert pushed == [[SQUAD]]
 
     async def test_squad_dropped_from_premium_list_is_unlocked(self, monkeypatch):
         """Сквад убрали из премиального списка тарифа — доступ возвращается."""
