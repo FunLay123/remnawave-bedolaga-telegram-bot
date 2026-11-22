@@ -14,8 +14,9 @@ from app.utils import rich_menu
 from app.utils.rich_menu import general_traffic_exhausted_line, is_general_traffic_exhausted
 
 
+@pytest.mark.parametrize('closed', [False, True])
 @pytest.mark.anyio('asyncio')
-async def test_unlimited_squad_line_shows_infinity(monkeypatch):
+async def test_unlimited_squad_line_shows_infinity_only_when_open(monkeypatch, closed):
     subscription = SimpleNamespace(id=1, connected_squads=['wl'])
     tariff = SimpleNamespace(
         server_traffic_limits={'wl': {'traffic_limit_gb': 5}},
@@ -25,6 +26,7 @@ async def test_unlimited_squad_line_shows_infinity(monkeypatch):
         used_bytes=2 * 1024**3,
         total_limit_bytes=5 * 1024**3,
         unlimited_at=datetime(2026, 9, 17, tzinfo=UTC),
+        closed_at=datetime(2026, 9, 18, tzinfo=UTC) if closed else None,
     )
     monkeypatch.setattr(
         'app.database.crud.premium_traffic.get_states_for_subscription', AsyncMock(return_value=[state])
@@ -35,7 +37,7 @@ async def test_unlimited_squad_line_shows_infinity(monkeypatch):
 
     assert len(lines) == 1
     assert 'WL' in lines[0]
-    assert '♾️' in lines[0]
+    assert ('♾️' in lines[0]) is not closed
 
 
 @pytest.mark.anyio('asyncio')

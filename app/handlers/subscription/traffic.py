@@ -33,6 +33,7 @@ from app.services.subscription_service import SubscriptionService
 from app.services.user_cart_service import user_cart_service
 from app.states import SubscriptionStates
 from app.utils.legacy_subscription import is_legacy_subscription
+from app.utils.premium_callbacks import read_premium_callback, store_premium_callback
 from app.utils.premium_traffic import BYTES_IN_GB
 from app.utils.pricing_utils import (
     calculate_prorated_price,
@@ -1398,11 +1399,20 @@ async def show_premium_traffic_confirmation(
         details=details,
     )
 
+    token = await store_premium_callback(
+        db_user.id,
+        'topup',
+        {'subscription_id': subscription.id, 'squad_uuid': row['squad_uuid'], 'gb': gb, 'price': final_price},
+    )
+    if token is None:
+        await callback.answer('⚠️ Не удалось сохранить подтверждение. Попробуйте ещё раз.', show_alert=True)
+        return
+
     await callback.message.edit_text(
         confirm_text,
         reply_markup=get_confirm_traffic_purchase_keyboard(
             db_user.language,
-            confirm_callback=f'confirm_premium_traffic_{idx}_{gb}',
+            confirm_callback=f'confirm_premium_traffic_{token}',
             back_callback='premium_traffic_topup',
         ),
         parse_mode='HTML',
@@ -1412,7 +1422,6 @@ async def show_premium_traffic_confirmation(
 
 async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: AsyncSession, state: FSMContext = None):
     """Списание за докупленный премиум-трафик. Порядок шагов — как в `add_traffic`."""
-    from app.database.crud.premium_traffic import get_state
     from app.database.crud.user import lock_user_for_pricing
     from app.services.premium_traffic_purchase import (
         PremiumTopupError,
@@ -1420,34 +1429,39 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
         quote_premium_topup,
     )
 
-    parts = callback.data.split('_')
-    gb = int(parts[-1])
-    idx = int(parts[-2])
+    stale_offer = '⚠️ Подтверждение устарело. Откройте докупку заново.'
+    token = callback.data.removeprefix('confirm_premium_traffic_')
+    offer = await read_premium_callback(db_user.id, 'topup', token, consume=True)
+    if offer is None:
+        await callback.answer(stale_offer, show_alert=True)
+        return
+    gb = offer['gb']
+    squad_uuid = offer['squad_uuid']
     texts = get_texts(db_user.language)
 
     subscription, sub_id = await _resolve_subscription(callback, db_user, db, state)
     if subscription is None:
         return
-
-    rows = await _get_purchasable_premium_squads(db, subscription)
-    if idx < 0 or idx >= len(rows):
-        await callback.answer('⚠️ Список серверов изменился, откройте меню заново', show_alert=True)
+    if subscription.id != offer['subscription_id'] or subscription.is_trial:
+        await callback.answer(stale_offer, show_alert=True)
         return
 
-    squad_uuid = rows[idx]['squad_uuid']
-    squad_name = rows[idx]['name']
+    # Lock user BEFORE price computation, как и в add_traffic — иначе скидка
+    # промогруппы читается до блокировки и гонка может увести баланс.
+    db_user = await lock_user_for_pricing(db, db_user.id)
+    subscription, _ = await _resolve_subscription(callback, db_user, db, state)
+    if subscription is None:
+        return
 
-    # Ещё одна проверка закрытия прямо перед покупкой: `_get_purchasable_premium_squads`
-    # выше уже отфильтровала список для показа, но между отрисовкой экрана и
-    # нажатием кнопки администратор мог закрыть доступ. С Task 13 это отклонил
-    # бы и сам `quote_premium_topup` (`PremiumTopupError('squad_closed', ...)`,
-    # см. `except PremiumTopupError` ниже) — эта проверка избыточна, но
-    # оставлена ради текста отказа, специфичного для этого экрана, а не общего
-    # `error.message` через `except`.
-    fresh_state = await get_state(db, subscription.id, squad_uuid)
-    if fresh_state is not None and fresh_state.closed_at is not None:
+    if subscription.id != offer['subscription_id'] or subscription.is_trial:
+        await callback.answer(stale_offer, show_alert=True)
+        return
+
+    # Подписку могли истечь/отключить между подтверждением и нажатием —
+    # проверяем после блокировки, до расчёта цены и списания.
+    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
         await callback.answer(
-            '⚠️ Доступ к этому серверу закрыт администратором, докупка недоступна',
+            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
             show_alert=True,
         )
         return
@@ -1458,22 +1472,6 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
         # Рубильник выключен, пакет пропал из тарифа или потолок уже выбран
         # соседней покупкой — сервис отказывает сам, здесь только показываем его причину.
         await callback.answer(f'⚠️ {error.message}', show_alert=True)
-        return
-
-    # Lock user BEFORE price computation, как и в add_traffic — иначе скидка
-    # промогруппы читается до блокировки и гонка может увести баланс.
-    db_user = await lock_user_for_pricing(db, db_user.id)
-    subscription, _ = await _resolve_subscription(callback, db_user, db, state)
-    if subscription is None:
-        return
-
-    # Подписку могли истечь/отключить между подтверждением и нажатием —
-    # проверяем после блокировки, до расчёта цены и списания.
-    if (getattr(subscription, 'actual_status', None) or '').lower() in ('expired', 'disabled'):
-        await callback.answer(
-            texts.t('SUBSCRIPTION_RENEW_REQUIRED', 'Сначала продлите подписку'),
-            show_alert=True,
-        )
         return
 
     # Захвачен здесь, а не прочитан из `db_user.language` после возможного
@@ -1492,6 +1490,17 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
     )
     if discount_percent < 100 and final_price > 0:
         final_price = max(100, final_price)
+
+    if final_price != offer['price']:
+        await callback.answer(stale_offer, show_alert=True)
+        return
+
+    rows = await _get_purchasable_premium_squads(db, subscription)
+    row = next((row for row in rows if row['squad_uuid'] == squad_uuid), None)
+    if row is None:
+        await callback.answer(stale_offer, show_alert=True)
+        return
+    squad_name = row['name']
 
     if final_price > 0 and db_user.balance_kopeks < final_price:
         missing_kopeks = final_price - db_user.balance_kopeks
@@ -1650,19 +1659,22 @@ async def buy_premium_traffic(callback: types.CallbackQuery, db_user: User, db: 
         # Отдельный экран успеха не показываем: тост и обновлённый экран
         # объёмов с новым остатком.
         fresh_rows = await _get_purchasable_premium_squads(db, subscription)
-        if idx < len(fresh_rows):
+        for idx, fresh_row in enumerate(fresh_rows):
+            if fresh_row['squad_uuid'] != squad_uuid:
+                continue
             await _render_premium_traffic_packages(
                 callback,
                 db_user,
                 db,
                 subscription,
-                fresh_rows[idx],
+                fresh_row,
                 idx,
                 _subscription_back_callback(sub_id or subscription.id),
                 show_ordinary=await _ordinary_traffic_available(db, subscription),
                 discount_percent=discount_percent,
                 answer_callback=False,
             )
+            break
 
         logger.info(
             '✅ Пользователь докупил премиум-трафик',

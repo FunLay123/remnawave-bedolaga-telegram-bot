@@ -20,6 +20,7 @@ from app.database.crud.campaign import (
 from app.database.crud.premium_traffic import (
     add_extra_bytes,
     get_or_create_state,
+    get_state,
     get_states_for_subscription,
     set_unlimited,
 )
@@ -65,6 +66,7 @@ from app.utils.decorators import admin_required, error_handler
 from app.utils.formatters import format_datetime, format_time_ago
 from app.utils.formatting import user_html_link
 from app.utils.photo_message import safe_edit_or_resend
+from app.utils.premium_callbacks import read_premium_callback, store_premium_callback
 from app.utils.premium_traffic import (
     BYTES_IN_GB,
     PremiumSquadConfig,
@@ -4617,15 +4619,19 @@ async def _render_premium_squad_detail(
     db: AsyncSession,
     user_id: int,
     subscription_id: int | None,
-    idx: int,
+    idx: int | None = None,
+    *,
+    squad_uuid: str | None = None,
 ) -> bool:
     subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
-    if not subscription:
+    if subscription is None or (subscription_id is not None and subscription.id != subscription_id):
         await callback.answer('❌ Подписка не найдена', show_alert=True)
         return False
 
     rows, _ = await _collect_premium_traffic_rows(db, subscription)
-    if idx < 0 or idx >= len(rows):
+    if squad_uuid is not None:
+        idx = next((i for i, row in enumerate(rows) if row['squad_uuid'] == squad_uuid), None)
+    if idx is None or idx < 0 or idx >= len(rows):
         await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
         return False
 
@@ -4658,22 +4664,23 @@ async def _render_premium_squad_detail(
                 )
             ]
         )
-    elif state_kind is PremiumSquadCardState.UNLIMITED:
-        keyboard.append(
-            [
-                types.InlineKeyboardButton(
-                    text='♾️ Снять безлимит', callback_data=f'admin_user_premium_unlimited_revoke_{user_id}{_sid}_{idx}'
-                )
-            ]
+    elif state_kind is PremiumSquadCardState.UNLIMITED or row['config'].limit_gb > 0:
+        revoke = state_kind is PremiumSquadCardState.UNLIMITED
+        action = 'revoke' if revoke else 'grant'
+        token = await store_premium_callback(
+            callback.from_user.id,
+            f'unlimited_{action}_prompt',
+            {
+                'user_id': user_id,
+                'subscription_id': subscription.id,
+                'squad_uuid': row['squad_uuid'],
+                'name': row['name'],
+            },
         )
-    elif row['config'].limit_gb > 0:
-        keyboard.append(
-            [
-                types.InlineKeyboardButton(
-                    text='♾️ Выдать безлимит', callback_data=f'admin_user_premium_unlimited_{user_id}{_sid}_{idx}'
-                )
-            ]
-        )
+        if token is not None:
+            prefix = 'admin_user_premium_unlimited_revoke_' if revoke else 'admin_user_premium_unlimited_'
+            label = '♾️ Снять безлимит' if revoke else '♾️ Выдать безлимит'
+            keyboard.append([types.InlineKeyboardButton(text=label, callback_data=f'{prefix}{token}')])
     if state_kind is not PremiumSquadCardState.CLOSED and row['config'].limit_gb > 0:
         keyboard.append(
             [
@@ -4831,122 +4838,130 @@ async def apply_premium_traffic_grant_text(message: types.Message, db_user: User
     )
 
 
+_STALE_PREMIUM_ACTION = '⚠️ Подтверждение устарело. Откройте карточку сквада заново.'
+
+
+async def _ask_premium_unlimited(callback: types.CallbackQuery, db_user: User, *, revoke: bool) -> None:
+    action = 'revoke' if revoke else 'grant'
+    prefix = 'admin_user_premium_unlimited_revoke_' if revoke else 'admin_user_premium_unlimited_'
+    actor_id = callback.from_user.id
+    token = callback.data.removeprefix(prefix)
+    target = await read_premium_callback(actor_id, f'unlimited_{action}_prompt', token)
+    if target is None:
+        await callback.answer(_STALE_PREMIUM_ACTION, show_alert=True)
+        return
+
+    confirmation = await store_premium_callback(actor_id, f'unlimited_{action}_confirm', target)
+    if confirmation is None:
+        await callback.answer('⚠️ Не удалось сохранить подтверждение. Попробуйте ещё раз.', show_alert=True)
+        return
+
+    if revoke:
+        title = 'Снятие безлимита'
+        explanation = (
+            'После снятия вернётся лимит тарифа; если расход выше лимита, воркер снимет сквад. '
+            'Чтобы отобрать доступ, закройте доступ.'
+        )
+        confirm_cb = f'admin_user_premium_unlimited_revoke_c_{confirmation}'
+    else:
+        title = 'Выдача безлимита'
+        explanation = 'Безлимит отменяет ограничение отдельного сквада, но общий лимит тарифа продолжает действовать.'
+        confirm_cb = f'admin_user_premium_unlimited_confirm_{confirmation}'
+
+    back_cb = f'admin_user_premium_{target["user_id"]}_s{target["subscription_id"]}'
+    await callback.message.edit_text(
+        f'♾️ <b>{title}: {html.escape(target["name"])}</b>\n\n{explanation}\n\nПродолжить?',
+        reply_markup=get_confirmation_keyboard(confirm_cb, back_cb, db_user.language),
+    )
+    await callback.answer()
+
+
+async def _confirm_premium_unlimited(
+    callback: types.CallbackQuery, db_user: User, db: AsyncSession, *, revoke: bool
+) -> None:
+    action = 'revoke' if revoke else 'grant'
+    prefix = 'admin_user_premium_unlimited_revoke_c_' if revoke else 'admin_user_premium_unlimited_confirm_'
+    token = callback.data.removeprefix(prefix)
+    target = await read_premium_callback(callback.from_user.id, f'unlimited_{action}_confirm', token, consume=True)
+    if target is None:
+        await callback.answer(_STALE_PREMIUM_ACTION, show_alert=True)
+        return
+
+    user_id = target['user_id']
+    subscription_id = target['subscription_id']
+    squad_uuid = target['squad_uuid']
+    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
+    if subscription is None or subscription.id != subscription_id:
+        await callback.answer('❌ Подписка не найдена', show_alert=True)
+        return
+
+    rows, _ = await _collect_premium_traffic_rows(db, subscription)
+    row = next((row for row in rows if row['squad_uuid'] == squad_uuid), None)
+    if row is None:
+        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
+        return
+
+    if revoke:
+        state = await get_state(db, subscription_id, squad_uuid, for_update=True)
+        if state is None or state.unlimited_at is None:
+            await callback.answer('♾️ Безлимит уже снят', show_alert=True)
+            return
+    else:
+        if row['config'].limit_gb <= 0:
+            await callback.answer('❌ Сквад недоступен для безлимита', show_alert=True)
+            return
+        state = await get_or_create_state(
+            db,
+            subscription_id,
+            squad_uuid,
+            limit_bytes=row['config'].limit_bytes,
+            period_start_at=datetime.now(UTC),
+            for_update=True,
+        )
+
+    if state.closed_at is not None:
+        await callback.answer('❌ Сквад закрыт администратором — сначала откройте доступ', show_alert=True)
+        return
+    if not revoke and state.unlimited_at is not None:
+        await callback.answer('♾️ Безлимит уже действует', show_alert=True)
+        return
+
+    set_unlimited(state, not revoke)
+    await db.commit()
+    premium_traffic_service.request_pass()
+    logger.info(
+        'Админ снял безлимит премиум-сквада' if revoke else 'Админ выдал безлимит премиум-скваду',
+        admin_id=db_user.id,
+        user_id=user_id,
+        subscription_id=subscription_id,
+        squad_uuid=squad_uuid,
+    )
+    if await _render_premium_squad_detail(callback, db, user_id, subscription_id, squad_uuid=squad_uuid):
+        await callback.answer()
+
+
 @admin_required
 @error_handler
 async def ask_grant_premium_unlimited(callback: types.CallbackQuery, db_user: User):
-    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
-    _sid = f'_s{subscription_id}' if subscription_id else ''
-    detail_cb = f'admin_user_premium_sq_{user_id}{_sid}_{idx}'
-    confirm_cb = f'admin_user_premium_unlimited_confirm_{user_id}{_sid}_{idx}'
-    await callback.message.edit_text(
-        '♾️ <b>Выдача безлимита</b>\n\n'
-        'Безлимит отменяет ограничение отдельного сквада, но общий лимит тарифа продолжает действовать.\n\n'
-        'Продолжить?',
-        reply_markup=get_confirmation_keyboard(confirm_cb, detail_cb, db_user.language),
-    )
-    await callback.answer()
+    await _ask_premium_unlimited(callback, db_user, revoke=False)
 
 
 @admin_required
 @error_handler
 async def confirm_grant_premium_unlimited(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
-    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
-    if not subscription:
-        await callback.answer('❌ Подписка не найдена', show_alert=True)
-        return
-    rows, _ = await _collect_premium_traffic_rows(db, subscription)
-    if idx < 0 or idx >= len(rows):
-        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
-        return
-    row = rows[idx]
-    if row['config'].limit_gb <= 0:
-        await callback.answer('❌ Сквад недоступен для безлимита', show_alert=True)
-        return
-    state = await get_or_create_state(
-        db,
-        subscription.id,
-        row['squad_uuid'],
-        limit_bytes=row['config'].limit_bytes,
-        period_start_at=datetime.now(UTC),
-        for_update=True,
-    )
-    if state.closed_at is not None:
-        await callback.answer('❌ Сквад закрыт администратором — сначала откройте доступ', show_alert=True)
-        return
-    if state.unlimited_at is not None:
-        await callback.answer('♾️ Безлимит уже действует', show_alert=True)
-        return
-    set_unlimited(state, True, now=datetime.now(UTC))
-    await db.commit()
-    premium_traffic_service.request_pass()
-    logger.info(
-        'Админ выдал безлимит премиум-скваду',
-        admin_id=db_user.id,
-        user_id=user_id,
-        subscription_id=subscription.id,
-        squad_uuid=row['squad_uuid'],
-    )
-    callback.data = f'admin_user_premium_sq_{user_id}{f"_s{subscription_id}" if subscription_id else ""}_{idx}'
-    await _render_premium_squad_detail(callback, db, user_id, subscription_id, idx)
-    await callback.answer()
+    await _confirm_premium_unlimited(callback, db_user, db, revoke=False)
 
 
 @admin_required
 @error_handler
 async def ask_revoke_premium_unlimited(callback: types.CallbackQuery, db_user: User):
-    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
-    _sid = f'_s{subscription_id}' if subscription_id else ''
-    await callback.message.edit_text(
-        '♾️ <b>Снятие безлимита</b>\n\n'
-        'После снятия вернётся лимит тарифа; если расход выше лимита, воркер снимет сквад. '
-        'Чтобы отобрать доступ сразу — закройте доступ.\n\nПродолжить?',
-        reply_markup=get_confirmation_keyboard(
-            f'admin_user_premium_unlimited_revoke_c_{user_id}{_sid}_{idx}',
-            f'admin_user_premium_sq_{user_id}{_sid}_{idx}',
-            db_user.language,
-        ),
-    )
-    await callback.answer()
+    await _ask_premium_unlimited(callback, db_user, revoke=True)
 
 
 @admin_required
 @error_handler
 async def confirm_revoke_premium_unlimited(callback: types.CallbackQuery, db_user: User, db: AsyncSession):
-    user_id, subscription_id, idx = _extract_premium_squad_context(callback.data)
-    subscription = await _resolve_admin_subscription(db, user_id, subscription_id)
-    if not subscription:
-        await callback.answer('❌ Подписка не найдена', show_alert=True)
-        return
-    rows, _ = await _collect_premium_traffic_rows(db, subscription)
-    if idx < 0 or idx >= len(rows):
-        await callback.answer('❌ Сквад не найден — список мог обновиться', show_alert=True)
-        return
-    row = rows[idx]
-    state = await get_or_create_state(
-        db,
-        subscription.id,
-        row['squad_uuid'],
-        limit_bytes=row['config'].limit_bytes,
-        period_start_at=datetime.now(UTC),
-        for_update=True,
-    )
-    if state.unlimited_at is None:
-        await callback.answer('♾️ Безлимит уже снят', show_alert=True)
-        return
-    set_unlimited(state, False)
-    await db.commit()
-    premium_traffic_service.request_pass()
-    logger.info(
-        'Админ снял безлимит премиум-сквада',
-        admin_id=db_user.id,
-        user_id=user_id,
-        subscription_id=subscription.id,
-        squad_uuid=row['squad_uuid'],
-    )
-    callback.data = f'admin_user_premium_sq_{user_id}{f"_s{subscription_id}" if subscription_id else ""}_{idx}'
-    await _render_premium_squad_detail(callback, db, user_id, subscription_id, idx)
-    await callback.answer()
+    await _confirm_premium_unlimited(callback, db_user, db, revoke=True)
 
 
 @admin_required

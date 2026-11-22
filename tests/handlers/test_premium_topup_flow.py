@@ -28,8 +28,13 @@ from app.config import settings
 from app.database.crud.premium_traffic import get_or_create_state, get_state
 from app.database.models import ServerSquad, SubscriptionPremiumTraffic, Transaction, User
 from app.keyboards.inline import get_add_traffic_keyboard, get_add_traffic_keyboard_from_tariff
+from app.utils.premium_callbacks import store_premium_callback
 from app.utils.premium_traffic import BYTES_IN_GB, PremiumSquadConfig
+from tests.fixtures.premium_callbacks import premium_callback_cache  # noqa: F401 - pytest fixture
 from tests.fixtures.sqlite_memory import memory_session
+
+
+pytestmark = pytest.mark.usefixtures('premium_callback_cache')
 
 
 TABLES = (SubscriptionPremiumTraffic.__table__, ServerSquad.__table__, User.__table__)
@@ -64,6 +69,13 @@ def _callback(data: str) -> MagicMock:
     callback.message.edit_text = AsyncMock()
     callback.answer = AsyncMock()
     return callback
+
+
+async def _confirmation_callback(user):
+    token = await store_premium_callback(
+        user.id, 'topup', {'subscription_id': 1, 'squad_uuid': SQUAD, 'gb': 5, 'price': 2000}
+    )
+    return _callback(f'confirm_premium_traffic_{token}')
 
 
 def _db_user(balance_kopeks: int = 1_000_000) -> SimpleNamespace:
@@ -249,8 +261,9 @@ class TestBuyRefusesWithoutCharging:
 
         subtract = AsyncMock()
         monkeypatch.setattr(traffic_mod, 'subtract_user_balance', subtract)
+        monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', AsyncMock(return_value=_db_user()))
 
-        callback = _callback('premium_traffic_buy_0_5')
+        callback = await _confirmation_callback(_db_user())
 
         await traffic_mod.buy_premium_traffic(callback, _db_user(), db=object())
 
@@ -264,13 +277,14 @@ class TestBuyRefusesWithoutCharging:
 
         subtract = AsyncMock()
         monkeypatch.setattr(traffic_mod, 'subtract_user_balance', subtract)
+        monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', AsyncMock(return_value=_db_user()))
 
         async with memory_session(monkeypatch, TABLES) as db:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             state.closed_at = NOW
             await db.commit()
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(_db_user())
 
             await traffic_mod.buy_premium_traffic(callback, _db_user(), db)
 
@@ -302,13 +316,14 @@ class TestBuyRefusesWithoutCharging:
 
         subtract = AsyncMock()
         monkeypatch.setattr(traffic_mod, 'subtract_user_balance', subtract)
+        monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', AsyncMock(return_value=_db_user()))
 
         async with memory_session(monkeypatch, TABLES) as db:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             state.closed_at = NOW
             await db.commit()
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(_db_user())
 
             await traffic_mod.buy_premium_traffic(callback, _db_user(), db)
 
@@ -443,7 +458,7 @@ class TestUnlimitedOverallTrafficStillOffersPremium:
             topup_callback.message.edit_text.assert_awaited_once()
 
             # ...и покупает пакет 5 ГБ.
-            buy_callback = _callback('premium_traffic_buy_0_5')
+            buy_callback = await _confirmation_callback(user)
             await traffic_mod.buy_premium_traffic(buy_callback, user, db)
 
             assert user.balance_kopeks == 100_000 - 2000, 'пакет 5 ГБ стоит 2000 копеек'
@@ -516,7 +531,7 @@ class TestTariffTopupDisabledButPremiumAvailable:
             await traffic_mod.handle_add_traffic(callback, user, db)
             callback.message.edit_text.assert_awaited_once()
 
-            buy_callback = _callback('premium_traffic_buy_0_5')
+            buy_callback = await _confirmation_callback(user)
             await traffic_mod.buy_premium_traffic(buy_callback, user, db)
 
             assert user.balance_kopeks == 100_000 - 2000
@@ -623,7 +638,7 @@ class TestRealTransactionRecord:
 
             monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(user)
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
             (shown_text,) = callback.message.edit_text.await_args.args[:1]
@@ -678,7 +693,7 @@ class TestBuySucceeds:
 
             monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(user)
 
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
@@ -720,7 +735,7 @@ class TestBuySucceeds:
 
             monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(user)
 
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
@@ -785,7 +800,7 @@ class TestBuyRollsBackWhenSomethingFailsAfterTheDebit:
 
             monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(user)
 
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
@@ -910,13 +925,14 @@ class TestCeilingIsDisplayOnly:
 
         subtract = AsyncMock()
         monkeypatch.setattr(traffic_mod, 'subtract_user_balance', subtract)
+        monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', AsyncMock(return_value=_db_user()))
 
         async with memory_session(monkeypatch, TABLES) as db:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             state.extra_bytes = 9 * BYTES_IN_GB  # + 5 ГБ пакет перевалит потолок в 10 ГБ
             await db.commit()
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(_db_user())
 
             await traffic_mod.buy_premium_traffic(callback, _db_user(), db)
 
@@ -950,7 +966,7 @@ async def test_inactive_subscription_refuses_after_lock_without_charging(monkeyp
 
         monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
 
-        callback = _callback('premium_traffic_buy_0_5')
+        callback = await _confirmation_callback(user)
 
         await traffic_mod.buy_premium_traffic(callback, user, db)
 
@@ -993,7 +1009,7 @@ class TestPostCommitFailuresDoNotReportFailure:
 
             monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(user)
 
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
@@ -1038,7 +1054,7 @@ class TestPostCommitFailuresDoNotReportFailure:
 
             monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', _fake_lock)
 
-            callback = _callback('premium_traffic_buy_0_5')
+            callback = await _confirmation_callback(user)
 
             await traffic_mod.buy_premium_traffic(callback, user, db)
 
@@ -1052,3 +1068,78 @@ class TestPostCommitFailuresDoNotReportFailure:
             callback.message.edit_text.assert_not_awaited()
             callback.answer.assert_awaited_once()
             assert callback.answer.await_args.args[0] == 'Трафик добавлен'
+
+
+@pytest.mark.parametrize(
+    'change',
+    [
+        'unlimited',
+        'unlimited_low_balance',
+        'price',
+        'price_under_lock',
+        'package_under_lock',
+        'subscription',
+        'replay',
+        'expired',
+        'legacy',
+    ],
+)
+async def test_premium_confirmation_only_charges_once_for_displayed_offer(monkeypatch, premium_callback_cache, change):
+    limits = {
+        SQUAD: {**WITH_TOPUP, 'sort_order': 1},
+        OTHER: {**WITH_TOPUP, 'name': 'FR-1', 'sort_order': 2, 'topup_packages': {'5': 2000}},
+    }
+    subscription = _subscription(limits, (SQUAD, OTHER))
+    _patch_resolve(monkeypatch, subscription)
+
+    async def debit(db, user, amount, description, **kwargs):
+        user.balance_kopeks -= amount
+        return True
+
+    monkeypatch.setattr(traffic_mod, 'subtract_user_balance', debit)
+    monkeypatch.setattr(traffic_mod, 'create_transaction', AsyncMock(return_value=None))
+    monkeypatch.setattr(traffic_mod, 'emit_transaction_side_effects', AsyncMock())
+    saved_cart = AsyncMock()
+    monkeypatch.setattr(traffic_mod.user_cart_service, 'save_user_cart', saved_cart)
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        starting_balance = 100 if change == 'unlimited_low_balance' else 100_000
+        user = await _seed_user(db, starting_balance)
+
+        async def lock_user(db, user_id):
+            if change == 'price_under_lock':
+                limits[SQUAD]['topup_packages'] = {'5': 3500}
+            elif change == 'package_under_lock':
+                limits[SQUAD]['topup_packages'] = {'1': 500}
+            return user
+
+        monkeypatch.setattr('app.database.crud.user.lock_user_for_pricing', lock_user)
+        offer = _callback('premium_traffic_buy_0_5')
+        await traffic_mod.show_premium_traffic_confirmation(offer, user, db)
+        assert 'DE-1' in offer.message.edit_text.await_args.args[0]
+        confirm = offer.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data
+        assert len(confirm.encode()) <= 64
+
+        if change in {'unlimited', 'unlimited_low_balance'}:
+            row = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            row.unlimited_at = NOW
+            await db.commit()
+        elif change == 'price':
+            limits[SQUAD]['topup_packages'] = {'5': 3500}
+        elif change == 'subscription':
+            _patch_resolve(monkeypatch, _subscription(limits, (SQUAD, OTHER), subscription_id=2), sub_id=2)
+        elif change == 'replay':
+            await traffic_mod.buy_premium_traffic(_callback(confirm), user, db)
+            assert user.balance_kopeks == 98_000
+        elif change == 'expired':
+            premium_callback_cache.entries.clear()
+        elif change == 'legacy':
+            confirm = 'confirm_premium_traffic_0_5'
+
+        callback = _callback(confirm)
+        await traffic_mod.buy_premium_traffic(callback, user, db)
+
+        assert user.balance_kopeks == (98_000 if change == 'replay' else starting_balance)
+        assert await get_state(db, 1, OTHER) is None
+        saved_cart.assert_not_awaited()
+        _refused_with_alert(callback)

@@ -18,13 +18,20 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+from aiogram.types import CallbackQuery
 from sqlalchemy import inspect as sa_inspect
 
 import app.handlers.admin.users as users_mod
 from app.database.crud.premium_traffic import get_or_create_state, get_state
 from app.database.models import PromoGroup, Subscription, SubscriptionPremiumTraffic, Tariff, tariff_promo_groups
+from app.utils.premium_callbacks import store_premium_callback
 from app.utils.premium_traffic import BYTES_IN_GB, PremiumSquadConfig
+from tests.fixtures.premium_callbacks import premium_callback_cache  # noqa: F401 - pytest fixture
 from tests.fixtures.sqlite_memory import memory_session
+
+
+pytestmark = pytest.mark.usefixtures('premium_callback_cache')
 
 
 TABLES = (SubscriptionPremiumTraffic.__table__,)
@@ -529,8 +536,6 @@ def test_callback_data_stays_within_telegram_limit_for_worst_case_ids():
     gb = 100_000
     candidates = [
         f'admin_user_premium_grant_set_{user_id}_s{subscription_id}_{idx}_{gb}',
-        f'admin_user_premium_unlimited_confirm_{user_id}_s{subscription_id}_{idx}',
-        f'admin_user_premium_unlimited_revoke_c_{user_id}_s{subscription_id}_{idx}',
         f'admin_user_premium_close_confirm_{user_id}_s{subscription_id}_{idx}',
         f'admin_user_premium_reopen_{user_id}_s{subscription_id}_{idx}',
         f'admin_user_premium_sq_{user_id}_s{subscription_id}_{idx}',
@@ -548,7 +553,7 @@ class TestUnlimitedGrantRevoke:
         async with memory_session(monkeypatch, TABLES) as db:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             await db.commit()
-            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+            callback = await _unlimited_confirmation(revoke=False)
 
             await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
 
@@ -561,7 +566,7 @@ class TestUnlimitedGrantRevoke:
         wake = MagicMock()
         monkeypatch.setattr(users_mod.premium_traffic_service, 'request_pass', wake)
         async with memory_session(monkeypatch, TABLES) as db:
-            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+            callback = await _unlimited_confirmation(revoke=False)
 
             await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
 
@@ -578,7 +583,7 @@ class TestUnlimitedGrantRevoke:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             state.closed_at = NOW
             await db.commit()
-            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+            callback = await _unlimited_confirmation(revoke=False)
 
             await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
 
@@ -597,7 +602,7 @@ class TestUnlimitedGrantRevoke:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             state.unlimited_at = NOW
             await db.commit()
-            callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+            callback = await _unlimited_confirmation(revoke=False)
 
             await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
 
@@ -613,7 +618,7 @@ class TestUnlimitedGrantRevoke:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             state.unlimited_at = NOW
             await db.commit()
-            callback = _callback('admin_user_premium_unlimited_revoke_c_1_0')
+            callback = await _unlimited_confirmation(revoke=True)
 
             await _unwrap(users_mod.confirm_revoke_premium_unlimited)(callback, _db_user(), db)
 
@@ -626,7 +631,7 @@ class TestUnlimitedGrantRevoke:
         async with memory_session(monkeypatch, TABLES) as db:
             state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
             await db.commit()
-            callback = _callback('admin_user_premium_unlimited_revoke_c_1_0')
+            callback = await _unlimited_confirmation(revoke=True)
 
             await _unwrap(users_mod.confirm_revoke_premium_unlimited)(callback, _db_user(), db)
 
@@ -646,6 +651,77 @@ class TestUnlimitedGrantRevoke:
             assert 'безлимит' in message.lower()
 
 
-def test_extract_unlimited_callbacks():
-    assert users_mod._extract_premium_squad_context('admin_user_premium_unlimited_confirm_123_s456_0') == (123, 456, 0)
-    assert users_mod._extract_premium_squad_context('admin_user_premium_unlimited_revoke_c_123_s456_0') == (123, 456, 0)
+async def _unlimited_confirmation(*, revoke):
+    action = 'revoke' if revoke else 'grant'
+    token = await store_premium_callback(
+        1, f'unlimited_{action}_confirm', {'user_id': 1, 'subscription_id': 1, 'squad_uuid': SQUAD}
+    )
+    prefix = 'admin_user_premium_unlimited_revoke_c_' if revoke else 'admin_user_premium_unlimited_confirm_'
+    return _callback(f'{prefix}{token}')
+
+
+@pytest.mark.parametrize('revoke', [False, True])
+async def test_unlimited_confirmation_renders_same_squad_with_frozen_callback(monkeypatch, revoke):
+    limits = {
+        SQUAD: {'traffic_limit_gb': 5, 'sort_order': 1, 'name': 'DE-1'},
+        OTHER: {'traffic_limit_gb': 5, 'sort_order': 2, 'name': 'FR-1'},
+    }
+    subscription = _subscription(limits, connected=[SQUAD, OTHER])
+    monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=subscription))
+    monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={}))
+    monkeypatch.setattr(users_mod.premium_traffic_service, 'request_pass', MagicMock())
+    monkeypatch.setattr(CallbackQuery, 'answer', AsyncMock())
+    ask = users_mod.ask_revoke_premium_unlimited if revoke else users_mod.ask_grant_premium_unlimited
+    confirm = users_mod.confirm_revoke_premium_unlimited if revoke else users_mod.confirm_grant_premium_unlimited
+    button_title = 'Снять безлимит' if revoke else 'Выдать безлимит'
+
+    async with memory_session(monkeypatch, TABLES) as db:
+        if revoke:
+            for squad in (SQUAD, OTHER):
+                row = await get_or_create_state(db, 1, squad, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+                row.unlimited_at = NOW
+            await db.commit()
+        card = _callback('admin_user_premium_sq_1_0')
+        await users_mod._render_premium_squad_detail(card, db, 1, None, 0)
+        start = next(
+            b.callback_data
+            for row in card.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard
+            for b in row
+            if button_title in b.text
+        )
+        assert len(start.encode()) <= 64
+        prompt = _callback(start)
+        await _unwrap(ask)(prompt, _db_user())
+        action = prompt.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard[0][0].callback_data
+        assert len(action.encode()) <= 64
+
+        limits[SQUAD]['sort_order'] = 3
+        message = SimpleNamespace(edit_text=AsyncMock())
+        callback = CallbackQuery.model_construct(data=action, message=message, from_user=SimpleNamespace(id=1))
+        await _unwrap(confirm)(callback, _db_user(), db)
+
+        target = await get_state(db, 1, SQUAD)
+        adjacent = await get_state(db, 1, OTHER)
+        assert target is not None and (target.unlimited_at is None) == revoke
+        assert (adjacent is not None and adjacent.unlimited_at == NOW) == revoke
+        assert 'DE-1' in prompt.message.edit_text.await_args.args[0]
+        assert 'DE-1' in message.edit_text.await_args.args[0]
+        assert callback.data == action
+
+
+async def test_revoke_missing_grant_does_not_create_state(monkeypatch):
+    monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=_subscription()))
+    monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={}))
+    async with memory_session(monkeypatch, TABLES) as db:
+        callback = await _unlimited_confirmation(revoke=True)
+        await _unwrap(users_mod.confirm_revoke_premium_unlimited)(callback, _db_user(), db)
+        await db.commit()
+        assert await get_state(db, 1, SQUAD) is None
+
+
+async def test_legacy_unlimited_confirmation_fails_without_writing(monkeypatch):
+    async with memory_session(monkeypatch, TABLES) as db:
+        callback = _callback('admin_user_premium_unlimited_confirm_1_0')
+        await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
+        assert callback.answer.await_args.kwargs['show_alert'] is True
+        assert await get_state(db, 1, SQUAD) is None

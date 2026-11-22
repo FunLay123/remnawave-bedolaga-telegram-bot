@@ -1382,7 +1382,7 @@ class RemnaWaveWebhookService:
             policy=WEBHOOK,
             grace_open=grace_open,
             paid_at=paid_at,
-            entitled_squads=await get_entitlement_squad_uuids(db, subscription),
+            entitled_squads=await get_entitlement_squad_uuids(db, subscription) if snapshot.squads else (),
         )
         changed = bool(changed_fields)
         if panel_date_behind_paid_renewal(subscription, snapshot, paid_at=paid_at):

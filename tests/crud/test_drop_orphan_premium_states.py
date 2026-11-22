@@ -82,7 +82,7 @@ async def test_unlimited_state_survives_tariff_switch_that_drops_the_squad(monke
         reread = await get_state(db, 1, SQUAD)
         assert reread is not None
         assert reread.unlimited_at == NOW
-        assert reread.is_limited is False
+        assert reread.is_limited is True
 
 
 async def test_squad_still_in_new_tariff_is_left_alone(monkeypatch):

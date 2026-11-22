@@ -1343,8 +1343,8 @@ async def _drop_orphan_premium_states(
             for uuid, state in not_in_new_tariff.items()
             if state.closed_at is None and state.unlimited_at is not None
         }
-        for uuid in unlimited:
-            not_in_new_tariff[uuid].is_limited = False
+        # Флаг снятия нужен воркеру, пока панель не подтвердила возврат.
+        # Смена тарифа коммитится до отправки в панель, которая может не дойти.
         orphaned = set(not_in_new_tariff) - closed - unlimited
         if closed:
             logger.info(
@@ -1354,7 +1354,7 @@ async def _drop_orphan_premium_states(
             )
         if unlimited:
             logger.info(
-                '♾️ Смена тарифа: безлимитные премиум-лимиты сохранены и разблокированы',
+                '♾️ Смена тарифа: безлимитные премиум-лимиты сохранены',
                 subscription_id=subscription.id,
                 squads=sorted(unlimited),
             )

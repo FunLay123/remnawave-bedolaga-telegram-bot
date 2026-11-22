@@ -2390,3 +2390,58 @@ def test_request_pass_invalidates_the_panel_user_cache():
     service.request_pass(panel_user_id=42)
 
     assert 42 not in service._panel_users
+
+
+async def test_unlimited_orphan_after_tariff_switch_retries_panel_restore(monkeypatch):
+    from app.database.crud.subscription import refresh_premium_states_for_tariff
+
+    async with memory_session(monkeypatch, ORPHAN_TABLES) as db:
+        await _seed_subscription(db, premium_limits={SQUAD: {'traffic_limit_gb': 5}}, connected=(SQUAD, OTHER_SQUAD))
+        row = await _seed_state(db, is_limited=True)
+        row.unlimited_at = NOW
+        new_tariff = Tariff(
+            id=2,
+            name='No separate limit',
+            period_prices={'30': 10000},
+            traffic_limit_gb=100,
+            device_limit=1,
+            server_traffic_limits={},
+            allowed_squads=[SQUAD, OTHER_SQUAD],
+        )
+        db.add(new_tariff)
+        subscription = await db.get(Subscription, 1)
+        subscription.tariff_id = new_tariff.id
+        await refresh_premium_states_for_tariff(db, subscription, new_tariff)
+        await db.commit()
+        assert SQUAD in subscription.connected_squads
+
+        calls = []
+
+        async def push(_api, _subscription_id, *, user_id, active_internal_squads):
+            calls.append(list(active_internal_squads or []))
+            if len(calls) == 1:
+                raise RuntimeError('temporary panel outage')
+
+        _run_worker_against(monkeypatch, db, push=push, panel_squads=[])
+        worker = PremiumTrafficService()
+        await worker.process_once()
+        row = await get_state(db, 1, SQUAD)
+        assert row.is_limited is True
+        assert row.unlimited_at == NOW
+        assert calls == [[SQUAD, OTHER_SQUAD]]
+
+        project_onto_subscription(
+            subscription,
+            PanelSnapshot(status='ACTIVE', squads=(OTHER_SQUAD,)),
+            now=NOW,
+            policy=BULK_SNAPSHOT,
+            entitled_squads=await get_entitlement_squad_uuids(db, subscription),
+        )
+        await db.commit()
+        assert SQUAD in subscription.connected_squads
+
+        await worker.process_once()
+        row = await get_state(db, 1, SQUAD)
+        assert row.is_limited is False
+        assert row.unlimited_at == NOW
+        assert [set(call) for call in calls] == [{SQUAD, OTHER_SQUAD}] * 2

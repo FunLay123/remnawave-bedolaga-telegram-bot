@@ -39,7 +39,7 @@ from app.database.crud.premium_traffic import get_states_for_subscription
 from app.database.crud.tariff import get_tariff_by_id
 from app.database.database import AsyncSessionLocal
 from app.database.models import Subscription
-from app.utils.premium_traffic import get_premium_squads_for_tariff
+from app.utils.premium_traffic import get_premium_squads_for_tariff, has_effective_premium_unlimited
 
 
 logger = structlog.get_logger(__name__)
@@ -125,7 +125,7 @@ async def premium_usage(db: AsyncSession, short_uuids: list[str]) -> tuple[int, 
             total += configs[squad_uuid].limit_bytes
             continue
         used += state.used_bytes or 0
-        if getattr(state, 'unlimited_at', None) is not None:
+        if has_effective_premium_unlimited(state):
             unlimited = True
         else:
             total += state.total_limit_bytes

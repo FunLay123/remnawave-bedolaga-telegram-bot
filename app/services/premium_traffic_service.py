@@ -540,22 +540,29 @@ class PremiumTrafficService:
             return False
 
         if orphan.unlimited_at is not None:
+            if not needs_restore:
+                return False
+
             from app.database.crud.premium_traffic import get_state
 
-            async def _keep_unlimited() -> None:
+            async def _restore_unlimited() -> None:
                 async with db.begin_nested():
-                    state = await get_state(db, orphan.subscription_id, orphan.squad_uuid)
-                    if state is None:
+                    state = await get_state(db, orphan.subscription_id, orphan.squad_uuid, for_update=True)
+                    if (
+                        state is None
+                        or state.closed_at is not None
+                        or state.unlimited_at is None
+                        or not state.is_limited
+                    ):
                         return
-                    if needs_restore:
-                        state.is_limited = False
-                        await db.flush()
-                        self._raise_if_deferred(
-                            await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
-                        )
+                    state.is_limited = False
+                    await db.flush()
+                    self._raise_if_deferred(
+                        await self._push_subscription_squads(db, api, orphan.subscription, orphan.panel_user_id)
+                    )
 
             applied = await self._log_panel_failure(
-                _keep_unlimited,
+                _restore_unlimited,
                 fail_event='Не удалось сохранить безлимитное состояние премиум-лимита',
                 defer_event='Возврат безлимитного сквада отложен: открыт grace-оверлей',
                 subscription_id=orphan.subscription_id,
@@ -564,12 +571,6 @@ class PremiumTrafficService:
             if not applied:
                 return False
             await db.commit()
-            logger.info(
-                'Безлимитное состояние премиум-лимита сохранено',
-                subscription_id=orphan.subscription_id,
-                squad_uuid=orphan.squad_uuid,
-                restored=needs_restore,
-            )
             return False
 
         async def _do() -> None:

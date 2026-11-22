@@ -478,3 +478,29 @@ async def test_interval_backs_off_under_load_and_resets_when_idle(env, monkeypat
     await live.live_menu_loop(monitoring)
     assert sleeps == [900] * 11
     refresh.assert_not_awaited()
+
+
+async def test_live_menu_tracks_closing_and_reopening_an_unlimited_squad():
+    granted_at = datetime(2026, 9, 17, tzinfo=UTC)
+    row = SimpleNamespace(
+        subscription_id=1,
+        squad_uuid='wl',
+        used_bytes=3 * GIB,
+        total_limit_bytes=10 * GIB,
+        unlimited_at=granted_at,
+        closed_at=None,
+    )
+    db = AsyncMock()
+    db.execute.return_value = MagicMock(scalars=MagicMock(return_value=[row]))
+    user = _make_user(_make_subscription(datetime.now(UTC), days_left=12))
+    texts = SimpleNamespace(format_traffic=Texts.format_traffic)
+
+    async def fingerprint():
+        return rich_menu.live_menu_fingerprint(user, texts, await rich_menu.live_menu_premium_state(db, user))
+
+    active = await fingerprint()
+    row.closed_at = datetime(2026, 9, 18, tzinfo=UTC)
+    assert await fingerprint() != active
+    row.closed_at = None
+    assert await fingerprint() == active
+    assert row.unlimited_at == granted_at

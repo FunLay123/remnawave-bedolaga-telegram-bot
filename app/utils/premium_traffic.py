@@ -32,6 +32,11 @@ logger = structlog.get_logger(__name__)
 BYTES_IN_GB = 1024**3
 
 
+def has_effective_premium_unlimited(state: object | None) -> bool:
+    """Показываем безлимит только пока сквад не закрыт вручную."""
+    return getattr(state, 'closed_at', None) is None and getattr(state, 'unlimited_at', None) is not None
+
+
 @dataclass(frozen=True)
 class PremiumSquadConfig:
     """Настройки премиум-лимита одного сквада внутри тарифа."""

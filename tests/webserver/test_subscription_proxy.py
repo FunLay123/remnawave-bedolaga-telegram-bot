@@ -561,6 +561,17 @@ async def test_premium_usage_unlimited_squad_reports_zero_total(premium_env):
     assert total == 0
 
 
+async def test_premium_usage_closed_unlimited_does_not_hide_finite_total(premium_env):
+    closed = _state('wl-1', 3, 10, unlimited_at=datetime(2026, 9, 6, tzinfo=UTC))
+    closed.closed_at = datetime(2026, 9, 7, tzinfo=UTC)
+    premium_env.append(closed)
+
+    used, total = await premium_usage(_FakeDb([_subscription()]), ['Ab3dEf9hJk'])
+
+    assert used == 3 * BYTES_IN_GB
+    assert total == 15 * BYTES_IN_GB
+
+
 async def test_premium_usage_legacy_state_without_unlimited_at_remains_finite(premium_env):
     premium_env.extend(
         [SimpleNamespace(squad_uuid='wl-1', used_bytes=3 * BYTES_IN_GB, total_limit_bytes=10 * BYTES_IN_GB)]

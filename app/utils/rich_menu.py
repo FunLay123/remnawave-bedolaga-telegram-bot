@@ -360,7 +360,7 @@ async def premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> 
     """
     from app.database.crud.premium_traffic import get_states_for_subscription
     from app.database.crud.server_squad import get_squad_display_names
-    from app.utils.premium_traffic import BYTES_IN_GB, get_premium_squads_for_tariff
+    from app.utils.premium_traffic import BYTES_IN_GB, get_premium_squads_for_tariff, has_effective_premium_unlimited
 
     configs = get_premium_squads_for_tariff(tariff)
     if not configs:
@@ -384,10 +384,10 @@ async def premium_squad_lines(subscription, tariff, texts, db: AsyncSession) -> 
         # Докупленное входит в потолок, поэтому показываем сумму, а не лимит тарифа.
         total_gb = (state.total_limit_bytes / BYTES_IN_GB) if state else float(config.limit_gb)
         used_gb = ((state.used_bytes or 0) / BYTES_IN_GB) if state else 0.0
-        usage = (
-            f'{texts.format_traffic(round(used_gb, 2), is_limit=False)} / '
-            f'{"♾️" if state is not None and getattr(state, "unlimited_at", None) is not None else texts.format_traffic(round(total_gb, 2), is_limit=True)}'
+        limit = (
+            '♾️' if has_effective_premium_unlimited(state) else texts.format_traffic(round(total_gb, 2), is_limit=True)
         )
+        usage = f'{texts.format_traffic(round(used_gb, 2), is_limit=False)} / {limit}'
         name = config.name or names.get(squad_uuid) or squad_uuid
         lines.append(_rich_text(template).replace('{name}', html.escape(name)).replace('{traffic}', html.escape(usage)))
     return lines
@@ -406,7 +406,7 @@ async def live_menu_premium_state(db: AsyncSession, user: User) -> tuple:
     from sqlalchemy import select
 
     from app.database.models import SubscriptionPremiumTraffic
-    from app.utils.premium_traffic import BYTES_IN_GB
+    from app.utils.premium_traffic import BYTES_IN_GB, has_effective_premium_unlimited
 
     subscription_ids = [s.id for s in user.subscriptions or []]
     if not subscription_ids:
@@ -424,7 +424,7 @@ async def live_menu_premium_state(db: AsyncSession, user: User) -> tuple:
                 row.squad_uuid,
                 (row.used_bytes or 0) // BYTES_IN_GB,
                 row.total_limit_bytes,
-                bool(getattr(row, 'unlimited_at', None)),
+                has_effective_premium_unlimited(row),
             )
             for row in rows
         )

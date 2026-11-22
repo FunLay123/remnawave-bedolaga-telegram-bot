@@ -87,11 +87,11 @@ async def get_entitlement_squad_uuids(db: AsyncSession, subscription) -> list[st
     считается правом подписки, даже если сейчас он снят за перерасход (или
     только что возвращён сбросом периода, а панель ещё не подтвердила запись).
 
-    Право сверяем с текущим тарифом подписки: сквад, убранный из премиального
-    списка или из ``allowed_squads`` тарифа, возвращать нельзя — его строку
-    затем снимает ``_collect_orphans``/``_drop_orphan_premium_states``. Пустой
-    ``allowed_squads`` значит «все серверы», как и в
-    ``get_effective_tariff_squad_uuids``.
+    Право сверяем с текущим тарифом. Если сквад перестал быть премиальным,
+    обычно его строку убирает воркер или смена тарифа. Исключение — сквад с
+    безлимитом, который ещё нужно вернуть в панель: до подтверждённого возврата
+    её входящий снимок не должен стирать локальный сквад. В обоих случаях
+    ``allowed_squads`` тарифа ограничивает право; пустой список разрешает все.
 
     Это только кандидаты в право: проекция сохраняет сквад, лишь пока он есть
     и в текущем ``connected_squads`` подписки. Локальный набор — происхождение
@@ -110,11 +110,14 @@ async def get_entitlement_squad_uuids(db: AsyncSession, subscription) -> list[st
 
     try:
         result = await db.execute(
-            select(SubscriptionPremiumTraffic.squad_uuid).where(
-                SubscriptionPremiumTraffic.subscription_id == subscription_id
-            )
+            select(
+                SubscriptionPremiumTraffic.squad_uuid,
+                SubscriptionPremiumTraffic.is_limited,
+                SubscriptionPremiumTraffic.unlimited_at,
+                SubscriptionPremiumTraffic.closed_at,
+            ).where(SubscriptionPremiumTraffic.subscription_id == subscription_id)
         )
-        tracked = set(result.scalars().all())
+        tracked = result.all()
         if not tracked:
             return []
 
@@ -140,7 +143,10 @@ async def get_entitlement_squad_uuids(db: AsyncSession, subscription) -> list[st
     premium = parse_premium_squads(server_traffic_limits)
     allowed = {str(squad_uuid) for squad_uuid in (allowed_squads or []) if squad_uuid}
     return sorted(
-        squad_uuid for squad_uuid in tracked if squad_uuid in premium and (not allowed or squad_uuid in allowed)
+        squad_uuid
+        for squad_uuid, is_limited, unlimited_at, closed_at in tracked
+        if (not allowed or squad_uuid in allowed)
+        and (squad_uuid in premium or (is_limited and unlimited_at is not None and closed_at is None))
     )
 
 

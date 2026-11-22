@@ -13,6 +13,7 @@ import pytest
 
 import app.handlers.subscription.traffic as traffic_mod
 from app.utils.premium_traffic import BYTES_IN_GB
+from tests.fixtures.premium_callbacks import premium_callback_cache  # noqa: F401 - pytest fixture
 
 
 CONFIRM_ICON = '5334552404736104314'
@@ -100,7 +101,7 @@ async def test_ordinary_confirmation_shows_new_limit_and_price(monkeypatch):
 
 
 @pytest.mark.anyio('asyncio')
-async def test_premium_confirmation_shows_remaining_and_price(monkeypatch):
+async def test_premium_confirmation_shows_remaining_and_price(monkeypatch, premium_callback_cache):
     subscription = _subscription()
     row = {
         'squad_uuid': 'sq',
@@ -129,7 +130,8 @@ async def test_premium_confirmation_shows_remaining_and_price(monkeypatch):
     buttons = _buttons(callback.message.edit_text.await_args.kwargs['reply_markup'])
     confirm = buttons[0]
     assert confirm.text == 'Подтвердить'
-    assert confirm.callback_data == 'confirm_premium_traffic_0_5'
+    assert confirm.callback_data.startswith('confirm_premium_traffic_')
+    assert len(confirm.callback_data.encode()) <= 64
     assert confirm.style == 'primary'
     assert confirm.icon_custom_emoji_id == CONFIRM_ICON
     assert buttons[1].callback_data == 'premium_traffic_topup'
