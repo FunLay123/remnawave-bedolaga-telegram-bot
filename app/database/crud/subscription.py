@@ -986,7 +986,6 @@ def _has_pending_change(instance, field: str) -> bool:
     return bool(history is not None and history.has_changes())
 
 
-
 async def _housekeep_expired_purchases(
     db: AsyncSession,
     subscription: Subscription,
@@ -1266,7 +1265,6 @@ def get_trial_carry_over_delta(subscription: Subscription, now: datetime) -> tim
     return max(timedelta(), remaining)
 
 
-
 def _should_carry_remaining_days(*, is_trial: bool, source_is_free: bool) -> bool:
     """Переносить ли остаток дней при СМЕНЕ тарифа на новый срок.
 
@@ -1341,7 +1339,9 @@ async def _drop_orphan_premium_states(
             return
         closed = {uuid for uuid, state in not_in_new_tariff.items() if state.closed_at is not None}
         unlimited = {
-            uuid for uuid, state in not_in_new_tariff.items() if state.closed_at is None and state.unlimited_at is not None
+            uuid
+            for uuid, state in not_in_new_tariff.items()
+            if state.closed_at is None and state.unlimited_at is not None
         }
         for uuid in unlimited:
             not_in_new_tariff[uuid].is_limited = False

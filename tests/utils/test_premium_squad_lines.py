@@ -26,7 +26,9 @@ async def test_unlimited_squad_line_shows_infinity(monkeypatch):
         total_limit_bytes=5 * 1024**3,
         unlimited_at=datetime(2026, 9, 17, tzinfo=UTC),
     )
-    monkeypatch.setattr('app.database.crud.premium_traffic.get_states_for_subscription', AsyncMock(return_value=[state]))
+    monkeypatch.setattr(
+        'app.database.crud.premium_traffic.get_states_for_subscription', AsyncMock(return_value=[state])
+    )
     monkeypatch.setattr('app.database.crud.server_squad.get_squad_display_names', AsyncMock(return_value={'wl': 'WL'}))
 
     lines = await rich_menu.premium_squad_lines(subscription, tariff, get_texts('ru'), AsyncMock())
@@ -45,7 +47,9 @@ async def test_legacy_squad_without_unlimited_at_shows_numeric_total(monkeypatch
         used_bytes=2 * 1024**3,
         total_limit_bytes=5 * 1024**3,
     )
-    monkeypatch.setattr('app.database.crud.premium_traffic.get_states_for_subscription', AsyncMock(return_value=[state]))
+    monkeypatch.setattr(
+        'app.database.crud.premium_traffic.get_states_for_subscription', AsyncMock(return_value=[state])
+    )
     monkeypatch.setattr('app.database.crud.server_squad.get_squad_display_names', AsyncMock(return_value={'wl': 'WL'}))
 
     lines = await rich_menu.premium_squad_lines(subscription, tariff, get_texts('ru'), AsyncMock())

@@ -180,19 +180,27 @@ def test_row_rendering_no_limit_never_says_closed():
 def test_unlimited_is_classified_before_exhausted():
     state = _bare_state(is_limited=True, used_bytes=5 * BYTES_IN_GB, unlimited_at=NOW)
 
-    assert users_mod._classify_premium_traffic_state(_config(limit_gb=5), state) is users_mod.PremiumSquadCardState.UNLIMITED
+    assert (
+        users_mod._classify_premium_traffic_state(_config(limit_gb=5), state)
+        is users_mod.PremiumSquadCardState.UNLIMITED
+    )
 
 
 def test_closed_beats_unlimited():
     state = _bare_state(closed_at=NOW, unlimited_at=NOW)
 
-    assert users_mod._classify_premium_traffic_state(_config(limit_gb=5), state) is users_mod.PremiumSquadCardState.CLOSED
+    assert (
+        users_mod._classify_premium_traffic_state(_config(limit_gb=5), state) is users_mod.PremiumSquadCardState.CLOSED
+    )
 
 
 def test_no_limit_beats_limited_history_after_unlimited():
     state = _bare_state(is_limited=True, used_bytes=5 * BYTES_IN_GB)
 
-    assert users_mod._classify_premium_traffic_state(_config(limit_gb=0), state) is users_mod.PremiumSquadCardState.NO_LIMIT
+    assert (
+        users_mod._classify_premium_traffic_state(_config(limit_gb=0), state)
+        is users_mod.PremiumSquadCardState.NO_LIMIT
+    )
 
 
 def test_row_rendering_unlimited_shows_infinity_and_grant_date():
@@ -227,7 +235,11 @@ class TestUnlimitedCardKeyboard:
 
             await users_mod._render_premium_squad_detail(callback, db, 1, None, 0)
 
-            callbacks = [button.callback_data for row in callback.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard for button in row]
+            callbacks = [
+                button.callback_data
+                for row in callback.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard
+                for button in row
+            ]
             assert any(cb.startswith('admin_user_premium_unlimited_revoke_') for cb in callbacks)
             assert not any(cb.startswith('admin_user_premium_grant_') for cb in callbacks)
             assert any(cb.startswith('admin_user_premium_close_') for cb in callbacks)
@@ -240,7 +252,11 @@ class TestUnlimitedCardKeyboard:
 
             await users_mod._render_premium_squad_detail(callback, db, 1, None, 0)
 
-            callbacks = [button.callback_data for row in callback.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard for button in row]
+            callbacks = [
+                button.callback_data
+                for row in callback.message.edit_text.await_args.kwargs['reply_markup'].inline_keyboard
+                for button in row
+            ]
             assert any(cb.startswith('admin_user_premium_unlimited_') for cb in callbacks)
             assert not any(cb.startswith('admin_user_premium_unlimited_revoke_') for cb in callbacks)
 
@@ -566,7 +582,9 @@ class TestUnlimitedGrantRevoke:
 
             await _unwrap(users_mod.confirm_grant_premium_unlimited)(callback, _db_user(), db)
 
-            callback.answer.assert_awaited_once_with('❌ Сквад закрыт администратором — сначала откройте доступ', show_alert=True)
+            callback.answer.assert_awaited_once_with(
+                '❌ Сквад закрыт администратором — сначала откройте доступ', show_alert=True
+            )
             assert state.unlimited_at is None
             wake.assert_not_called()
 

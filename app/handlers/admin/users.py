@@ -4457,7 +4457,9 @@ def _format_premium_traffic_row(row: dict[str, Any], state_kind: PremiumSquadCar
         lines.append(f'  ♾️ Безлимит выдан: {granted_at}')
         lines.append(f'  Израсходовано: {used_gb} ГБ')
         if is_removed_from_panel:
-            lines.append('  ⚠️ Сквад ограничен в панели — воркер вернёт сквад; общий лимит тарифа продолжает действовать.')
+            lines.append(
+                '  ⚠️ Сквад ограничен в панели — воркер вернёт сквад; общий лимит тарифа продолжает действовать.'
+            )
     elif state_kind is PremiumSquadCardState.EXHAUSTED:
         lines.append('  ⛔ Снят автоматически: лимит исчерпан. Вернётся сам с началом нового периода.')
     elif state_kind is PremiumSquadCardState.CLOSED:
@@ -4862,8 +4864,12 @@ async def confirm_grant_premium_unlimited(callback: types.CallbackQuery, db_user
         await callback.answer('❌ Сквад недоступен для безлимита', show_alert=True)
         return
     state = await get_or_create_state(
-        db, subscription.id, row['squad_uuid'], limit_bytes=row['config'].limit_bytes,
-        period_start_at=datetime.now(UTC), for_update=True,
+        db,
+        subscription.id,
+        row['squad_uuid'],
+        limit_bytes=row['config'].limit_bytes,
+        period_start_at=datetime.now(UTC),
+        for_update=True,
     )
     if state.closed_at is not None:
         await callback.answer('❌ Сквад закрыт администратором — сначала откройте доступ', show_alert=True)
@@ -4874,7 +4880,13 @@ async def confirm_grant_premium_unlimited(callback: types.CallbackQuery, db_user
     set_unlimited(state, True, now=datetime.now(UTC))
     await db.commit()
     premium_traffic_service.request_pass()
-    logger.info('Админ выдал безлимит премиум-скваду', admin_id=db_user.id, user_id=user_id, subscription_id=subscription.id, squad_uuid=row['squad_uuid'])
+    logger.info(
+        'Админ выдал безлимит премиум-скваду',
+        admin_id=db_user.id,
+        user_id=user_id,
+        subscription_id=subscription.id,
+        squad_uuid=row['squad_uuid'],
+    )
     callback.data = f'admin_user_premium_sq_{user_id}{f"_s{subscription_id}" if subscription_id else ""}_{idx}'
     await _render_premium_squad_detail(callback, db, user_id, subscription_id, idx)
     await callback.answer()
@@ -4891,7 +4903,8 @@ async def ask_revoke_premium_unlimited(callback: types.CallbackQuery, db_user: U
         'Чтобы отобрать доступ сразу — закройте доступ.\n\nПродолжить?',
         reply_markup=get_confirmation_keyboard(
             f'admin_user_premium_unlimited_revoke_c_{user_id}{_sid}_{idx}',
-            f'admin_user_premium_sq_{user_id}{_sid}_{idx}', db_user.language,
+            f'admin_user_premium_sq_{user_id}{_sid}_{idx}',
+            db_user.language,
         ),
     )
     await callback.answer()
@@ -4911,8 +4924,12 @@ async def confirm_revoke_premium_unlimited(callback: types.CallbackQuery, db_use
         return
     row = rows[idx]
     state = await get_or_create_state(
-        db, subscription.id, row['squad_uuid'], limit_bytes=row['config'].limit_bytes,
-        period_start_at=datetime.now(UTC), for_update=True,
+        db,
+        subscription.id,
+        row['squad_uuid'],
+        limit_bytes=row['config'].limit_bytes,
+        period_start_at=datetime.now(UTC),
+        for_update=True,
     )
     if state.unlimited_at is None:
         await callback.answer('♾️ Безлимит уже снят', show_alert=True)
@@ -4920,7 +4937,13 @@ async def confirm_revoke_premium_unlimited(callback: types.CallbackQuery, db_use
     set_unlimited(state, False)
     await db.commit()
     premium_traffic_service.request_pass()
-    logger.info('Админ снял безлимит премиум-сквада', admin_id=db_user.id, user_id=user_id, subscription_id=subscription.id, squad_uuid=row['squad_uuid'])
+    logger.info(
+        'Админ снял безлимит премиум-сквада',
+        admin_id=db_user.id,
+        user_id=user_id,
+        subscription_id=subscription.id,
+        squad_uuid=row['squad_uuid'],
+    )
     callback.data = f'admin_user_premium_sq_{user_id}{f"_s{subscription_id}" if subscription_id else ""}_{idx}'
     await _render_premium_squad_detail(callback, db, user_id, subscription_id, idx)
     await callback.answer()
@@ -7392,8 +7415,12 @@ def register_handlers(dp: Dispatcher):
     # варианты (детали сквада, установка пресета, подтверждение закрытия)
     # регистрируем раньше общего входа на экран.
     dp.callback_query.register(show_premium_squad_detail, F.data.startswith('admin_user_premium_sq_'))
-    dp.callback_query.register(confirm_grant_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_confirm_'))
-    dp.callback_query.register(confirm_revoke_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_revoke_c_'))
+    dp.callback_query.register(
+        confirm_grant_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_confirm_')
+    )
+    dp.callback_query.register(
+        confirm_revoke_premium_unlimited, F.data.startswith('admin_user_premium_unlimited_revoke_c_')
+    )
     dp.callback_query.register(
         ask_revoke_premium_unlimited,
         F.data.startswith('admin_user_premium_unlimited_revoke_') & ~F.data.contains('confirm'),
@@ -7417,8 +7444,8 @@ def register_handlers(dp: Dispatcher):
         show_premium_traffic_screen,
         F.data.startswith('admin_user_premium_')
         & ~F.data.contains('_sq_')
-         & ~F.data.contains('_grant_')
-         & ~F.data.contains('_unlimited_')
+        & ~F.data.contains('_grant_')
+        & ~F.data.contains('_unlimited_')
         & ~F.data.contains('_close_')
         & ~F.data.contains('_reopen_'),
     )

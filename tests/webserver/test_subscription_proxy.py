@@ -562,7 +562,9 @@ async def test_premium_usage_unlimited_squad_reports_zero_total(premium_env):
 
 
 async def test_premium_usage_legacy_state_without_unlimited_at_remains_finite(premium_env):
-    premium_env.extend([SimpleNamespace(squad_uuid='wl-1', used_bytes=3 * BYTES_IN_GB, total_limit_bytes=10 * BYTES_IN_GB)])
+    premium_env.extend(
+        [SimpleNamespace(squad_uuid='wl-1', used_bytes=3 * BYTES_IN_GB, total_limit_bytes=10 * BYTES_IN_GB)]
+    )
 
     used, total = await premium_usage(_FakeDb([_subscription()]), ['Ab3dEf9hJk'])
 
