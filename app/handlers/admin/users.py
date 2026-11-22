@@ -56,9 +56,9 @@ from app.keyboards.admin import (
     get_user_restrictions_keyboard,
 )
 from app.localization.texts import Texts, get_texts
+from app.services.premium_traffic_service import premium_traffic_service
 from app.services.remnawave_service import RemnaWaveService
 from app.services.subscription_service import SubscriptionService
-from app.services.premium_traffic_service import premium_traffic_service
 from app.services.user_service import UserService
 from app.states import AdminStates
 from app.utils.decorators import admin_required, error_handler

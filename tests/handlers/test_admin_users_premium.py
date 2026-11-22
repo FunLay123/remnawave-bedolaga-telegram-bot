@@ -215,7 +215,6 @@ def test_summary_counts_unlimited():
 
 class TestUnlimitedCardKeyboard:
     async def test_keyboard_offers_revoke_when_unlimited(self, monkeypatch):
-        state = _bare_state(unlimited_at=NOW)
         subscription = _subscription()
         monkeypatch.setattr(users_mod, '_resolve_admin_subscription', AsyncMock(return_value=subscription))
         monkeypatch.setattr(users_mod, 'get_squad_display_names', AsyncMock(return_value={SQUAD: 'DE-1'}))
