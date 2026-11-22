@@ -286,6 +286,24 @@ class TestApply:
             state = await get_state(db, 1, SQUAD)
             assert state.extra_bytes == 0
 
+    async def test_apply_prefers_unlimited_over_topup_limit_after_the_quote(self, monkeypatch):
+        """Безлимит должен выигрывать у устаревшего потолка докупки."""
+        async with memory_session(monkeypatch, TABLES) as db:
+            subscription = _subscription()
+            state = await get_or_create_state(db, 1, SQUAD, limit_bytes=5 * BYTES_IN_GB, period_start_at=NOW)
+            await db.commit()
+            quote = await quote_premium_topup(db, subscription, SQUAD, 5)
+
+            state = await get_state(db, 1, SQUAD)
+            state.extra_bytes = 8 * BYTES_IN_GB
+            state.unlimited_at = NOW
+            await db.commit()
+
+            with pytest.raises(PremiumTopupError) as error:
+                await apply_premium_topup(db, subscription, quote, period_start_at=NOW)
+
+            assert error.value.code == 'squad_unlimited'
+
     async def test_second_purchase_adds_up(self, monkeypatch):
         async with memory_session(monkeypatch, TABLES) as db:
             subscription = _subscription()

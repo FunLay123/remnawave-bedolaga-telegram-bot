@@ -209,18 +209,16 @@ async def apply_premium_topup(
         period_start_at=period_start_at,
         for_update=True,
     )
+    # Сначала проверяем состояния, определяющие доступ: порядок CLOSED ->
+    # UNLIMITED обязан сохраняться даже если одновременно уже выбран потолок.
+    _ensure_squad_is_not_closed(state)
+    _ensure_squad_is_not_unlimited(state)
     # Проверка в quote читала строку без блокировки, и параллельная покупка
     # могла начислить своё уже после неё: обе увидели бы один остаток и обе
     # прошли. Решающая проверка — здесь, по заблокированной строке, в той же
     # транзакции, что и начисление. Тем же приёмом lock_user_for_pricing
     # защищает баланс.
     _ensure_topup_fits(quote.config, state.extra_bytes, quote.gb)
-    # То же самое для закрытия: quote проверяла closed_at без блокировки, и
-    # администратор мог закрыть сквад в промежутке между quote и apply (списание
-    # балансом ещё не значит, что начисление уже случилось). Перечитанное здесь
-    # состояние — то же самое, под FOR UPDATE, так что вторая проверка не лишняя.
-    _ensure_squad_is_not_closed(state)
-    _ensure_squad_is_not_unlimited(state)
 
     was_limited = bool(state.is_limited)
     add_extra_bytes(state, quote.bytes)

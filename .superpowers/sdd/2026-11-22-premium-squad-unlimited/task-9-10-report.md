@@ -51,3 +51,47 @@ Result: **200 passed** (45 existing warnings).
 Repository commit: `feat: refuse premium top-up for unlimited squads`
 
 The external changelog is outside the repository and is not included in the commit.
+
+## Round 1 fix
+
+### Task 9 ordering regression
+
+Added `TestApply.test_apply_prefers_unlimited_over_topup_limit_after_the_quote`.
+The test creates a quote, then makes the locked state simultaneously unlimited
+and over the top-up ceiling. Before the fix, `apply_premium_topup` checked
+`_ensure_topup_fits` first and returned `topup_limit_reached`.
+
+RED command:
+
+```text
+uv run pytest tests/services/test_premium_traffic_purchase.py::TestApply::test_apply_prefers_unlimited_over_topup_limit_after_the_quote -q
+```
+
+RED result: **1 failed**; expected `squad_unlimited`, received
+`topup_limit_reached`.
+
+Minimal fix: in the locked apply path, run `_ensure_squad_is_not_closed` and
+then `_ensure_squad_is_not_unlimited` immediately after loading the state, before
+`_ensure_topup_fits`. This preserves the binding `CLOSED -> UNLIMITED` precedence
+for stale quotes.
+
+GREEN command:
+
+```text
+uv run pytest tests/services/test_premium_traffic_purchase.py tests/handlers/test_premium_topup_flow.py -q
+```
+
+GREEN result: **60 passed, 16 warnings**.
+
+### Task 10 documentation corrections
+
+- Added the dedicated Russian section **«Безлимит на сквад»**.
+- Documented the complete classification order, including `ACTIVE` and the
+  `NO_LIMIT` precedence: `CLOSED -> UNLIMITED -> NO_LIMIT ->
+  EXHAUSTED/REOPENED_PENDING -> ACTIVE`.
+- Corrected proxy semantics: if any included premium squad is unlimited, the
+  entire `subscription-userinfo` result has `total=0`, while `download` remains
+  the actual aggregate usage across included squads.
+- No changes were made to the external changelog; the previously noted
+  docs-only-commit process item remains deferred because this fix also contains
+  the required production ordering change and regression test.
